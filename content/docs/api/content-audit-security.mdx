@@ -1,0 +1,457 @@
+---
+title: 内容审核与发布安全
+description: 梳理子比主题 API 内容审核、百度审核接入、投稿评论私信审核、图片审核、论坛审核与人工审核边界。
+---
+
+## 模块边界
+
+子比主题的内容审核不是一个独立发布系统，而是接在前台交互流程里的风险判断层。它会在用户上传图片、发布投稿、发表评论、发送私信、修改昵称签名、发布论坛帖子或创建论坛对象时调用审核接口；审核接口只负责判断内容风险，是否最终发布仍由主题的权限、人工审核、文章状态和论坛状态决定。
+
+开发时要先记住这条边界：API 审核通过不等于用户拥有发布权限，也不等于可以绕过人工审核。主题里常见的直通条件是“API 审核通过 + 当前用户拥有免人工审核能力”，否则内容仍按主题原流程进入待审或阻断。
+
+## 核心文件
+
+| 文件                                       | 作用                                                                      |
+| ------------------------------------------ | ------------------------------------------------------------------------- |
+| `inc/class/api-audit-class.php`            | `ZibAudit` 内容审核类，封装文本、图片、百度接口、token 缓存和审核结果转换 |
+| `inc/options/admin-options.php`            | API 内容审核后台配置、各业务开关、百度 App Key 与 Secret Key              |
+| `action/new_posts.php`                     | 前台投稿发布前的文字审核和待审状态判断                                    |
+| `action/comment.php`                       | 评论提交前的文字审核和 `pre_comment_approved` 处理                        |
+| `action/user.php`                          | 用户昵称、签名保存前的文字审核                                            |
+| `inc/functions/zib-attachment.php`         | 图片上传进入 attachment 前的图片审核                                      |
+| `inc/functions/message/functions/ajax.php` | 私信发送前的文字审核                                                      |
+| `inc/functions/bbs/action/ajax-posts.php`  | 论坛帖子发布前的文字审核和待审状态判断                                    |
+| `inc/functions/bbs/action/ajax-plate.php`  | 论坛版块图像与文本审核                                                    |
+| `inc/functions/bbs/action/ajax-term.php`   | 论坛话题、标签、分类图像与文本审核                                        |
+
+## 后台配置
+
+API 内容审核配置位于主题后台的系统工具分组内。核心选项如下：
+
+| 配置项                     | 含义                                           |
+| -------------------------- | ---------------------------------------------- |
+| `api_audit_text_sdk`       | 文本审核接口，当前主题源码支持 `baidu` 或关闭  |
+| `api_audit_img_sdk`        | 图像审核接口，当前主题源码支持 `baidu` 或关闭  |
+| `audit_be_like_text`       | 文本“疑似”结果的处理策略                       |
+| `audit_be_like_img`        | 图片“疑似”结果的处理策略                       |
+| `audit_upload_img`         | 用户上传图片是否进入图片审核                   |
+| `audit_user_desc`          | 用户昵称和签名是否进入文本审核                 |
+| `audit_msg_private`        | 私信内容是否进入文本审核                       |
+| `audit_comment`            | 评论内容是否进入文本审核                       |
+| `audit_new_post`           | 前台投稿是否进入文本审核                       |
+| `audit_bbs_posts`          | 论坛发帖是否进入文本审核                       |
+| `audit_bbs_plate`          | 论坛版块标题和简介是否进入文本审核             |
+| `audit_bbs_term`           | 论坛话题、标签、分类标题和简介是否进入文本审核 |
+| `audit_sdk_baidu`          | 百度审核接口配置，包含 `appkey` 和 `secretkey` |
+| `audit_baidu_access_token` | 本地缓存的百度 `access_token` 和过期时间       |
+
+这些开关只决定是否调用审核接口，不替代原本的登录态、nonce、能力、长度、分类、上传大小和文件类型校验。
+
+## ZibAudit 类
+
+常用入口：
+
+| 方法                                                                         | 用途                                                                            |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `ZibAudit::ajax_text($content, $msg_prefix = '', $be_like = null)`           | Ajax 流程中审核文本，明确不合规时直接输出 JSON 并 `exit()`                      |
+| `ZibAudit::ajax_image($file_id = 'file', $msg_prefix = '', $be_like = null)` | Ajax 流程中审核 `$_FILES[$file_id]` 图片，明确不合规时直接输出 JSON 并 `exit()` |
+| `ZibAudit::text($content, $sdk = '')`                                        | 只请求文本审核并返回结果，不直接中断 Ajax                                       |
+| `ZibAudit::image($content, $sdk = '')`                                       | 只请求图片审核并返回结果，不直接中断 Ajax                                       |
+| `ZibAudit::request($content, $type = 'text', $sdk = null)`                   | 按文本或图片类型选择审核 SDK                                                    |
+| `ZibAudit::is_audit($return, $type = 'text')`                                | 将审核返回值转换成是否可直通的布尔判断                                          |
+| `ZibAudit::baidu($content, $type)`                                           | 调用百度文本或图片审核接口                                                      |
+| `ZibAudit::baidu_get_token()`                                                | 获取并缓存百度 `access_token`                                                   |
+
+`ajax_text()` 和 `ajax_image()` 适合前台 Ajax 保存流程，因为它们能在不合规时立即返回统一错误。`text()` 和 `image()` 适合后台测试、日志或需要自己决定后续状态的场景。
+
+## 百度接口链路
+
+百度配置来自：
+
+```php
+$cofig = _pz('audit_sdk_baidu');
+```
+
+主题使用 `appkey` 和 `secretkey` 请求：
+
+```txt
+https://aip.baidubce.com/oauth/2.0/token
+```
+
+成功后缓存到：
+
+```php
+update_option('audit_baidu_access_token', $res);
+```
+
+文本审核接口：
+
+```txt
+https://aip.baidubce.com/rest/2.0/solution/v1/text_censor/v2/user_defined
+```
+
+图片审核接口：
+
+```txt
+https://aip.baidubce.com/rest/2.0/solution/v1/img_censor/v2/user_defined
+```
+
+图片内容可以是 URL，也可以是本地上传文件。对本地文件，主题会读取文件内容并转成 base64：
+
+```php
+ZibAudit::image_base64($content);
+```
+
+前台上传场景通常传的是 `$_FILES[$file_id]['tmp_name']`，不要把用户可控文件名或未校验 URL 当作可信审核对象。
+
+## 审核结果
+
+`ZibAudit::_return()` 会把接口返回整理成统一结构：
+
+```php
+array(
+    'conclusion'      => $conclusion,
+    'conclusion_type' => $conclusionType,
+    'msg'             => $msg,
+    'data'            => $data,
+)
+```
+
+百度常见结论类型：
+
+| `conclusion_type` | 含义     | 处理建议                                               |
+| ----------------- | -------- | ------------------------------------------------------ |
+| `1`               | 合规     | 可以继续进入主题后续权限和发布状态判断                 |
+| `2`               | 不合规   | 阻断保存或进入人工处理，不要自动发布                   |
+| `3`               | 疑似     | 按站点配置和当前版本源码处理，保守场景建议进入人工审核 |
+| `4`               | 审核失败 | 不应当自动发布，优先提示重试或进入人工审核             |
+
+扩展开发时不要自己硬编码“接口返回成功就发布”。如果处于主题现有流程，优先使用 `ZibAudit::ajax_text()`、`ZibAudit::ajax_image()` 和 `ZibAudit::is_audit()`，并保留后续的用户能力判断。
+
+## 前台投稿审核
+
+前台投稿在 `action/new_posts.php` 中处理。主题先做标题、内容、分类、发布权限等校验，再进入内容合规判断：
+
+```php
+$is_audit = false;
+if (zib_current_user_can('new_post_audit_no')) {
+    $is_audit = true;
+} else {
+    if (_pz('audit_new_post')) {
+        $api_is_audit = ZibAudit::is_audit(ZibAudit::ajax_text($title . $content));
+        if ($api_is_audit && zib_current_user_can('new_post_audit_no_manual')) {
+            $is_audit = true;
+        }
+    }
+}
+```
+
+关键点：
+
+- `new_post_audit_no` 表示用户拥有免审核权限，可以直接通过主题审核层。
+- `audit_new_post` 只决定是否调用 API 文本审核。
+- API 审核通过后，还要拥有 `new_post_audit_no_manual`，才会免人工审核。
+- 不满足直通条件时，文章仍应按主题原流程进入 `pending` 或对应待审状态。
+
+新增投稿相关字段时，只在主题保存流程前后追加自己的校验和 Meta，不要单独创建一个绕过 `zib_ajax_new_posts()` 的发布入口。
+
+## 评论审核
+
+评论在 `action/comment.php` 中处理。主题会先检查评论内容长度，再判断当前用户是否免审、是否为快速回复、是否需要 API 审核：
+
+```php
+if (zib_current_user_can('comment_audit_no', (!empty($_POST['comment_post_ID']) ? $_POST['comment_post_ID'] : 0))) {
+    $is_audit = true;
+} else {
+    if (in_array(trim($_POST['comment']), zib_get_quick_often_items())) {
+        $is_audit = true;
+    }
+
+    if (!$is_audit && _pz('audit_comment')) {
+        $api_is_audit = ZibAudit::is_audit(ZibAudit::ajax_text(zib_comment_filters($_POST['comment'])));
+        if ($api_is_audit && zib_current_user_can('comment_audit_no_manual')) {
+            $is_audit = true;
+        }
+    }
+}
+```
+
+审核直通后，主题通过 `pre_comment_approved` 将评论设为已审核：
+
+```php
+add_filter('pre_comment_approved', function () {
+    return 1;
+});
+```
+
+扩展评论时要保留 `comment_audit_no`、`comment_audit_no_manual`、快速回复、评论频率和 WordPress 原生评论审核机制，不要只看 API 结果。
+
+### 快捷回复与审核白名单
+
+评论快捷回复有“系统”和“我的”两种来源，但审核白名单只读取系统快捷回复。`zib_get_quick_often_items()` 会按开关合并：
+
+| 开关                  | 字段                      | 场景                     |
+| --------------------- | ------------------------- | ------------------------ |
+| `bbs_comment_quick_s` | `bbs_comment_quick_often` | 论坛评论常用快捷回复     |
+| `comment_quick_s`     | `comment_quick_often`     | 普通文章评论常用快捷回复 |
+
+用户自己的快捷回复保存在 user meta `quick_often`，由 `user_edit_quick_often` 和 `save_user_quick_often` 管理，只用于输入框里“我的”Tab 快速填充，不会被 `zib_get_quick_often_items()` 读取。因此扩展评论审核时，不要把个人快捷回复当成可信白名单。
+
+如果确实要新增一组可免审核的系统短语，应保持“完全匹配后才免审核”的语义，并继续保留评论长度、人机验证、频率限制和 WordPress 原生审核机制。主题源码当前没有给 `zib_get_quick_often_items()` 预留过滤器；二开时不要直接把用户提交的 `quick_often` 写进系统配置。
+
+## 用户资料与私信审核
+
+用户资料保存会对昵称和签名进行审核：
+
+```php
+if (_pz('audit_user_desc')) {
+    ZibAudit::ajax_text($_POST['desc'] . $_POST['name'], __('昵称或签名', 'zib_language'));
+}
+```
+
+私信发送会在黑名单判断之后、消息入库之前审核文本：
+
+```php
+if (_pz('audit_msg_private')) {
+    ZibAudit::ajax_text(Zib_Private::get_content($_POST['receive'], 'mini'));
+}
+```
+
+这些入口适合阻断明显违规内容，不适合承担身份权限。保存用户资料仍要继续校验当前用户、字段长度、URL 格式和绑定关系；发送私信仍要继续校验发送者、接收者、黑名单、消息频率和会话状态。
+
+## 图片上传审核
+
+图片审核集中接在 `zib_php_upload()` 里：
+
+```php
+if ('auto' == $ajax_audit) {
+    $ajax_audit = _pz('audit_upload_img', false);
+}
+
+if ($ajax_audit && stristr($_FILES[$file]['type'], 'image')) {
+    ZibAudit::ajax_image($file, $msg_prefix);
+}
+```
+
+多图上传时，主题还会逐个检查 `file_1`、`file_2` 等后续文件。审核通过后才进入：
+
+```php
+media_handle_upload($file, $post_id, [], $overrides);
+```
+
+所以自定义上传入口应优先复用 `zib_php_upload()`。如果必须自己处理上传，也要在写入 attachment 前调用 `ZibAudit::ajax_image()`，并继续保留 MIME、大小、登录态、nonce、媒体库隔离和附件归属逻辑。更多上传边界见 [媒体上传](/docs/api/media-upload)。
+
+## 论坛审核
+
+论坛帖子发布在 `inc/functions/bbs/action/ajax-posts.php` 中判断：
+
+```php
+if (zib_bbs_current_user_can('posts_save_audit_no') || ($post_id && zib_bbs_current_user_can('posts_audit', $post_id)) || ($plate && zib_bbs_current_user_can('posts_audit', $plate))) {
+    $is_audit = true;
+} else {
+    if (_pz('audit_bbs_posts')) {
+        $api_is_audit = ZibAudit::is_audit(ZibAudit::ajax_text($post_title . $post_content));
+        if ($api_is_audit && zib_bbs_current_user_can('posts_save_audit_no_manual')) {
+            $is_audit = true;
+        }
+    }
+}
+```
+
+论坛对象还有两类审核入口：
+
+| 场景                       | 审核点                                                            |
+| -------------------------- | ----------------------------------------------------------------- |
+| 创建或编辑版块             | `audit_upload_img` 审核版块图像，`audit_bbs_plate` 审核标题和简介 |
+| 创建或编辑话题、标签、分类 | `audit_upload_img` 审核图像，`audit_bbs_term` 审核标题和简介      |
+
+论坛扩展要同时考虑版块权限、版主权限、帖子审核权限、用户发帖能力和对象状态。API 审核只是在保存前增加一道风险检查，不能替代 `zib_bbs_current_user_can()`。
+
+### 论坛帖子待审核排查
+
+论坛发布链路里，“API 审核通过”和“直接发布”不是一回事。`bbs_posts_save` 先把状态设为 `pending`，只有用户具备免审能力，或者启用论坛内容审核且 API 通过后用户还具备免人工审核能力，才会改成 `publish`。`bbs_posts_draft` 则固定走草稿保存，不进入发布审核判断。
+
+| 条件组合                                                        | 最终状态                         | 排查重点                                                 |
+| --------------------------------------------------------------- | -------------------------------- | -------------------------------------------------------- |
+| 没有 `posts_save_audit_no`，也没有 `posts_save_audit_no_manual` | `pending`                        | 普通用户即使内容合规，也仍要人工审核                     |
+| `audit_bbs_posts` 关闭，且用户没有免审能力                      | `pending`                        | 关闭 API 审核不会自动放行普通用户                        |
+| API 审核通过，但用户没有 `posts_save_audit_no_manual`           | `pending`                        | 免人工审核能力需要单独在论坛角色权限里开启               |
+| 用户有 `posts_save_audit_no`                                    | `publish` 或提交的 `post_status` | 该能力代表发布帖子无需审核直接发布                       |
+| 用户有当前帖子或版块的 `posts_audit`                            | `publish` 或提交的 `post_status` | 管理员、版主、版块作者等可按权限审核自己管理范围内的帖子 |
+| 请求动作为 `bbs_posts_draft`                                    | `draft`                          | 保存草稿只检查标题等基础条件，不代表发帖已经提交审核     |
+
+待审核内容的可见入口也分角色：
+
+| 角色                     | 入口                                                                                |
+| ------------------------ | ----------------------------------------------------------------------------------- |
+| 作者本人                 | 提交成功后跳到用户主页 `?tab=forum&status=pending`                                  |
+| 管理员或有审核权限的版主 | 论坛首页待审核 Tab、版块页待审核 Tab、帖子上的 `posts_audit_modal` 审核按钮         |
+| 版块作者或分类版主       | 只有在 `zib_bbs_user_can(..., 'posts_audit', $post)` 通过时才会收到待审核消息和邮件 |
+
+常见现象可以按返回文案反推分支：
+
+| 现象或提示                                 | 对应分支                                        | 处理方向                                                                         |
+| ------------------------------------------ | ----------------------------------------------- | -------------------------------------------------------------------------------- |
+| `内容已提交，正在等待审核`                 | `bbs_posts_save` 保存成功，但状态仍是 `pending` | 检查角色是否应开启 `bbs_posts_save_audit_no` 或 `bbs_posts_save_audit_no_manual` |
+| `暂无发布权限`                             | 新帖没有 `posts_add` 能力                       | 查论坛角色权限、用户组、禁封状态和发帖限制                                       |
+| `您暂无在此版块发布的权限，请重新选择版块` | `select_plate` 未通过                           | 查版块权限、付费圈子、阅读/发布限制和当前 `plate` 参数                           |
+| API 审核返回阻断错误                       | `ZibAudit::ajax_text()` 已终止 Ajax             | 查 `audit_bbs_posts`、百度审核配置、接口可用性和普通用户测试账号                 |
+| 审核通过后前台列表不显示                   | 保存状态已变 `publish`，但列表查询或缓存未刷新  | 查列表是否只查特定 Tab、推荐指数/排序缓存、对象缓存和 CDN 缓存                   |
+
+二开记录日志时优先挂保存后的 `bbs_add_posts`、`bbs_edit_posts`，或在入库前用 `zib_pre_insert_post` 轻量读取 `$insert_args`。不要替换 `bbs_posts_save` Ajax，也不要把审核命中词、第三方接口原始响应、access token 或用户隐私写到前台可见日志。
+
+## 跨入口审核矩阵
+
+同一个 `ZibAudit` 会被多个业务入口调用，但每个入口后面的“最终状态”并不一样：
+
+| 入口                   | 审核对象             | 阻断点                                             | 审核通过后的下一层判断                                              |
+| ---------------------- | -------------------- | -------------------------------------------------- | ------------------------------------------------------------------- |
+| 前台投稿               | 标题 + 正文          | `audit_new_post` 开启时调用 `ajax_text()`          | 还要有 `new_post_audit_no_manual` 才能免人工审核                    |
+| 普通评论               | 过滤后的评论内容     | `audit_comment` 开启且不在系统快捷回复白名单时调用 | 通过后用 `pre_comment_approved` 放行，否则继续走 WordPress 评论审核 |
+| 用户资料               | 昵称 + 签名          | `audit_user_desc` 开启时调用                       | 仍要校验当前用户、长度、URL 和字段格式                              |
+| 私信                   | 入库前的消息内容     | `audit_msg_private` 开启时调用                     | 仍要校验黑名单、接收者、频率和会话状态                              |
+| 图片上传               | `$_FILES` 临时文件   | `audit_upload_img` 开启且 MIME 是 image 时调用     | 通过后才进入 `media_handle_upload()`，仍受大小、类型和归属约束      |
+| 论坛帖子               | 标题 + 正文          | `audit_bbs_posts` 开启时调用                       | 还要有 `posts_save_audit_no_manual` 或审核权限才直接发布            |
+| 论坛版块               | 图像、标题、简介     | `audit_upload_img`、`audit_bbs_plate`              | 版块状态仍由保存流程和权限控制                                      |
+| 论坛话题 / 标签 / 分类 | 图像、标题、简介     | `audit_upload_img`、`audit_bbs_term`               | taxonomy 保存仍要走对应权限和名称校验                               |
+| AI 生成内容            | 主题没有统一自动接管 | 应在写入投稿、评论、私信或论坛保存前复用对应入口   | AI 结果通过审核也不代表可直接发布                                   |
+
+新增入口时先问三个问题：是否有登录态和 nonce，是否复用主题原保存函数，是否需要“审核通过但仍待人工审核”。只有答案都明确后，才把 `ZibAudit::ajax_text()` 或 `ZibAudit::ajax_image()` 放进保存流程。
+
+### 疑似结果核对点
+
+当前源码里 `ajax_text()` / `ajax_image()` 会明确阻断 `conclusion_type = 2` 的“不合规”结果；“疑似”是否阻断要按调用参数和当前版本源码核对，不能只看后台字段名下结论。需要严格处理疑似内容时，建议二开层显式拿 `ZibAudit::text()` / `ZibAudit::image()` 的返回值，再按站点策略决定阻断、待审或人工复核。
+
+同时注意 `ZibAudit::ajax()` 对管理员有绕过逻辑，测试审核是否生效时要使用普通用户账号。不要用管理员测试结果判断普通用户发布链路。
+
+## 新增 Ajax 审核示例
+
+下面示例用于新增一个前台内容保存入口。它保留登录态、nonce、字段清洗、API 审核和统一 JSON 响应：
+
+```php
+function zib_docs_save_profile_note()
+{
+    if (!is_user_logged_in()) {
+        zib_send_json_error(__('请先登录', 'zib_language'));
+    }
+
+    zib_ajax_verify_nonce();
+
+    $user_id = get_current_user_id();
+    $note    = !empty($_POST['note']) ? wp_kses_post(wp_unslash($_POST['note'])) : '';
+
+    if (zib_new_strlen($note) < 2) {
+        zib_send_json_error(__('内容过短', 'zib_language'));
+    }
+
+    if (_pz('api_audit_text_sdk')) {
+        ZibAudit::ajax_text($note, __('补充资料', 'zib_language'));
+    }
+
+    zib_update_user_meta($user_id, 'profile_note', $note);
+
+    zib_send_json_success(array(
+        'msg'  => __('保存成功', 'zib_language'),
+        'note' => $note,
+    ));
+}
+add_action('wp_ajax_docs_save_profile_note', 'zib_docs_save_profile_note');
+```
+
+如果业务不是“失败即阻断”，而是“失败进入待审”，可以只拿审核结果，再决定状态：
+
+```php
+function zib_docs_insert_pending_item($title, $content)
+{
+    $is_audit = false;
+
+    if (_pz('audit_new_post')) {
+        $audit_result = ZibAudit::ajax_text($title . $content, __('内容', 'zib_language'));
+        $is_audit     = ZibAudit::is_audit($audit_result);
+    }
+
+    $status = $is_audit && zib_current_user_can('new_post_audit_no_manual') ? 'publish' : 'pending';
+
+    return wp_insert_post(array(
+        'post_type'    => 'post',
+        'post_title'   => wp_strip_all_tags($title),
+        'post_content' => wp_kses_post($content),
+        'post_status'  => $status,
+    ), true);
+}
+```
+
+注意这里仍然检查 `new_post_audit_no_manual`。不要因为 API 审核返回合规就直接给所有用户发布权限。
+
+## 图片审核示例
+
+新增图片上传入口时，继续复用主题上传封装：
+
+```php
+function zib_docs_upload_checked_image()
+{
+    if (!is_user_logged_in()) {
+        zib_send_json_error(__('请先登录', 'zib_language'));
+    }
+
+    zib_ajax_verify_nonce('user_upload');
+
+    if (empty($_FILES['file']) || !stristr($_FILES['file']['type'], 'image')) {
+        zib_send_json_error(__('请选择图片文件', 'zib_language'));
+    }
+
+    $attach_id = zib_php_upload('file', 0, 'auto', __('图片', 'zib_language'));
+    if (!empty($attach_id['error'])) {
+        zib_send_json_error($attach_id['msg']);
+    }
+
+    zib_send_json_success(zib_prepare_attachment_for_js($attach_id));
+}
+add_action('wp_ajax_docs_upload_checked_image', 'zib_docs_upload_checked_image');
+```
+
+`'auto'` 会读取 `audit_upload_img`，保持和主题后台配置一致。业务需要强制审核时可以传 `true`，但不要绕过 `zib_php_upload()` 里的媒体处理。
+
+## 人工审核与通知
+
+内容审核通常和人工审核、通知、日志一起使用：
+
+| 场景         | 可用节点                              |
+| ------------ | ------------------------------------- |
+| 投稿进入待审 | `new_posts_pending`                   |
+| 投稿新增成功 | `new_add_posts`                       |
+| 投稿编辑成功 | `new_edit_posts`                      |
+| 评论进入待审 | WordPress 评论状态和后台评论审核      |
+| 论坛帖子审核 | `posts_audit`、版主权限和论坛审核弹窗 |
+| 论坛版块审核 | `plate_audit`、版块管理权限           |
+
+如果要记录审核日志，可以挂保存后的 Action，并只保存必要结论，不要把第三方接口原始响应、命中词、密钥、服务器路径或用户隐私写进前端可见位置。
+
+## 常见风险
+
+| 风险                    | 说明                                                           |
+| ----------------------- | -------------------------------------------------------------- |
+| 把 API 审核当权限系统   | 审核接口只判断内容风险，不判断用户能否发布、编辑或上传         |
+| API 合规后直接发布      | 主题原逻辑还需要免人工审核能力，否则应进入待审                 |
+| 绕过 `zib_php_upload()` | 会丢失图片审核、MIME、大小、attachment 和媒体库隔离            |
+| 只审核标题不审核正文    | 投稿、帖子、版块、话题通常要拼接标题和正文一起审核             |
+| 不处理审核失败          | 第三方接口超时或失败时不应默认发布                             |
+| 暴露接口原文            | 审核命中词、access token、错误响应不应直接给普通用户或前端页面 |
+| 缓存动态接口            | 投稿、评论、私信、上传 Ajax 不能被 CDN 或页面缓存缓存          |
+| 忽略管理员绕过          | `ZibAudit` 对管理员操作有特殊处理，测试时要用普通用户验证      |
+
+## 调试入口
+
+| 现象                | 优先检查                                                                    |
+| ------------------- | --------------------------------------------------------------------------- |
+| 审核完全不触发      | 对应业务开关、`api_audit_text_sdk`、`api_audit_img_sdk`、当前用户是否管理员 |
+| 百度提示配置缺失    | `audit_sdk_baidu.appkey`、`audit_sdk_baidu.secretkey`                       |
+| 百度 token 获取失败 | 服务器网络、接口返回、`audit_baidu_access_token` 缓存                       |
+| 投稿仍进入待审      | 是否拥有 `new_post_audit_no_manual`，是否满足主题发布能力                   |
+| 评论仍待审          | `comment_audit_no_manual`、WordPress 评论设置、评论频率限制                 |
+| 图片上传变慢        | `audit_upload_img`、第三方接口耗时、服务器到接口网络                        |
+| 前端没有错误提示    | `ajax_text()` / `ajax_image()` 只有明确不合规时才会输出阻断错误             |
+
+## 参考源码
+
+本页根据 `inc/class/api-audit-class.php`、`inc/options/admin-options.php`、`action/new_posts.php`、`action/comment.php`、`action/user.php`、`inc/functions/zib-attachment.php`、`inc/functions/message/functions/ajax.php`、`inc/functions/bbs/action/ajax-posts.php`、`inc/functions/bbs/action/ajax-plate.php`、`inc/functions/bbs/action/ajax-term.php` 蒸馏整理。

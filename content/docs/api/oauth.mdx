@@ -1,0 +1,576 @@
+---
+title: 社交登录
+description: 理解子比主题 OAuth 路由、第三方登录回调、账号绑定、新用户创建、代理登录和用户资料同步。
+---
+
+## 模块入口
+
+社交登录核心文件是 `oauth/oauth.php`。各平台登录和回调分布在 `oauth/{provider}` 目录，SDK 分布在 `oauth/sdk`。
+
+常见平台目录：
+
+| 目录              | 说明                           |
+| ----------------- | ------------------------------ |
+| `oauth/qq`        | QQ 登录                        |
+| `oauth/weixin`    | 微信开放平台登录               |
+| `oauth/weixingzh` | 微信公众号扫码、关注和认证模式 |
+| `oauth/github`    | GitHub 登录                    |
+| `oauth/google`    | Google 登录                    |
+| `oauth/facebook`  | Facebook 登录                  |
+| `oauth/twitter`   | Twitter 登录                   |
+| `oauth/microsoft` | Microsoft 登录                 |
+| `oauth/apple`     | Apple 登录                     |
+| `oauth/alipay`    | 支付宝登录                     |
+| `oauth/baidu`     | 百度登录                       |
+| `oauth/clogin`    | 聚合登录                       |
+| `oauth/agent`     | 代理登录客户端/服务端          |
+
+社交登录最终仍然落到 WordPress 用户系统。第三方身份只负责证明用户是谁，本站账号、登录态、资料、权限仍由 `wp_users`、user meta 和 WordPress cookie 承载。
+
+## 配置读取
+
+平台配置统一通过 `get_oauth_config()` 读取：
+
+```php
+function get_oauth_config($type = 'qq')
+{
+    $defaults = array(
+        'appid'         => '',
+        'appkey'        => '',
+        'backurl'       => (home_url('/oauth/' . $type . '/callback')),
+        'agent'         => false,
+        'appkrivatekey' => '',
+        'auto_reply'    => array(),
+    );
+    return wp_parse_args((array) _pz('oauth_' . $type . '_option'), $defaults);
+}
+```
+
+配置保存于 `zibll_options`，字段形态通常是 `oauth_{type}_option`。读取时不要散读 `get_option('zibll_options')`。
+
+## 后台开关与平台矩阵
+
+后台社交登录配置在用户互动相关设置里。每个平台通常有两个字段：
+
+| 字段                  | 作用                                                 |
+| --------------------- | ---------------------------------------------------- |
+| `oauth_{type}_s`      | 是否启用该平台                                       |
+| `oauth_{type}_option` | 保存 AppID、密钥、回调地址、代理登录、平台私钥等参数 |
+
+内置平台以路由白名单、按钮资料和后台字段三处共同决定。只改其中一处通常不够：
+
+| 平台         | 开关                | 配置                     | 目录              |
+| ------------ | ------------------- | ------------------------ | ----------------- |
+| QQ           | `oauth_qq_s`        | `oauth_qq_option`        | `oauth/qq`        |
+| 微信开放平台 | `oauth_weixin_s`    | `oauth_weixin_option`    | `oauth/weixin`    |
+| 微信公众号   | `oauth_weixingzh_s` | `oauth_weixingzh_option` | `oauth/weixingzh` |
+| 微博         | `oauth_weibo_s`     | `oauth_weibo_option`     | `oauth/weibo`     |
+| Gitee        | `oauth_gitee_s`     | `oauth_gitee_option`     | `oauth/gitee`     |
+| 百度         | `oauth_baidu_s`     | `oauth_baidu_option`     | `oauth/baidu`     |
+| 支付宝       | `oauth_alipay_s`    | `oauth_alipay_option`    | `oauth/alipay`    |
+| GitHub       | `oauth_github_s`    | `oauth_github_option`    | `oauth/github`    |
+| Google       | `oauth_google_s`    | `oauth_google_option`    | `oauth/google`    |
+| Facebook     | `oauth_facebook_s`  | `oauth_facebook_option`  | `oauth/facebook`  |
+| Microsoft    | `oauth_microsoft_s` | `oauth_microsoft_option` | `oauth/microsoft` |
+| Twitter      | `oauth_twitter_s`   | `oauth_twitter_option`   | `oauth/twitter`   |
+| Apple        | `oauth_apple_s`     | `oauth_apple_option`     | `oauth/apple`     |
+
+代理登录另有全局开关和配置：
+
+| 字段                        | 说明                                 |
+| --------------------------- | ------------------------------------ |
+| `oauth_agent`               | `close`、`server`、`client` 三种状态 |
+| `oauth_agent_server_option` | 站点作为代理服务端时使用             |
+| `oauth_agent_client_option` | 站点作为代理客户端时使用             |
+| `clogin_s`、`clogin_option` | 彩虹聚合登录接入                     |
+
+`zib_get_social_type_data()` 是按钮资料表，包含平台名、类型、图标、昵称字段等；`zib_oauth_page_template()` 的白名单决定 `/oauth/{type}` 是否能进入对应模板。新增平台时要同步按钮资料、路由白名单、后台字段和 `oauth/{type}` 模板。
+
+## 路由机制
+
+OAuth 页面不是普通 WordPress 页面。主题通过 rewrite 和 query var 把下面两类地址映射到平台文件：
+
+```txt
+/oauth/{provider}
+/oauth/{provider}/callback
+```
+
+源码链路：
+
+```php
+add_action('generate_rewrite_rules', 'zib_oauth_page_rewrite_rules');
+add_filter('query_vars', 'zib_add_oauth_page_query_vars');
+add_action('template_redirect', 'zib_oauth_page_template', 5);
+```
+
+`zib_oauth_page_template()` 会检查 provider 是否在允许列表内，再加载：
+
+```php
+$template_file = $oauth_callback ? '/oauth/' . $oauth . '/callback.php' : '/oauth/' . $oauth . '/login.php';
+load_template(get_theme_file_path($template_file));
+```
+
+新增平台时要同时考虑：
+
+1. 新增 `oauth/{provider}/login.php`。
+2. 新增 `oauth/{provider}/callback.php`。
+3. 在允许 provider 列表中加入平台名。
+4. 后台配置字段使用 `oauth_{provider}_option`。
+5. 回调数据最终传给 `zib_oauth_update_user()`。
+
+## 登录流程
+
+典型流程：
+
+1. 用户点击第三方登录入口。
+2. 进入 `/oauth/{provider}`。
+3. `login.php` 读取 `get_oauth_config($provider)`，保存 `oauth_rurl`，跳转第三方授权页。
+4. 第三方回调 `/oauth/{provider}/callback`。
+5. `callback.php` 校验 state、签名或平台返回状态。
+6. 读取 `openid`、昵称、头像、描述和原始 `getUserInfo`。
+7. 组装 `$oauth_data`。
+8. 如果启用代理服务，先走 `zib_agent_callback($oauth_data)`。
+9. 调用 `zib_oauth_update_user($oauth_data)`。
+10. 根据结果跳转用户中心、绑定页或错误页。
+
+统一数据结构：
+
+```php
+$oauth_data = array(
+    'type'        => 'github',
+    'openid'      => $openid,
+    'name'        => $name,
+    'avatar'      => $avatar,
+    'description' => $description,
+    'getUserInfo' => $user_info,
+);
+```
+
+## 用户绑定逻辑
+
+核心函数是：
+
+```php
+function zib_oauth_update_user($args)
+```
+
+它会按当前状态分支处理：
+
+| 状态                                 | 行为                                             |
+| ------------------------------------ | ------------------------------------------------ |
+| 当前已登录，且 openid 已绑定其他用户 | 返回绑定失败                                     |
+| openid 已绑定某个用户，当前未登录    | 设置当前用户、写登录 cookie、触发 `wp_login`     |
+| 当前已登录，openid 未占用            | 绑定到当前用户，只更新绑定信息，不覆盖昵称和简介 |
+| 全新第三方账号，配置要求跳转绑定页   | 保存到 session，跳转 `zib_get_sign_url('oauth')` |
+| 全新第三方账号，允许自动创建         | 创建 WordPress 用户，绑定第三方信息并登录        |
+
+绑定冲突的判断只看同一平台的 `oauth_{type}_openid` 是否已经属于另一个用户：
+
+```php
+$openid_meta_key = 'oauth_' . $args['type'] . '_openid';
+$user_exist = $wpdb->get_var($wpdb->prepare(
+    "SELECT user_id FROM $wpdb->usermeta WHERE meta_key=%s AND meta_value=%s",
+    $openid_meta_key,
+    $openid
+));
+
+if ($current_user_id && isset($user_exist) && $current_user_id != $user_exist) {
+    $type_name = zib_get_social_type_name($args['type']);
+    $return_data['msg'] = sprintf(__('绑定失败，您当前的%s已绑定过其他账号。您可以退出当前账号后，再次使用%s直接登录，进入用户中心即可查看绑定信息或做解绑！', 'zib_language'), $type_name, $type_name);
+    return $return_data;
+}
+```
+
+这条规则保护的是“一个第三方身份只能绑定一个站内用户”。二开合并账号时，不要直接把新 openid 写到当前用户；应该先让用户登录原绑定账号解绑，或者由管理员做明确的账号合并迁移。否则第三方回调登录时会不知道应该登录哪个 WordPress 用户。
+
+源码中登录分支会触发：
+
+```php
+wp_set_current_user($user_exist);
+wp_set_auth_cookie($user_exist, true);
+do_action('wp_login', $user->user_login, $user);
+```
+
+所以扩展登录后行为时，优先监听 WordPress 的 `wp_login` 或主题用户相关 Hook，而不是改每个平台的 callback。
+
+## 绑定页逻辑
+
+当 `zib_oauth_new_is_to_page()` 返回 `true` 时，主题会把第三方资料暂存到 session：
+
+```php
+$_SESSION['zib_user_oauth_data'] = $args;
+```
+
+判断条件：
+
+```php
+$oauth_bind_type = _pz('oauth_bind_type');
+if ($oauth_bind_type === 'page') {
+    return true;
+}
+
+$user_invit_code = _pz('invit_code_s', 'close');
+if ($user_invit_code && $user_invit_code !== 'close') {
+    return true;
+}
+```
+
+绑定页会用 `zib_get_oauth_bind_tab()` 输出“绑定已有账号 / 创建新账号”两个 Tab。登录或注册成功后，`zib_ajax_oauth_bind($user_id)` 读取 session 并绑定到新用户或当前用户。
+
+`zib_ajax_oauth_bind()` 只在登录、注册 Ajax 中检测 `oauth_bind` 隐藏字段时执行。它会先确认 session 里还有第三方资料，再确认目标用户没有绑定过同平台账号：
+
+```php
+function zib_ajax_oauth_bind($user_id)
+{
+    if (!empty($_REQUEST['oauth_bind'])) {
+        @session_start();
+        if (empty($_SESSION['zib_user_oauth_data']['openid'])) {
+            wp_logout();
+            zib_send_json_error(__('异常错误，请重试', 'zib_language'));
+        }
+
+        $oauth_data = $_SESSION['zib_user_oauth_data'];
+        if (zib_get_user_oauth_openid($oauth_data['type'], $user_id)) {
+            wp_logout();
+            zib_send_json_error(sprintf(__('该账号已绑定过%s账号', 'zib_language'), $type_name));
+        }
+    }
+}
+```
+
+绑定成功后会清空 `$_SESSION['zib_user_oauth_data']`。如果用户在绑定页停留太久、换浏览器、关闭 session 或被缓存插件缓存了登录注册页，后续登录可能会返回“异常错误，请重试”。排查时看 Network 里的登录或注册请求是否带 `oauth_bind`，再看 PHP session 是否还能读到 `zib_user_oauth_data`。
+
+## 用户 Meta 保存
+
+第三方绑定信息由 `zib_oauth_update_user_meta()` 保存：
+
+```php
+update_user_meta($args['user_id'], 'oauth_' . $args['type'] . '_openid', $args['openid']);
+zib_update_user_meta($args['user_id'], 'oauth_' . $args['type'] . '_getUserInfo', $getUserInfo);
+```
+
+注意这里有两类保存：
+
+| 数据                       | 保存函数                 | 说明                               |
+| -------------------------- | ------------------------ | ---------------------------------- |
+| `oauth_{type}_openid`      | `update_user_meta()`     | 用于按 openid 查询绑定用户         |
+| `oauth_{type}_getUserInfo` | `zib_update_user_meta()` | 属于子比聚合 user meta，走主题封装 |
+
+如果用户没有自定义头像，OAuth 头像会写入：
+
+```php
+zib_update_user_meta($user_id, 'custom_avatar', $args['avatar']);
+```
+
+如果用户没有简介，OAuth 描述会写入：
+
+```php
+update_user_meta($user_id, 'description', $args['description']);
+```
+
+新建用户时还会更新 `display_name` 和 `nickname`，并用 `zib_is_username_judgment()` 校验昵称是否合法。
+
+## 判断绑定状态
+
+主题提供判断函数：
+
+```php
+function zib_get_user_oauth_openid($type, $user_id = 0)
+{
+    if (!$user_id) {
+        $user_id = get_current_user_id();
+    }
+    return get_user_meta($user_id, 'oauth_' . $type . '_openid', true);
+}
+```
+
+示例：只给已绑定 GitHub 的用户显示入口：
+
+```php
+if (zib_get_user_oauth_openid('github', get_current_user_id())) {
+    echo '<span class="badg c-blue">' . esc_html__('已绑定 GitHub', 'zib_language') . '</span>';
+}
+```
+
+## 登录按钮输出
+
+社交登录按钮统一由 `zib_social_login()` 生成。主题登录弹窗、页头登录卡片、评论未登录区域、论坛评论框都会复用它：
+
+```php
+$social_login = zib_social_login(false);
+if ($social_login) {
+    echo '<div class="social_loginbar">';
+    echo $social_login;
+    echo '</div>';
+}
+```
+
+内部顺序是：
+
+1. 如果 `zib_is_close_sign()` 为真，直接不输出。
+2. 如果开启第三方聚合插件模式并存在 `xh_social_loginbar()`，交给聚合插件输出。
+3. 否则读取 `zib_get_social_type_data()`。
+4. 对每个平台调用 `zib_get_oauth_login_url($type)`。
+5. 有登录地址才输出按钮。
+
+登录地址不是只看本地开关，而是走过滤器链：
+
+```php
+add_filter('zib_oauth_login_url', 'zib_get_agent_clogin_login_url', 20, 2);
+add_filter('zib_oauth_login_url', 'zib_get_agent_oauth_login_url', 30, 2);
+add_filter('zib_oauth_login_url', 'zib_get_self_oauth_login_url', 50, 2);
+```
+
+这表示同一个平台可能来自彩虹聚合登录、子比代理登录或主题自带 OAuth。扩展登录地址时应该挂 `zib_oauth_login_url`，不要直接改按钮 HTML。
+
+示例：临时把某个平台切到外部统一认证入口：
+
+```php
+function zib_docs_oauth_login_url($url, $type)
+{
+    if ($url || 'github' !== $type) {
+        return $url;
+    }
+
+    return add_query_arg(
+        array(
+            'type' => $type,
+            'from' => home_url(),
+        ),
+        'https://login.example.com/oauth'
+    );
+}
+add_filter('zib_oauth_login_url', 'zib_docs_oauth_login_url', 15, 2);
+```
+
+支付宝按钮在移动端有额外限制：如果是移动端但不在支付宝 App 内，主题会跳过支付宝按钮。微信公众号如果是扫码模式，按钮会附加 `qrcode-signin`，前端再打开扫码登录弹窗。
+
+## 用户中心绑定与解绑
+
+用户中心的账号安全区会通过 `user_center_account_setup` 追加社交账号绑定区块：
+
+```php
+add_filter('user_center_account_setup', 'zib_oauth_set', 10, 2);
+```
+
+`zib_oauth_set()` 会遍历 `zib_get_social_type_data()`，调用 `zib_get_oauth_login_url($type, $rurl)` 生成绑定入口。已绑定账号会显示第三方昵称或头像，未绑定账号显示绑定按钮。
+
+绑定按钮会把当前用户中心账号页作为回跳地址，并追加 `bind` 参数：
+
+```php
+$bind_href = zib_get_oauth_login_url($type, $rurl);
+$url       = add_query_arg(array('bind' => $type), $bind_href);
+```
+
+已绑定状态同时要求 `oauth_{type}_openid` 和 `oauth_{type}_getUserInfo` 都存在。只有 openid 没有资料时，用户中心可能显示为未完整绑定；只有资料没有 openid 时，则不能用于登录：
+
+```php
+$oauth_info = zib_get_user_meta($user_id, 'oauth_' . $type . '_getUserInfo', true);
+$oauth_id   = get_user_meta($user_id, 'oauth_' . $type . '_openid', true);
+if ($oauth_info && $oauth_id) {
+    // 已绑定
+}
+```
+
+历史站点如果曾经只保存 openid，登录成功分支会在有第三方昵称时补全缺失资料：
+
+```php
+$stored = zib_get_user_meta($user_exist, 'oauth_' . $args['type'] . '_getUserInfo', true);
+if (empty($stored['name'])) {
+    $sync_args = $args;
+    $sync_args['user_id'] = $user_exist;
+    zib_oauth_update_user_meta($sync_args, false);
+}
+```
+
+所以迁移社交账号数据时，应同时迁移 openid 和 getUserInfo。只迁移 openid 虽然能登录，但用户中心绑定区展示会不完整；只迁移 getUserInfo 则完全不能识别绑定用户。
+
+解绑走 Ajax action：
+
+```php
+add_action('wp_ajax_user_oauth_untying', 'zib_ajax_user_oauth_untying');
+```
+
+服务端会检查：
+
+| 校验                      | 说明                                |
+| ------------------------- | ----------------------------------- |
+| `user_id` 和 `type`       | 参数不能为空                        |
+| `zib_ajax_verify_nonce()` | 必须通过 `user_oauth_untying` nonce |
+| 当前登录用户              | 只能解绑自己的账号                  |
+
+解绑时同时删除两类数据：
+
+```php
+delete_user_meta($user_id, 'oauth_' . $type . '_openid');
+zib_update_user_meta($user_id, 'oauth_' . $type . '_getUserInfo', false);
+```
+
+不要只删除 `openid`。如果保留 `oauth_{type}_getUserInfo`，用户中心可能还会残留昵称或头像展示，后续排查也会混乱。
+
+扩展绑定区块时优先挂同一个过滤器：
+
+```php
+function zib_docs_user_center_account_setup($html, $user_id)
+{
+    if (!$user_id || !zib_get_user_oauth_openid('github', $user_id)) {
+        return $html;
+    }
+
+    $html .= '<div class="box-body">';
+    $html .= '<div class="title-h-left"><b>' . esc_html__('开发者账号', 'zib_language') . '</b></div>';
+    $html .= '<div class="muted-2-color">' . esc_html__('已绑定 GitHub，可使用开发者相关能力。', 'zib_language') . '</div>';
+    $html .= '</div>';
+
+    return $html;
+}
+add_filter('user_center_account_setup', 'zib_docs_user_center_account_setup', 20, 2);
+```
+
+## OAuth 新用户与密码设置
+
+全新第三方账号如果没有进入绑定页，主题会自动创建 WordPress 用户：
+
+```php
+$login_name = 'user' . mt_rand(1000, 9999) . mt_rand(1000, 9999);
+$user_pass  = wp_create_nonce(rand(10, 1000));
+$user_id    = wp_create_user($login_name, $user_pass);
+update_user_meta($user_id, 'oauth_new', $args['type']);
+```
+
+`oauth_new` 表示这是第三方登录自动创建、尚未设置过正常密码的账号。用户中心的账户密码区会据此显示“设置新密码”，提交到：
+
+```php
+add_action('wp_ajax_user_change_password', 'zib_ajax_user_change_password');
+```
+
+如果存在 `oauth_new`，首次设置密码不要求输入原密码；设置成功后会删除 `oauth_new`。如果没有 `oauth_new`，修改密码必须校验原密码、错误频率、人机验证和当前用户状态。
+
+因此二开时不要把 `oauth_new` 当作普通标签长期保留。它是一个待完成的账号安全状态，完成密码设置后应该消失。
+
+## 代理登录
+
+代理登录用于把社交登录能力作为服务端或客户端转发。关键函数：
+
+```php
+function zib_agent_login()
+function zib_agent_callback($oauth_data)
+```
+
+`zib_agent_login()` 会读取：
+
+```php
+$oauth_agent = _pz('oauth_agent', 'close');
+$config      = _pz('oauth_agent_server_option');
+```
+
+只有 `oauth_agent` 为 `server` 时才允许提供代理登录服务，并会用 `oauth/sdk/agent.php` 校验签名。
+
+`zib_agent_callback($oauth_data)` 会把第三方回调数据签名后带回客户端保存的 `agent_back_url`。扩展代理登录时必须保证：
+
+- `agent_back_url` 来源可信。
+- 签名校验通过。
+- 回传数据不包含平台密钥。
+- 回调后及时清空 session 中的代理地址。
+
+## 公众号扫码登录
+
+`oauth/weixingzh` 比普通 OAuth 更复杂。它同时处理：
+
+- 公众号 Token 校验。
+- 关注事件和扫码事件。
+- `check_callback` 轮询。
+- `weixingzh_event_data` 临时事件数据。
+- 未关注和已关注用户的不同授权路径。
+- 自动回复配置。
+
+认证服务号扫码模式中，`login.php` 会返回二维码、回调地址和本次二维码的 `state`：
+
+```php
+$qrcode_array = $WeChat->getQrcode();
+$qrcode       = zib_get_qrcode_base64($qrcode_array['url']);
+$_SESSION['YURUN_WEIXIN_GZH_STATE'] = $WeChat->state;
+
+echo(json_encode(array(
+    'html'  => $html,
+    'url'   => $wxConfig['backurl'],
+    'state' => $WeChat->state,
+)));
+```
+
+用户扫码后，微信服务器会请求 `callback.php?action=callback`。主题把微信事件按 `EventKey` 暂存到 `weixingzh_event_data`，并清理超过约 1 小时或同一个 `FromUserName` 的旧数据：
+
+```php
+$EventKey = str_replace('qrscene_', '', $callback['EventKey']);
+$weixingzh_event_data[$EventKey] = $callback;
+zib_update_option('weixingzh_event_data', $weixingzh_event_data, false);
+```
+
+前端再轮询 `callback.php?action=check_callback&state={state}`。如果还没扫码，返回 `{ "error": 1 }`；如果已扫码，会删除这条临时事件并返回真正的登录地址：
+
+```php
+$event_data = $weixingzh_event_data[$state];
+unset($weixingzh_event_data[$state]);
+
+echo(json_encode(array(
+    'goto'   => add_query_arg($goto_uery_arg, $wxConfig['backurl']),
+    'option' => $event_data,
+)));
+```
+
+最终跳到 `callback.php?action=login&openid={FromUserName}`，再由公众号接口换取用户资料并调用 `zib_oauth_update_user()`。所以扫码登录不是前端直接信任 openid 登录，而是“二维码 state -> 微信事件 -> 服务器换资料 -> 统一 OAuth 绑定/登录”。
+
+未认证订阅号模式不走扫码轮询，而是展示公众号二维码和验证码输入框。用户关注后发送关键词，`code_check` 会用 `getUserKey($code)` 换取 openid，再跳到 `code_login`：
+
+```php
+$user_key = $wxOAuth->getUserKey($code);
+$goto_uery_arg = array(
+    'action' => 'code_login',
+    'openid' => $user_key,
+    'nonce'  => wp_create_nonce('weixingzh_code_login_nonce'),
+);
+```
+
+`code_login` 会先执行代理登录回调，再校验 `weixingzh_code_login_nonce`。这个顺序是源码特意保留的：代理登录需要先拿到第三方数据并回传客户端，普通站内登录才继续做 nonce 校验。
+
+公众号扫码登录出现问题时，优先检查：
+
+1. 公众号配置 `oauth_weixingzh_option`。
+2. Token 校验是否通过。
+3. 回调地址是否公网可访问。
+4. `weixingzh_event_data` 是否记录扫码事件。
+5. openid 是否能换取用户信息。
+6. `oauth_rurl` 和 session 是否正常。
+7. 认证服务号模式下前端是否持续请求 `action=check_callback`。
+8. 未认证订阅号模式下用户发送的关键词是否和 `code_keyword` 一致。
+
+## 错误页
+
+OAuth 失败统一走：
+
+```php
+zib_oauth_die($msg, $title);
+```
+
+它会输出主题错误页，而不是直接 `wp_die()`。新增平台时建议所有失败分支都走 `zib_oauth_die()`，这样页面样式、标题和站点体验保持一致。
+
+## 安全边界
+
+- `login.php` 必须保存并校验 `state` 或等价参数。
+- `callback.php` 不要信任前端传来的 `openid`、`unionid`、邮箱和头像。
+- 第三方昵称、头像、描述属于外部输入，输出前仍要转义。
+- 回调里不能输出 app secret、access token、原始签名参数和服务器路径。
+- 绑定和解绑必须校验当前登录用户。
+- 自动创建用户时要校验昵称，并处理用户名冲突。
+- 代理登录必须校验签名，不能把任意回调地址当作可信地址。
+- 修改 rewrite 规则后要刷新固定链接，避免 `/oauth/{provider}` 404。
+
+## 扩展建议
+
+- 新平台尽量复用 `get_oauth_config()`、`zib_oauth_update_user()`、`zib_oauth_die()`。
+- 登录成功后的统一逻辑优先挂 `wp_login`。
+- 绑定成功后的资料补全优先写在 `zib_oauth_update_user_meta()` 后的业务 Hook 或统一用户流程中。
+- 用户资料展示读取 `oauth_{type}_getUserInfo` 时使用 `zib_get_user_meta()`。
+- 不要在每个平台 callback 里复制一套创建用户逻辑，避免绑定、邀请码、绑定页、头像同步行为不一致。
+- 新增按钮时同步检查 `zib_get_social_type_data()`、`zib_oauth_page_template()` 白名单、后台字段和真实模板文件。
+- 用户中心扩展绑定信息时挂 `user_center_account_setup`，不要复制一整套账号安全页面。

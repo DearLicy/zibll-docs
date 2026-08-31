@@ -1,0 +1,415 @@
+---
+title: 论坛排序与推荐指数
+description: 拆解子比主题论坛帖子排序选项、推荐指数计算、动态时间权重、推荐分缓存、帖子评分收藏评论联动和扩展边界。
+---
+
+## 模块边界
+
+子比主题论坛排序不是单一的 `orderby` 字段。普通排序会走 WordPress 查询参数和主题通用排序封装；“推荐指数”则是论坛帖子专用的动态排序：先把用户行为计算成静态 `recommend_score`，再在查询时叠加时间权重，生成 `dynamic_score` 排序结果。
+
+开发时先区分：
+
+| 概念              | 存储或计算位置           | 作用                                      |
+| ----------------- | ------------------------ | ----------------------------------------- |
+| `score`           | 帖子 Meta                | 用户给帖子加分/扣分后的总评分             |
+| `score_detail`    | 帖子 Meta                | 每个用户对帖子加分/扣分的明细             |
+| `favorite_count`  | 帖子 Meta                | 帖子收藏数                                |
+| `views`           | 帖子 Meta                | 帖子浏览量                                |
+| `comment_count`   | `wp_posts.comment_count` | 帖子回复数                                |
+| `recommend_score` | 帖子 Meta                | 按行为系数计算出的静态推荐分              |
+| `dynamic_score`   | SQL 查询阶段计算         | `recommend_score + 时间权重` 的动态排序分 |
+
+所以“评分最高”不是“推荐指数”。评分只看 `score`；推荐指数会综合回复、浏览、收藏、加分、扣分和发布时间。
+
+## 核心文件
+
+| 文件                                          | 作用                                                                     |
+| --------------------------------------------- | ------------------------------------------------------------------------ |
+| `inc/functions/bbs/inc/posts.php`             | 帖子排序选项、帖子查询、推荐指数计算、动态排序 SQL、缓存刷新             |
+| `inc/functions/bbs/inc/functions.php`         | `zib_bbs_query_orderby_filter()`、最后回复时间、热门帖子判断             |
+| `inc/functions/bbs/action/ajax-posts.php`     | 帖子加分/扣分、收藏 Ajax，更新 `score`、`score_detail`、`favorite_count` |
+| `inc/functions/bbs/admin/option.php`          | 论坛后台推荐指数配置、加分/扣分上限、列表排序字段                        |
+| `inc/functions/bbs/widgets/widgets-posts.php` | 论坛帖子小工具排序字段使用                                               |
+| `inc/options/upgrade.php`                     | 主题升级时为历史帖子补写 `recommend_score`                               |
+
+## 排序选项
+
+论坛帖子排序选项由 `zib_bbs_get_posts_order_options()` 提供：
+
+```php
+function zib_bbs_get_posts_order_options()
+{
+    $args = array(
+        'name'                => __('标题名称', 'zib_language'),
+        'date'                => __('最新发布', 'zib_language'),
+        'modified'            => __('最近更新', 'zib_language'),
+        'last_reply'          => __('最新回复', 'zib_language'),
+        'dynamic_score'       => __('推荐指数', 'zib_language'),
+        'views'               => __('最多查看', 'zib_language'),
+        'score'               => __('评分最高', 'zib_language'),
+        'comment_count'       => __('最多回复', 'zib_language'),
+        'favorite_count'      => __('最多收藏', 'zib_language'),
+        'zibpay_price'        => __('售价金额', 'zib_language'),
+        'zibpay_points_price' => __('积分金额', 'zib_language'),
+        'sales_volume'        => __('销售数量', 'zib_language'),
+        'rand'                => __('随机', 'zib_language'),
+    );
+
+    return apply_filters('bbs_posts_order_options', $args);
+}
+```
+
+扩展排序按钮、下拉框、小工具排序时，优先挂这个过滤器：
+
+```php
+function zib_docs_bbs_posts_order_options($args)
+{
+    $args['docs_custom_score'] = __('自定义热度', 'zib_language');
+
+    return $args;
+}
+add_filter('bbs_posts_order_options', 'zib_docs_bbs_posts_order_options');
+```
+
+只加选项不等于排序生效。新增排序 key 后，还要在查询层处理对应的 `orderby`，否则 WordPress 不知道如何排序。
+
+## 帖子查询入口
+
+论坛帖子主查询在 `zib_bbs_get_posts_query()`：
+
+```php
+function zib_bbs_get_posts_query($args = array())
+{
+    $posts_per_page = _pz('bbs_posts_per_page', 20);
+    $posts_per_page = isset($args['paged_size']) ? (int) $args['paged_size'] : $posts_per_page;
+    $paged          = isset($args['paged']) ? (int) $args['paged'] : zib_get_the_paged();
+    $orderby        = isset($_REQUEST['orderby']) ? $_REQUEST['orderby'] : (isset($args['orderby']) ? $args['orderby'] : 'modified');
+    $plate          = isset($_REQUEST['plate']) ? $_REQUEST['plate'] : get_the_ID();
+
+    $query_args = array(
+        'post_type'      => 'forum_post',
+        'post_status'    => array('publish'),
+        'order'          => isset($args['order']) && in_array($args['order'], array('asc', 'ASC')) ? 'ASC' : 'DESC',
+        'orderby'        => $orderby,
+        'posts_per_page' => $posts_per_page,
+        'paged'          => $paged,
+    );
+
+    $query_args = zib_bbs_query_orderby_filter($orderby, $query_args);
+
+    return new WP_Query($query_args);
+}
+```
+
+`zib_bbs_query_orderby_filter()` 当前委托给主题通用排序封装：
+
+```php
+function zib_bbs_query_orderby_filter($orderby = 'date', $args = array())
+{
+    return zib_query_orderby_filter($orderby, $args);
+}
+```
+
+普通 Meta 排序例如 `views`、`score`、`favorite_count` 会通过这个通用入口处理；`dynamic_score` 还会额外触发论坛自己的 `posts_clauses` 过滤器。
+
+## 推荐指数配置
+
+后台配置字段是 `recommend_score_opt`，位于论坛全局设置。核心字段：
+
+| 字段             | 默认值    | 作用                               |
+| ---------------- | --------- | ---------------------------------- |
+| `time.one_time`  | `24` 小时 | 新帖子第一阶段时间                 |
+| `time.one_off`   | `10`      | 第一阶段按小时衰减百分比           |
+| `time.two_time`  | `10` 天   | 第二阶段时间                       |
+| `time.two_off`   | `50`      | 第二阶段按天衰减百分比             |
+| `time.last_time` | `3` 个月  | 第三阶段按月衰减到 0 的时间        |
+| `views`          | `1`       | 阅读量系数                         |
+| `favorite`       | `10`      | 收藏系数                           |
+| `comment`        | `5`       | 评论系数，源码计算处默认兜底为 `2` |
+| `score_extra`    | `10`      | 加分系数                           |
+| `score_deduct`   | `10`      | 扣分系数，源码计算时转为负数       |
+| `cache_time`     | `10` 分钟 | 推荐排序结果缓存时间               |
+
+后台提示里已经说明：推荐指数排序更符合综合推荐场景，但比较耗费性能，启用缓存后，排序结果会按缓存周期更新。
+
+## 静态推荐分
+
+静态推荐分由 `zib_bbs_calculate_posts_recommend_score()` 计算：
+
+```php
+function zib_bbs_calculate_posts_recommend_score($posts_id)
+{
+    $recommend_score_opt = _pz('recommend_score_opt');
+    $comment_x           = !empty($recommend_score_opt['comment']) ? (int) $recommend_score_opt['comment'] : 2;
+    $score_deduct_x      = -(!empty($recommend_score_opt['score_deduct']) ? (int) $recommend_score_opt['score_deduct'] : 15);
+    $score_extra_x       = !empty($recommend_score_opt['score_extra']) ? (int) $recommend_score_opt['score_extra'] : 10;
+    $view_x              = !empty($recommend_score_opt['views']) ? (int) $recommend_score_opt['views'] : 1;
+    $favorite_x          = !empty($recommend_score_opt['favorite']) ? (int) $recommend_score_opt['favorite'] : 10;
+
+    $comment_num  = (int) get_comments_number($posts_id);
+    $views_num    = (int) get_post_meta($posts_id, 'views', true);
+    $favorite_num = (int) get_post_meta($posts_id, 'favorite_count', true);
+
+    $score_detail = zib_get_post_meta($posts_id, 'score_detail', true);
+
+    $recommend_score = $comment_x * $comment_num + $score_deduct_x * $score_deduct_num + $score_extra_x * $score_extra_num + $view_x * $views_num + $favorite_x * $favorite_num;
+    return $recommend_score;
+}
+```
+
+其中 `score_detail` 会拆成加分总量和扣分总量：
+
+```php
+if (is_array($score_detail) && $score_detail) {
+    foreach ($score_detail as $score) {
+        if ($score > 0) {
+            $score_extra_num += abs((int) $score);
+        } elseif ($score < 0) {
+            $score_deduct_num += abs((int) $score);
+        }
+    }
+}
+```
+
+最终写入：
+
+```php
+update_post_meta($post->ID, 'recommend_score', zib_bbs_calculate_posts_recommend_score($post->ID));
+```
+
+开发时不要直接改 `recommend_score` 后就结束。更稳妥的做法是更新原始行为数据，再调用主题的保存函数重新计算。
+
+## 推荐分更新时机
+
+主题会在这些节点更新 `recommend_score`：
+
+| 触发                                    | 说明                                                |
+| --------------------------------------- | --------------------------------------------------- |
+| `updated_post_meta` / `added_post_meta` | 当 `views`、`score`、`favorite_count` 改变时重算    |
+| `trashed_comment` / `untrashed_comment` | 评论进入回收站或恢复时重算                          |
+| 主题升级任务                            | 历史 `forum_post` 缺少 `recommend_score` 时批量补写 |
+
+相关源码：
+
+```php
+function zib_bbs_update_posts_recommend_score_meta($meta_id, $post_id, $meta_key, $_meta_value)
+{
+    if (in_array($meta_key, array('views', 'score', 'favorite_count'))) {
+        zib_bbs_save_posts_recommend_score($post_id);
+    }
+}
+add_action('updated_post_meta', 'zib_bbs_update_posts_recommend_score_meta', 99, 4);
+add_action('added_post_meta', 'zib_bbs_update_posts_recommend_score_meta', 99, 4);
+```
+
+如果自定义逻辑会改影响推荐分的字段，建议保留这些 Meta 名称，或者在保存后主动调用：
+
+```php
+function zib_docs_update_bbs_recommend_score($post_id)
+{
+    if (!$post_id || get_post_type($post_id) !== 'forum_post') {
+        return;
+    }
+
+    zib_bbs_save_posts_recommend_score($post_id);
+}
+```
+
+## 动态推荐排序
+
+`dynamic_score` 不是数据库字段，而是 SQL 查询时计算出来的排序分。主题在 `posts_clauses` 上挂载：
+
+```php
+add_filter('posts_clauses', 'zib_bbs_dynamic_score_posts_clauses', 10, 2);
+```
+
+只有满足两个条件才处理：
+
+```php
+if ($query->get('post_type') !== 'forum_post' || $query->get('orderby') !== 'dynamic_score') {
+    return $clauses;
+}
+```
+
+核心流程：
+
+1. 在 SQL 中 `JOIN postmeta`，只取 `meta_key = recommend_score` 的帖子。
+2. 读取当前筛选条件下的最大推荐分。
+3. 按帖子发布时间计算时间权重。
+4. 用 `时间权重 + recommend_score` 得出 `dynamic_score`。
+5. 预先查出排序后的帖子 ID。
+6. 重写主查询为 `ID IN (...)`，并用 `FIELD(ID, ...)` 保持排序。
+
+时间权重分三段：
+
+| 阶段     | 默认配置       | 衰减方式                           |
+| -------- | -------------- | ---------------------------------- |
+| 第一阶段 | 发布后 24 小时 | 从最大值开始，按小时衰减 `one_off` |
+| 第二阶段 | 接下来 10 天   | 剩余权重按天衰减 `two_off`         |
+| 第三阶段 | 接下来 3 个月  | 剩余权重按月衰减到 0               |
+
+这套设计能避免老帖因为历史累计高而长期霸榜，同时给新帖一个曝光窗口。
+
+## 推荐排序缓存
+
+动态推荐排序会缓存两类数据：
+
+| 缓存组                  | 内容                                       |
+| ----------------------- | ------------------------------------------ |
+| `bbs_dynamic_score_max` | 当前筛选条件下的最大推荐分                 |
+| `bbs_dynamic_score_ids` | 当前筛选条件下按动态分排序后的帖子 ID 列表 |
+
+缓存时间来自：
+
+```php
+$cache_minutes = _pz('recommend_score_opt', 10, 'cache_time');
+```
+
+主题还维护一个 `bbs_dynamic_score_ids_cache_keys`，用于批量清理动态推荐排序缓存：
+
+```php
+function zib_bbs_dynamic_score_ids_cache_flush()
+{
+    $cache_keys = wp_cache_get('bbs_dynamic_score_ids_cache_keys', 'zib_cache_group');
+    if ($cache_keys && is_array($cache_keys)) {
+        foreach ($cache_keys as $cache_key) {
+            wp_cache_delete($cache_key, 'bbs_dynamic_score_ids');
+        }
+    }
+
+    wp_cache_delete('bbs_dynamic_score_ids_cache_keys', 'zib_cache_group');
+}
+```
+
+会触发清缓存的节点：
+
+| Hook                   | 场景                 |
+| ---------------------- | -------------------- |
+| `pending_to_publish`   | 帖子从待审发布       |
+| `trash_to_publish`     | 帖子从回收站恢复发布 |
+| `publish_to_pending`   | 发布帖转待审         |
+| `bbs_posts_delete`     | 删除帖子             |
+| `save_post_forum_post` | 新发布论坛帖子       |
+| `posts_plate_move`     | 帖子移动版块         |
+
+如果你新增了会显著影响推荐排序范围的动作，例如批量迁移话题、隐藏帖子、批量变更状态，应同步清理动态推荐排序缓存。
+
+## 用户加分与收藏联动
+
+帖子加分/扣分在 `zib_bbs_ajax_posts_score()` 中处理。它会更新：
+
+| 字段           | 说明                           |
+| -------------- | ------------------------------ |
+| `score_detail` | 当前用户对帖子加分或扣分的明细 |
+| `score`        | `score_detail` 求和后的总评分  |
+| 用户 `score`   | 作者所有帖子评分总和           |
+
+保存后会触发：
+
+```php
+do_action('bbs_user_' . $action, $author_id, $id, $author_score);
+do_action('bbs_' . $action, $id, $user_id, $new_user_score);
+```
+
+收藏帖子会更新：
+
+| 字段                        | 说明                   |
+| --------------------------- | ---------------------- |
+| 用户 `favorite_forum_posts` | 用户收藏的帖子 ID 列表 |
+| 帖子 `favorite_count`       | 帖子收藏数             |
+
+并触发：
+
+```php
+do_action('bbs_favorite_posts', $id, $user_id, $type);
+```
+
+由于 `score` 和 `favorite_count` 都在推荐分监听范围内，正常走主题 Ajax 时推荐分会自动重算。不要绕过主题 Ajax 直接改前端数字。
+
+## 新增排序示例
+
+新增一个基于 Meta 的排序，分两步：先加选项，再处理查询。
+
+```php
+function zib_docs_bbs_order_options($args)
+{
+    $args['docs_heat'] = __('自定义热度', 'zib_language');
+
+    return $args;
+}
+add_filter('bbs_posts_order_options', 'zib_docs_bbs_order_options');
+```
+
+处理查询参数：
+
+```php
+function zib_docs_bbs_query_orderby($args, $orderby)
+{
+    if ('docs_heat' !== $orderby) {
+        return $args;
+    }
+
+    $args['meta_key'] = 'docs_heat';
+    $args['orderby']  = 'meta_value_num';
+    $args['order']    = 'DESC';
+
+    return $args;
+}
+add_filter('zib_query_orderby_filter_args', 'zib_docs_bbs_query_orderby', 10, 2);
+```
+
+如果站点当前版本没有这个通用过滤器，就在调用论坛列表前显式传入已处理的 `WP_Query` 参数，或用 `pre_get_posts` 严格判断 `post_type = forum_post` 和自定义 `orderby`。不要全局改所有文章查询。
+
+## 批量补推荐分
+
+主题升级任务里有历史数据补写逻辑：
+
+```php
+function zib_update_theme_tasks_8_5()
+{
+    $posts = $DB->where('ID', 'NOT IN', $sub_DB)
+                ->where('post_type', 'forum_post')
+                ->order('ID', 'ASC')
+                ->limit(500)
+                ->select()->toArray();
+
+    foreach ($posts as $post) {
+        $add_value = zib_bbs_calculate_posts_recommend_score($post['ID']);
+        update_post_meta($post['ID'], 'recommend_score', $add_value);
+    }
+
+    return true;
+}
+zib_add_update_theme_tasks('8.4.0.4', 'zib_update_theme_tasks_8_5');
+```
+
+自定义迁移时也要分批处理，不要一次查询全部帖子。每批处理后返回进度，避免后台请求超时。
+
+## 常见风险
+
+| 风险                                       | 说明                                                           |
+| ------------------------------------------ | -------------------------------------------------------------- |
+| 把 `score` 当推荐指数                      | `score` 只是用户评分，推荐指数还包含浏览、收藏、评论和时间权重 |
+| 直接改 `recommend_score`                   | 会绕过原始行为数据，后续重算时结果可能被覆盖                   |
+| 新排序只加选项                             | 下拉框会显示，但查询不会自动知道如何排序                       |
+| 忽略缓存                                   | `dynamic_score` 排序会缓存结果，配置或数据变化不一定立即反映   |
+| 大站缓存时间太短                           | 推荐排序 SQL 成本较高，频繁刷新会增加数据库压力                |
+| 自定义查询绕过 `zib_bbs_get_posts_query()` | 会丢失版块、话题、标签、权限、置顶、推荐排序等处理             |
+| 删除或移动帖子不清缓存                     | 排序结果可能短时间包含旧帖子或旧版块数据                       |
+| 使用用户请求直接决定范围                   | 小工具和首页模块应以后台配置为准，避免前端任意扩大查询         |
+
+## 调试入口
+
+| 现象                   | 优先检查                                                                                 |
+| ---------------------- | ---------------------------------------------------------------------------------------- |
+| 推荐指数选项不显示     | `zib_bbs_get_posts_order_options()`、后台字段是否使用该 options                          |
+| 推荐排序为空           | 帖子是否有 `recommend_score`，升级任务是否执行过                                         |
+| 排序结果不更新         | `recommend_score_opt.cache_time`、对象缓存、`bbs_dynamic_score_ids`                      |
+| 加分后推荐排序不变     | `score` 是否更新，`updated_post_meta` 是否触发，缓存是否过期                             |
+| 收藏后推荐排序不变     | `favorite_count` 是否更新，缓存是否过期                                                  |
+| 评论后推荐分不变       | 评论状态是否触发 `trashed_comment` / `untrashed_comment`，正常新增评论是否有其它更新链路 |
+| 自定义排序影响文章列表 | 查询判断是否限定 `post_type = forum_post`                                                |
+
+## 参考源码
+
+本页根据 `inc/functions/bbs/inc/posts.php`、`inc/functions/bbs/inc/functions.php`、`inc/functions/bbs/action/ajax-posts.php`、`inc/functions/bbs/admin/option.php`、`inc/functions/bbs/widgets/widgets-posts.php`、`inc/options/upgrade.php`，以及子比主题官网公开的论坛帖子推荐指数排序教程蒸馏整理。

@@ -1,0 +1,108 @@
+---
+title: 高级能力
+description: Codestar Framework 的 Comment Options、Shortcode Options、Customize Options、备份导入导出和扩展 Hook。
+---
+
+## 不常用但存在的 CSF 能力
+
+子比主题主要使用 options、metabox、taxonomy、profile、nav menu、widget 这些能力。Codestar Framework 原始框架还包含一些高级能力，源码和样例在：
+
+```txt
+inc/codestar-framework/classes/comment-options.class.php
+inc/codestar-framework/classes/shortcode-options.class.php
+inc/codestar-framework/classes/customize-options.class.php
+inc/codestar-framework/samples/comment-options.php
+inc/codestar-framework/samples/shortcode-options.php
+inc/codestar-framework/samples/customize-options.php
+```
+
+这些能力不是每个项目都需要。使用前先判断是否真的比普通 Hook、Meta、短代码、后台设置更合适。
+
+## Comment Options
+
+Comment Options 适合给评论添加后台配置，例如：
+
+- 评论运营标记。
+- 评论来源。
+- 客服处理状态。
+- 举报处理状态。
+- 内部备注。
+
+但子比主题评论系统和论坛回答、商城评价、热评、置顶、采纳等逻辑有关。扩展评论字段时要先确认评论属于普通文章、论坛帖子还是商品评价。
+
+读取评论 meta 时注意 `zib_other_data` 迁移逻辑，必要时保留 fallback。
+
+## Shortcode Options
+
+Shortcode Options 适合给编辑器短代码生成器提供字段界面。它不是短代码执行逻辑本身。真正的短代码仍需要：
+
+```php
+add_shortcode('zib_shortcode', 'zib_shortcode_render');
+```
+
+适合场景：
+
+- 给运营人员插入复杂短代码。
+- 用表单选择文章、商品、颜色、样式。
+- 避免用户手写复杂参数。
+
+如果只是简单短代码，直接写文档和示例可能更轻。
+
+## Customize Options
+
+Customize Options 会进入 WordPress 自定义器。子比主题自己的后台设置没有默认放进 Customizer：
+
+```php
+'show_in_customizer' => false
+```
+
+原因很简单：主题设置项多且复杂，放进 Customizer 会变重。你自己的功能如果只是少量实时预览设置，可以考虑 Customizer；如果是业务配置、支付、用户、权限、第三方参数，放后台设置页更合适。
+
+## 备份、导入和重置
+
+CSF 原始框架包含 backup 字段和 options 重置能力。子比主题后台也有设置备份、导入、恢复相关 Ajax 动作。
+
+使用备份能力时要注意：
+
+- 不要把密钥、token、支付私钥随意导出给低权限用户。
+- 导入前确认数据来源可信。
+- 导入后可能改变支付、登录、短信、邮件、缓存、SEO 等站点行为。
+- 对独立设置页可以关闭 `show_reset_all`，避免误重置。
+
+```php
+CSF::createOptions($prefix, array(
+    'show_reset_all'     => false,
+    'show_reset_section' => false,
+));
+```
+
+## CSF Hook
+
+原始 CSF 类会暴露一些动态 Hook 和 Filter，例如：
+
+```php
+apply_filters("csf_{$unique}_args", ...)
+apply_filters("csf_{$unique}_sections", ...)
+apply_filters("csf_{$unique}_save", ...)
+do_action("csf_{$unique}_save_before", ...)
+```
+
+用途：
+
+- 修改某个设置页参数。
+- 动态追加 section。
+- 保存前过滤数据。
+- 保存前后写日志或同步缓存。
+
+使用这类 Hook 时要确保 `$unique` 是正确的 prefix。
+
+## 何时不要用高级能力
+
+- 只是文章字段：用 post meta。
+- 只是分类字段：用 taxonomy meta。
+- 只是用户字段：用 user meta。
+- 只是前台展示短代码：用 `add_shortcode()`。
+- 只是一个设置页：用 `CSF::createOptions()`。
+- 只是一个自定义表单：用 `ZCSF::instance()`。
+
+高级能力应该解决真实复杂度，而不是让配置体系变得更难维护。

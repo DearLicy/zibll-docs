@@ -1,0 +1,609 @@
+---
+title: 商城小工具与商品列表
+description: 蒸馏子比主题商城 widgets 模块的侧栏注册、商品列表、小工具字段、Ajax 加载、商品 Tab、单行滚动列表和扩展边界。
+---
+
+## 模块边界
+
+商城小工具入口在：
+
+```txt
+inc/functions/shop/widgets/widgets.php
+inc/functions/shop/widgets/widgets-product.php
+inc/functions/shop/widgets/widgets-term.php
+inc/functions/shop/widgets/widgets-other.php
+```
+
+当前可复用的主要能力集中在 `widgets.php` 和 `widgets-product.php`。`widgets-term.php`、`widgets-other.php` 目前更像预留入口，不要把它们当成已经完整实现的分类小工具或其它小工具系统。
+
+商城小工具只在商城开启后加载：
+
+```php
+if (_pz('shop_s')) {
+    zib_require(array(
+        'inc/functions',
+        'widgets/widgets',
+        'action/action',
+    ), false, ZIB_SHOP_REQUIRE_URI);
+}
+```
+
+扩展前先判断商城开关和函数是否存在，不要在商城关闭的站点强行注册商品小工具。
+
+## 侧栏注册
+
+商城侧栏由 `zib_shop_register_sidebar()` 注册：
+
+```php
+add_action('widgets_init', 'zib_shop_register_sidebar');
+```
+
+它注册两类页面位置：
+
+| 页面 key  | 位置 key       | Sidebar id                  | 说明               |
+| --------- | -------------- | --------------------------- | ------------------ |
+| `product` | `sidebar`      | `shop_product_sidebar`      | 商品详情页侧边栏   |
+| `product` | `top_fluid`    | `shop_product_top_fluid`    | 商品详情页上方全宽 |
+| `product` | `bottom_fluid` | `shop_product_bottom_fluid` | 商品详情页底部全宽 |
+| `cart`    | `top_fluid`    | `shop_cart_top_fluid`       | 购物车页面上方全宽 |
+| `cart`    | `bottom_fluid` | `shop_cart_bottom_fluid`    | 购物车页面底部全宽 |
+
+源码里这里直接调用 `register_sidebar()`，但外壳仍保持主题小工具结构：
+
+```php
+register_sidebar(array(
+    'name'          => $value['name'],
+    'id'            => 'shop_' . $page_key . '_' . $d_k,
+    'description'   => $value['desc'],
+    'before_widget' => ($is_preview ? '<div class="customize-preview-widget-box" id="%1$s"><div class="customize-preview-widget-edit">' . __('编辑', 'zib_language') . '</div>' : '') . '<div class="zib-widget %2$s">',
+    'after_widget'  => ($is_preview ? '</div>' : '') . '</div>',
+    'before_title'  => '<h3>',
+    'after_title'   => '</h3>',
+));
+```
+
+侧边栏只适合窄卡片；商品横向滚动、商品列表、活动展示更适合 `*_fluid` 位置。
+
+## 页面渲染闭环
+
+注册侧栏只代表后台可配置，真正输出要看商品页和购物车页模板。商品详情页在 `inc/functions/shop/inc/single.php` 里按固定顺序输出：
+
+```php
+$page_type = 'product';
+echo '<div class="fluid-widget-wrap">';
+dynamic_sidebar('shop_' . $page_type . '_top_fluid');
+echo '</div>';
+
+// 商品正文、相关推荐、shop_product_page_content_after
+
+if ($content_layout === 'side') {
+    echo '<div class="sidebar">';
+    dynamic_sidebar('shop_' . $page_type . '_sidebar');
+    echo '</div>';
+}
+
+echo '<div class="fluid-widget-wrap">';
+dynamic_sidebar('shop_' . $page_type . '_bottom_fluid');
+echo '</div>';
+```
+
+所以 `shop_product_sidebar` 只有商品内容布局是 `side` 时才会显示；如果商品页被设置为全宽布局，侧栏里的模块不会输出。给客户交付商品页模块时，先确认布局配置，再判断模块应放 `sidebar` 还是 `top_fluid`、`bottom_fluid`。
+
+购物车页在 `inc/functions/shop/page/cart.php` 里关闭普通侧边栏，只保留上下两个全宽位置：
+
+```php
+add_filter('zib_is_show_sidebar', '__return_false');
+
+$page_type = 'cart';
+echo '<div class="fluid-widget-wrap">';
+dynamic_sidebar('shop_' . $page_type . '_top_fluid');
+echo '</div>';
+
+echo '<div class="container">';
+do_action('shop_' . $page_type . '_page_content');
+echo '</div>';
+
+echo '<div class="fluid-widget-wrap">';
+dynamic_sidebar('shop_' . $page_type . '_bottom_fluid');
+echo '</div>';
+```
+
+购物车页适合放公告、凑单推荐、售后说明、配送提示或活动推荐，不适合放需要修改购物车数据的业务按钮。购物车写入动作要走商城购物车和订单 Ajax，不要写在小工具渲染函数里。
+
+## 预留文件边界
+
+`widgets.php` 会统一引入 `product`、`term`、`other` 三个文件：
+
+```php
+zib_require(array(
+    'product',
+    'term',
+    'other',
+), false, ZIB_SHOP_REQUIRE_URI . 'widgets/widgets-');
+```
+
+但当前源码里 `widgets-term.php` 没有注册小工具，`widgets-other.php` 只挂了一个空的创建函数：
+
+```php
+add_action('after_setup_theme', 'zib_shop_widget_create_other');
+function zib_shop_widget_create_other()
+{
+
+}
+```
+
+这说明商城小工具体系预留了分类和其它模块扩展位，但现有可直接复用的完整实现仍集中在商品列表、商品 Tab 和单行商品列表。扩展时可以沿用文件分层：商品相关放 `widgets-product.php` 同类逻辑；分类筛选、活动专题、购物车提示这类新增模块可以放到对应的 `term` 或 `other` 文件，但要自己补 `Zib_CFSwidget::create()`、前台 callback、必要的 Ajax callback 和空数据兜底。
+
+## 商品小工具注册
+
+商品小工具在 `after_setup_theme` 注册：
+
+```php
+add_action('after_setup_theme', 'zib_shop_widget_create_product');
+```
+
+注册前先引入商城后台字段模块：
+
+```php
+zib_require(ZIB_SHOP_REQUIRE_URI . 'admin/options/option-module', true);
+```
+
+这是因为商品小工具复用了 `zib_shop_csf_module::product_orderby_options()`、`zib_shop_csf_module::list_style()` 这类字段模块。新增商城小工具时，如果需要复用商城字段，也应先加载这个模块，不要重复写一套排序和卡片样式字段。
+
+## 商品列表小工具
+
+商品列表小工具 id 是：
+
+```php
+zib_shop_widget_ui_product_lists
+```
+
+它支持这些筛选字段：
+
+| 字段          | 类型        | 对应 taxonomy                                    |
+| ------------- | ----------- | ------------------------------------------------ |
+| `exclude_cat` | select 多选 | `shop_cat`                                       |
+| `include_cat` | select 多选 | `shop_cat`                                       |
+| `include_dis` | select 多选 | `shop_discount`                                  |
+| `include_tag` | select 多选 | `shop_tag`                                       |
+| `orderby`     | select      | `zib_shop_csf_module::product_orderby_options()` |
+| `count`       | spinner     | 商品数量                                         |
+| `paginate`    | radio       | 不翻页、Ajax 翻页、数字分页                      |
+| `list_style`  | fieldset    | `zib_shop_csf_module::list_style()`              |
+
+`include_cat` 依赖 `exclude_cat` 为空才显示：
+
+```php
+array(
+    'dependency'  => array('exclude_cat', '==', '', '', 'visible'),
+    'id'          => 'include_cat',
+    'options'     => 'categories',
+    'query_args'  => array(
+        'taxonomy' => 'shop_cat',
+    ),
+    'chosen'      => true,
+    'multiple'    => true,
+    'ajax'        => true,
+    'type'        => 'select',
+)
+```
+
+这体现了主题字段设计习惯：互斥筛选在后台字段层就先约束，服务端查询层再按优先级处理。
+
+### 运营配置取舍
+
+三个商品小工具适合的运营场景不同：
+
+| 小工具                                     | 加载方式                                | 适合放置                                 | 适合内容                                 |
+| ------------------------------------------ | --------------------------------------- | ---------------------------------------- | ---------------------------------------- |
+| `zib_shop_widget_ui_product_lists`         | 首屏输出占位，Ajax 拉取列表             | 首页分区、分类页补充模块、购物车下方推荐 | 一组可分页商品，例如优惠专区、分类推荐   |
+| `zib_shop_widget_ui_tab_product`           | 首个 Tab Ajax 拉取，后续 Tab 点击后拉取 | 商城首页、专题页中段                     | 热门推荐、最新上架、销量榜、指定活动商品 |
+| `zib_shop_widget_ui_oneline_product_lists` | 服务端直接查询，输出 Swiper             | 首页首屏、商品详情页上方/底部全宽        | 少量横向推荐、强运营露出                 |
+
+如果要做“优惠活动专区”，优先使用 `include_dis` 绑定 `shop_discount`。这样商品卡片、优惠标签、活动归档页和确认下单都会指向同一组 `shop_discount` 数据。不要只在小工具里写 `meta_query` 模拟活动，否则前台能看到活动商品，但商品详情、购物车和订单优惠不会自然命中。
+
+如果要做“分类推荐”，优先用 `include_cat`；如果要做“排除某些分类后的全站推荐”，再用 `exclude_cat`。源码里 `exclude_cat` 优先级高于 `include_cat`，并且后台字段层会在设置了排除分类后隐藏包含分类。
+
+排序字段来自 `zib_shop_csf_module::product_orderby_options()`：
+
+```php
+array(
+    'modified'       => __('更新时间', 'zib_language'),
+    'date'           => __('发布时间', 'zib_language'),
+    'views'          => __('浏览量', 'zib_language'),
+    'comment_count'  => __('评论量', 'zib_language'),
+    'favorite_count' => __('收藏数量', 'zib_language'),
+    'zibpay_price'   => __('售价', 'zib_language'),
+    'score'          => __('评分', 'zib_language'),
+    'sales_volume'   => __('销量', 'zib_language'),
+    'rand'           => __('随机', 'zib_language'),
+)
+```
+
+这些值不是直接拼 SQL，而是交给 `zib_query_orderby_filter()` 转成主题统一排序。新增运营排序时，应把 meta key 接入主题排序 key，再让小工具继续走这个函数。
+
+## Ajax 加载结构
+
+商品列表前台先输出 Ajax pager：
+
+```php
+function zib_shop_widget_ui_product_lists($args, $instance)
+{
+    $widget_id = $args['widget_id'];
+    $id_base   = 'zib_shop_widget_ui_product_lists';
+    $index     = str_replace($id_base . '-', '', $widget_id);
+
+    $list_style = $instance['list_style'] ?? array();
+
+    $placeholder_i = wp_is_mobile() ? 4 : ($instance['count'] ?? 8);
+    $ias_args      = array(
+        'type'   => 'ias',
+        'id'     => '',
+        'class'  => 'product-lists-row',
+        'loader' => zib_shop_get_lists_card_placeholder($list_style, $placeholder_i),
+        'query'  => array(
+            'action' => 'ajax_widget_ui',
+            'id'     => $id_base,
+            'index'  => $index,
+        ),
+    );
+
+    echo '<div class="mb10">';
+    echo zib_get_ias_ajaxpager($ias_args);
+    echo '</div>';
+}
+```
+
+这里继续复用通用小工具 Ajax 入口 `ajax_widget_ui`。前端只传 `id` 和 `index`，真实筛选来自后台保存的小工具实例。
+
+## 查询组装
+
+Ajax 回调先从实例配置组装 taxonomy 查询：
+
+```php
+$tax_query = array();
+if (!empty($instance['exclude_cat'])) {
+    $tax_query[] = array(
+        'taxonomy' => 'shop_cat',
+        'field'    => 'term_id',
+        'terms'    => $instance['exclude_cat'],
+        'operator' => 'NOT IN',
+    );
+} elseif (!empty($instance['include_cat'])) {
+    $tax_query[] = array(
+        'taxonomy' => 'shop_cat',
+        'field'    => 'term_id',
+        'terms'    => $instance['include_cat'],
+    );
+}
+
+if (!empty($instance['include_dis'])) {
+    $tax_query[] = array(
+        'taxonomy' => 'shop_discount',
+        'field'    => 'term_id',
+        'terms'    => $instance['include_dis'],
+    );
+}
+
+if (!empty($instance['include_tag'])) {
+    $tax_query[] = array(
+        'taxonomy' => 'shop_tag',
+        'field'    => 'term_id',
+        'terms'    => $instance['include_tag'],
+    );
+}
+```
+
+然后查询 `shop_product`：
+
+```php
+$query_args = array(
+    'ignore_sticky_posts' => 1,
+    'post_type'           => 'shop_product',
+    'post_status'         => 'publish',
+    'tax_query'           => $tax_query,
+    'posts_per_page'      => $count,
+);
+
+$query_args = zib_query_orderby_filter($orderby, $query_args);
+```
+
+如果不分页，会加 `no_found_rows`：
+
+```php
+if ($paginate) {
+    $query_args['paged'] = $paged;
+} else {
+    $query_args['no_found_rows'] = true;
+}
+```
+
+新增商品列表时不要为了简单直接查所有商品。应根据后台配置组装 `tax_query`，并用 `zib_query_orderby_filter()` 处理主题已有排序。
+
+## 商品卡片输出
+
+商品列表不手写卡片 HTML，而是调用：
+
+```php
+$lists .= zib_shop_get_product_list_card($list_card_args);
+```
+
+`list_card_args` 来自 `list_style` 字段，里面包含商品卡片样式、显示信息、按钮、图像等配置。扩展时优先补充卡片参数或过滤卡片函数，不要复制一份卡片结构长期维护。
+
+空内容处理遵循主题 Ajax 习惯：
+
+```php
+if (1 == $paged && !$lists) {
+    $lists = zib_get_ajax_null('暂无内容', 10);
+}
+```
+
+## 分页协议
+
+商品列表支持三种分页：
+
+```php
+if ($paginate === 'ajax') {
+    $lists .= zib_get_ajax_next_paginate($query->found_posts, $paged, $count, $ajax_url, 'text-center theme-pagination ajax-pag', 'next-page ajax-next', '', 'paged', 'no');
+} elseif ($paginate === 'number') {
+    $lists .= zib_get_ajax_number_paginate($query->found_posts, $paged, $count, $ajax_url, 'ajax-pag', 'next-page ajax-next', 'paged');
+} else {
+    $lists .= '<div class="ajax-pag hide"><div class="next-page ajax-next"><a href="#"></a></div></div>';
+}
+```
+
+即使不翻页，也保留隐藏 `.ajax-pag`。这能让前端 Ajax pager 正确识别结束状态。
+
+## 多 Tab 商品列表
+
+多 Tab 商品小工具 id 是：
+
+```php
+zib_shop_widget_ui_tab_product
+```
+
+它用 `group` 字段保存多个栏目，每个栏目包含标题和一组商品筛选条件。没有栏目时直接隐藏：
+
+```php
+function zib_shop_widget_ui_tab_product_is_show($show_class, $args, $instance)
+{
+    if (empty($instance['tabs'])) {
+        return false;
+    }
+
+    return $show_class;
+}
+```
+
+首个 Tab 直接加载，后续 Tab 输出隐藏触发器：
+
+```php
+if ($tabs_i == 1) {
+    $ias_args = array(
+        'type'   => 'ias',
+        'class'  => 'product-lists-row',
+        'loader' => $placeholder,
+        'url'    => $ajax_href,
+    );
+
+    $con_html = zib_get_ias_ajaxpager($ias_args);
+} else {
+    $con_html = '';
+    $con_html .= '<span class="post_ajax_trigger hide"><a href="' . add_query_arg('tab', $tabs_key, $ajax_href) . '" class="ajax_load ajax-next ajax-open" no-scroll="true"></a></span>';
+    $con_html .= '<div class="post_ajax_loader" style="display: none;">' . $placeholder . '</div>';
+    $con_html = '<div class="ajaxpager product-lists-row">' . $con_html . '</div>';
+}
+```
+
+Tab 导航仍然使用主题通用协议：
+
+```php
+$tabs_nav .= '<li class="' . $nav_class . '"><a' . ($tabs_i !== 1 ? ' data-ajax' : '') . ' data-toggle="tab" href="#' . $tab_id . '">' . $tabs['title'] . '</a></li>';
+```
+
+Ajax 回调取出指定栏目配置，再复用商品列表回调：
+
+```php
+function zib_shop_widget_ui_tab_product_ajax($instance)
+{
+    $tab                    = isset($_REQUEST['tab']) ? (int) $_REQUEST['tab'] : 0;
+    $tab_args               = isset($instance['tabs'][$tab]) ? $instance['tabs'][$tab] : array();
+    $tab_args['count']      = $instance['count'] ?? 12;
+    $tab_args['paginate']   = $instance['paginate'] ?? false;
+    $tab_args['list_style'] = $instance['list_style'] ?? array();
+
+    zib_shop_widget_ui_product_lists_ajax($tab_args);
+}
+```
+
+这个复用方式能保证 Tab 列表和普通列表的筛选、排序、卡片样式、分页行为一致。
+
+多栏目商品列表默认会创建三组运营栏目：
+
+```php
+'default' => array(
+    array(
+        'title'   => '热门推荐',
+        'orderby' => 'views',
+    ),
+    array(
+        'title'   => '最新上架',
+        'orderby' => 'date',
+    ),
+    array(
+        'title'   => '最热销量',
+        'orderby' => 'sales_volume',
+    ),
+)
+```
+
+每个 Tab 都有独立的分类、优惠活动、标签和排序配置，但共享外层的 `count`、`paginate` 和 `list_style`。这意味着一个多栏目模块适合做“同一视觉样式下的多组商品”，不适合在同一个模块里混用大卡片、小卡片和不同分页数量。
+
+Tab 标题字段 `sanitize=false`，允许写少量 HTML。二开或后台配置时要保持标题短小，避免把复杂按钮、表单或脚本塞进标题。Tab 内容加载由 `data-ajax` 和隐藏 `.post_ajax_trigger` 触发，不需要在标题里额外写点击事件。
+
+## 单行商品列表
+
+单行商品小工具 id 是：
+
+```php
+zib_shop_widget_ui_oneline_product_lists
+```
+
+它不走 Ajax，而是直接查询并输出横向滚动 Swiper：
+
+```php
+$list_card_args['class'] = 'swiper-slide';
+$query_args = zib_query_orderby_filter($orderby, $query_args);
+$query      = new WP_Query($query_args);
+
+while ($query->have_posts()) {
+    $query->the_post();
+    $lists .= zib_shop_get_product_list_card($list_card_args);
+}
+
+$html = '<div class="swiper-container swiper-scroll mb20">
+            <div class="swiper-wrapper swiper-wrapper-product-lists">
+                ' . $lists . '
+            </div>
+            <div class="swiper-button-prev"></div>
+            <div class="swiper-button-next"></div>
+        </div>';
+```
+
+因为它是横向滚动模块，更适合全宽或内容上方位置，不适合狭窄侧边栏。
+
+单行商品列表没有分页，也设置了 `no_found_rows=true`。它适合展示少量商品，不适合承担“加载更多”的商品瀑布流。如果需要很多商品、筛选切换或活动页式列表，应使用商品列表小工具或多 Tab 商品列表。
+
+空内容时，普通用户不会看到错误提示；只有超级管理员会看到配置错误提示：
+
+```php
+if (!$lists) {
+    if (is_super_admin()) {
+        echo '<div class="c-red muted-box mb20"><b>' . __('[商城]单行商品列表模块：', 'zib_language') . '</b>' . __('当前配置下没有可显示的内容', 'zib_language') . '</div>';
+    }
+    return;
+}
+```
+
+这是主题常见的运营模块策略：配置问题只提示管理员，普通访客页面保持干净。自定义运营模块也应遵循这个方式，不要把“后台未配置”“分类为空”“活动过期”等管理信息展示给普通用户。
+
+## 优惠活动运营联动
+
+商城小工具的 `include_dis` 只是按 `shop_discount` taxonomy 筛商品；优惠是否有效、能否抵扣、赠品是否发放仍由商品详情、购物车和订单链路判断。推荐这样理解：
+
+| 阶段             | 使用的数据                                                                                                             |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| 小工具展示       | 商品是否挂了指定 `shop_discount`                                                                                       |
+| 商品卡片 badge   | `zib_shop_get_product_discount_badges()` 读取商品有效活动                                                              |
+| 商品详情优惠弹窗 | `zib_shop_get_product_discount()` 和前端 `discountModal()`                                                             |
+| 确认下单         | `zib_shop_discount_price_limit_check()`、`zib_shop_discount_user_limit_check()`、`zib_shop_discount_price_calculate()` |
+| 订单详情         | `discount_hit`、`gift_data`、`order_discount_modal`、`order_gift_modal`                                                |
+
+所以运营上可以提前把商品挂到一个未开始的活动并用活动页或小工具预热，但小工具筛选到这些商品不代表下单时一定有优惠。真正生效仍要看 `time_limit`、`price_limit`、`user_limit` 和活动配置是否有效。
+
+做活动专题页时，推荐组合：
+
+| 位置         | 推荐模块                                                             |
+| ------------ | -------------------------------------------------------------------- |
+| 首屏横向推荐 | `zib_shop_widget_ui_oneline_product_lists` + `include_dis`           |
+| 主商品区     | `zib_shop_widget_ui_product_lists` + `include_dis` + `paginate=ajax` |
+| 多活动切换   | `zib_shop_widget_ui_tab_product`，每个 Tab 绑定不同 `include_dis`    |
+| 规则说明     | 普通文本/模块内容，不要复制优惠计算规则                              |
+
+活动规则应维护在 `shop_discount_config`，商品只通过 taxonomy 关联活动。不要在专题页正文、小工具标题或前端脚本里再写一套满减和折扣算法。
+
+## 自定义商品列表示例
+
+下面示例保持子比主题写法，只演示如何新增一个“只显示精选商品”的轻量小工具：
+
+```php
+function zib_docs_shop_widget_featured_products($args, $instance)
+{
+    $count = !empty($instance['count']) ? (int) $instance['count'] : 6;
+
+    $query_args = array(
+        'post_type'           => 'shop_product',
+        'post_status'         => 'publish',
+        'ignore_sticky_posts' => 1,
+        'posts_per_page'      => $count,
+        'no_found_rows'       => true,
+        'meta_query'          => array(
+            array(
+                'key'   => 'docs_featured_product',
+                'value' => '1',
+            ),
+        ),
+    );
+
+    $query = new WP_Query($query_args);
+    $lists = '';
+
+    while ($query->have_posts()) {
+        $query->the_post();
+        $lists .= zib_shop_get_product_list_card(array());
+    }
+    wp_reset_query();
+
+    if (!$lists) {
+        return;
+    }
+
+    echo '<div class="product-lists-row">';
+    echo $lists;
+    echo '</div>';
+}
+
+function zib_docs_shop_widget_create_featured_products()
+{
+    if (!function_exists('Zib_CFSwidget') || !_pz('shop_s')) {
+        return;
+    }
+
+    Zib_CFSwidget::create('zib_docs_shop_widget_featured_products', array(
+        'title'       => __('精选商品', 'zib_language'),
+        'zib_title'   => true,
+        'zib_affix'   => true,
+        'zib_show'    => true,
+        'callback'    => 'zib_docs_shop_widget_featured_products',
+        'description' => __('显示一组精选商品卡片。', 'zib_language'),
+        'fields'      => array(
+            array(
+                'title'   => __('显示数量', 'zib_language'),
+                'id'      => 'count',
+                'default' => 6,
+                'max'     => 20,
+                'min'     => 1,
+                'step'    => 1,
+                'type'    => 'spinner',
+            ),
+        ),
+    ));
+}
+add_action('after_setup_theme', 'zib_docs_shop_widget_create_featured_products');
+```
+
+真实项目里如果“精选”来自商品 Meta，应在商品后台配置中补字段，并考虑商品保存、缓存刷新和列表排序，不要只靠前台小工具查询临时约定。
+
+## 扩展建议
+
+| 需求                        | 推荐入口                                                                        |
+| --------------------------- | ------------------------------------------------------------------------------- |
+| 商品详情页侧边栏模块        | `shop_product_sidebar`                                                          |
+| 商品详情页上方/底部横向模块 | `shop_product_top_fluid`、`shop_product_bottom_fluid`                           |
+| 购物车页提示或推荐          | `shop_cart_top_fluid`、`shop_cart_bottom_fluid`                                 |
+| 商品列表展示                | `zib_shop_widget_ui_product_lists` 同类写法                                     |
+| 商品 Tab 展示               | `zib_shop_widget_ui_tab_product` 同类写法                                       |
+| 横向滚动商品                | `zib_shop_widget_ui_oneline_product_lists` 同类写法                             |
+| 商品卡片样式                | `zib_shop_csf_module::list_style()`                                             |
+| 商品排序                    | `zib_shop_csf_module::product_orderby_options()` + `zib_query_orderby_filter()` |
+| Ajax 加载                   | `ajax_widget_ui` + `{id}_ajax`                                                  |
+
+## 风险清单
+
+- 不要在商城关闭时注册依赖 `shop_product` 的小工具。
+- 不要让前端 Ajax 参数直接控制分类、价格、排序或商品数量。
+- 不要把商品小工具当普通文章列表处理，商品价格、库存、优惠、标签和购买状态都来自商城函数。
+- 不要复制商品卡片 HTML，优先调用 `zib_shop_get_product_list_card()`。
+- 不要删除隐藏 `.ajax-pag` 兜底结构，前端 Ajax pager 依赖它判断状态。
+- 不要把横向滚动商品放进狭窄侧边栏。
+- 不要在商品列表里做订单、库存扣减或支付动作，展示模块只负责展示，写入流程走购物车、下单和 Zibpay。

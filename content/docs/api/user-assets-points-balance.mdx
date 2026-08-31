@@ -1,0 +1,976 @@
+---
+title: 用户资产、积分与余额
+description: 蒸馏子比主题 Zibpay 里的用户余额、积分、充值、购买积分、转账、免费积分、资产记录和后台调整开发边界。
+---
+
+## 模块边界
+
+子比主题把“余额”和“积分”放在 Zibpay 体系里处理。它们不是普通用户字段，而是资产类数据：会被充值、购买积分、付费内容、商城订单、退款、提现、邀请奖励、签到、免费积分、管理员手动调整和转账共同读写。
+
+官网相关教程主要面向站长配置，例如“积分功能”和“积分转账和余额转账”。落到源码时，关键不是某个按钮本身，而是资产变动必须经过 Zibpay 的订单、Ajax、Hook 和资产流水函数。
+
+| 官网场景          | 本地源码落点                                                       | 二开重点                                                          |
+| ----------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| 积分功能配置      | `zibpay/functions/zibpay-points.php`                               | 积分只保存整数，购买积分通过 `payment_order_success` 发放         |
+| 余额充值          | `zibpay/functions/zibpay-balance.php`、`balance-ajax.php`          | 充值订单 `order_type=8` 成功后才写余额，不看 `pay_price` 判断到账 |
+| 积分/余额转账     | `pay_transfer_modal`、`pay_transfer`、`zibpay_get_transfer_link()` | 提交阶段再次检查开关、nonce、权限、节流和资产余额                 |
+| 卡密兑换余额/积分 | `ZibCardPass`、`zibpay_initiate_card_pass()`                       | 卡密先进入订单支付流，资产由支付成功监听统一发放                  |
+| 后台手动调整资产  | `admin_update_user_balance`、`admin_update_user_points`            | 只能管理员操作，仍调用资产更新函数并写近期流水                    |
+| 资产记录与排查    | `balance_record`、`points_record`、订单和提现/分佣记录             | 近期记录最多 50 条，不是完整财务审计表                            |
+
+| 能力                   | 主要源码                                                                                                 | 关键数据                                                                 |
+| ---------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| 余额读取与更新         | `zibpay/functions/zibpay-balance.php`                                                                    | `balance`、`balance_record`、`balance_withdraw_ing`、`balance_add_ing`   |
+| 积分读取与更新         | `zibpay/functions/zibpay-points.php`                                                                     | `points`、`points_record`、`free_points_detail`                          |
+| 余额充值与购买积分弹窗 | `zibpay/functions/balance-ajax.php`                                                                      | `balance_charge_modal`、`points_pay_modal`                               |
+| 卡密兑换余额/积分      | `zibpay/functions/zibpay-order.php`、`zibpay/functions/zibpay-ajax.php`、`zibpay/page/charge-card.php`   | `payment_method=card_pass`、`card_pass_id`、`ZibCardPass`                |
+| 转账                   | `zibpay/functions/balance-ajax.php`、`zibpay/functions/zibpay-balance.php`                               | `pay_transfer_modal`、`pay_transfer`                                     |
+| 支付成功联动           | `zibpay/functions/zibpay-balance.php`、`zibpay/functions/zibpay-points.php`                              | `payment_order_success`                                                  |
+| 用户中心展示           | `zibpay/functions/zibpay-user.php`、`zibpay/functions/zibpay-balance.php`                                | 余额 Tab、积分 Tab、资产记录                                             |
+| 后台手动调整           | `zibpay/functions/balance-ajax.php`、`zibpay/functions/admin/admin.php`                                  | `admin_update_user_balance`、`admin_update_user_points`                  |
+| 后台资产明细           | `zibpay/functions/admin/admin.php`、`zibpay/functions/ajax.php`、`zibpay/functions/admin/admin-ajax.php` | 用户列表 `assets` 列、`admin_assets_details`、`admin_asset_ranking_data` |
+
+扩展资产能力时要走 Zibpay 现有函数。不要直接 `update_user_meta($user_id, 'balance', ...)` 或 `update_user_meta($user_id, 'points', ...)`，这样会绕过并发扣减、资产流水、支付成功联动、消息通知和后台记录。
+
+## 资产变动时序
+
+余额和积分的安全边界可以按“入口 -> 订单/校验 -> 资产函数 -> 流水”理解：
+
+| 变动来源         | 触发入口                       | 真正写资产的位置                                                               |
+| ---------------- | ------------------------------ | ------------------------------------------------------------------------------ |
+| 余额充值         | 下单并支付成功                 | `zibpay_payment_order_balance()` 监听 `payment_order_success`，优先级 `8`      |
+| 购买积分         | 下单并支付成功                 | `zibpay_payment_order_points()` 监听 `payment_order_success`，优先级 `7`       |
+| 积分购买内容/VIP | `points_initiate_pay`          | `zibpay_points_initiate_pay()` 先扣积分，再调用 `ZibPay::payment_order()`      |
+| 余额支付订单     | `initiate_pay` 选择余额        | `zibpay_initiate_balance()` 先扣余额，再调用 `ZibPay::payment_order()`         |
+| 卡密支付         | `payment_method=card_pass`     | `zibpay_initiate_card_pass()` 标记卡密，然后进入订单成功链路                   |
+| 用户转账         | `pay_transfer`                 | 先扣发起人，再给接收人加资产，成功后触发 `pay_transfer`                        |
+| 售后退款         | `zib_shop_after_sale_to_end()` | 按退款渠道调用 `zibpay_update_user_balance()` 或 `zibpay_update_user_points()` |
+
+这几类入口的共同点是：资产函数返回失败时不能继续伪造成功状态；支付成功 Hook 也不能重复执行资产发放。二开如果新增资产来源，应该优先创建明确的订单类型或业务日志，再调用资产函数写当前值和近期流水。
+
+## 读取资产
+
+余额和积分读取函数分别是：
+
+```php
+$balance = zibpay_get_user_balance($user_id);
+$points  = zibpay_get_user_points($user_id);
+```
+
+`zibpay_get_user_balance()` 会把余额按两位小数返回：
+
+```php
+function zibpay_get_user_balance($user_id)
+{
+    $balance = get_user_meta($user_id, 'balance', true);
+    return floatval(round((float) $balance, 2));
+}
+```
+
+`zibpay_get_user_points()` 会把积分转成整数：
+
+```php
+function zibpay_get_user_points($user_id = 0)
+{
+    if (!$user_id) {
+        $user_id = get_current_user_id();
+    }
+
+    if (!$user_id) {
+        return 0;
+    }
+
+    $points = get_user_meta($user_id, 'points', true);
+
+    return (int) $points;
+}
+```
+
+展示资产时要按功能开关判断：
+
+| 功能     | 开关                            |
+| -------- | ------------------------------- |
+| 余额     | `_pz('pay_balance_s')`          |
+| 积分     | `_pz('points_s')`               |
+| 余额转账 | `_pz('pay_balance_transfer_s')` |
+| 积分转账 | `_pz('points_transfer_s')`      |
+| 购买积分 | `_pz('points_pay_s')`           |
+
+不要把余额、积分、订单状态输出到公开作者页、公开 Ajax 或静态缓存块里。它们只适合在当前用户视角、用户中心、收银台、订单确认和后台管理中展示。
+
+## 更新余额
+
+余额变动统一走：
+
+```php
+zibpay_update_user_balance($user_id, array(
+    'order_num' => $order_num,
+    'value'     => 9.90,
+    'type'      => __('活动奖励', 'zib_language'),
+    'desc'      => __('完成指定任务奖励余额', 'zib_language'),
+));
+```
+
+字段说明：
+
+| 字段        | 说明                                 |
+| ----------- | ------------------------------------ |
+| `order_num` | 关联订单号，可为空                   |
+| `value`     | 正数增加，负数扣除；余额保留两位小数 |
+| `type`      | 流水类型文案                         |
+| `desc`      | 流水说明                             |
+| `time`      | 默认当前时间                         |
+
+函数会先调用 `zibpay_user_balance_or_points_save_db('balance', ...)` 进行数据库更新，再写入 `balance_record`，最多保留 50 条：
+
+```php
+$max        = 50;
+$record     = array_slice($record, 0, $max - 1, true);
+$new_record = array_merge(array($data), $record);
+
+zib_update_user_meta($user_id, 'balance_record', $new_record);
+```
+
+扣减余额时不要先读取再自己计算再写回。统一函数内部使用 SQL 条件保证余额不足时扣减失败：
+
+```php
+UPDATE usermeta
+SET meta_value = ROUND(CAST(meta_value AS DECIMAL(20,2)) - CAST(%s AS DECIMAL(20,2)), 2)
+WHERE user_id = %d
+AND meta_key = %s
+AND CAST(meta_value AS DECIMAL(20,2)) >= CAST(%s AS DECIMAL(20,2))
+```
+
+这条边界很重要：用户同时支付、提现、转账时，普通 `get_user_meta()` + `update_user_meta()` 容易出现并发覆盖。
+
+## 更新积分
+
+积分变动统一走：
+
+```php
+zibpay_update_user_points($user_id, array(
+    'order_num' => $order_num,
+    'value'     => 30,
+    'type'      => __('任务奖励', 'zib_language'),
+    'desc'      => __('完成每日任务', 'zib_language'),
+));
+```
+
+积分只允许整数：
+
+```php
+$data['value'] = (int) $data['value'];
+```
+
+扣减积分同样走 `zibpay_user_balance_or_points_save_db('points', ...)`，使用 SQL 条件判断剩余积分是否足够：
+
+```php
+UPDATE usermeta
+SET meta_value = CAST(meta_value AS SIGNED) - %d
+WHERE user_id = %d
+AND meta_key = %s
+AND CAST(meta_value AS SIGNED) >= %d
+```
+
+积分流水写入 `points_record`，最多保留 50 条。不要把 `points_record` 当成完整财务账本；它是用户端近期流水展示。需要更长审计记录时，应该另建业务表或写订单/日志，并仍然调用 `zibpay_update_user_points()` 更新当前余额。
+
+## 免费积分
+
+免费积分是“积分获取规则”的一部分，不等同于购买积分。统一入口是：
+
+```php
+zibpay_add_user_free_points($user_id, $value, $key);
+```
+
+它会检查：
+
+1. 用户和积分值是否有效。
+2. 今日免费积分是否超过 `_pz('points_free_opt', 100, 'day_max')`。
+3. 用户是否处于禁封状态。
+4. 写入积分流水。
+5. 写入每日免费积分明细 `free_points_detail`。
+
+内置免费积分来源通过 `zibpay_points_free_add` 挂接：
+
+| Hook                                             | 场景         |
+| ------------------------------------------------ | ------------ |
+| `user_checkined`                                 | 签到奖励     |
+| `user_register`                                  | 注册奖励     |
+| `admin_init`                                     | 登录奖励     |
+| `save_post`                                      | 发布文章     |
+| `like-posts`                                     | 文章被点赞   |
+| `favorite-posts`                                 | 文章被收藏   |
+| `comment_post`                                   | 发表评论     |
+| `comment_unapproved_to_approved`                 | 评论通过审核 |
+| `like-comment`                                   | 评论被点赞   |
+| `follow-user`                                    | 用户被关注   |
+| `bbs_score_extra`                                | 帖子被加分   |
+| `bbs_posts_essence_set`                          | 帖子成为精华 |
+| `posts_is_hot`、`plate_is_hot`、`comment_is_hot` | 热门内容     |
+| `answer_adopted`                                 | 回答被采纳   |
+
+新增免费积分来源：
+
+```php
+function zib_docs_add_task_points($user_id, $task_id)
+{
+    if (!$user_id || !$task_id || !_pz('points_s', true)) {
+        return;
+    }
+
+    zibpay_add_user_free_points($user_id, 5, 'docs_task');
+}
+```
+
+`$key` 会映射到 `zib_get_user_points_add_options()` 的类型说明。扩展时保持稳定英文 key，不要用用户输入作为 key。
+
+## 购买积分
+
+购买积分入口按钮：
+
+```php
+echo zibpay_get_points_pay_link('but c-green', __('购买积分', 'zib_language'));
+```
+
+按钮会打开 `points_pay_modal`：
+
+```php
+add_action('wp_ajax_points_pay_modal', 'zibpay_ajax_points_pay_modal');
+```
+
+购买成功后，`zibpay_payment_order_points()` 监听 `payment_order_success`：
+
+```php
+if (_pz('points_s')) {
+    add_action('payment_order_success', 'zibpay_payment_order_points', 7);
+}
+```
+
+它只处理 `order_type == 9` 的购买积分订单，最终调用：
+
+```php
+zibpay_update_user_points($pay_order->user_id, array(
+    'order_num' => $pay_order->order_num,
+    'value'     => $pay_points,
+    'type'      => __('购买积分', 'zib_language'),
+    'desc'      => '',
+));
+```
+
+所以新增购买积分渠道时，不要支付成功后自己加积分。应让订单进入 `payment_order_success` 状态流，确保余额、积分、通知、订单记录和后台统计一致。
+
+### 积分卡密兑换
+
+购买积分弹窗会在 `_pz('points_pass_exchange_s')` 开启时把卡密支付加入支付方式：
+
+```php
+if (_pz('points_pass_exchange_s')) {
+    add_filter('zibpay_is_allow_card_pass_pay', '__return_true');
+    add_filter('zibpay_card_pass_payment_desc', function () {
+        $password_desc = _pz('points_pass_exchange_desc');
+        return $password_desc ? '<div class="muted-box muted-2-color padding-10 mb10 em09">' . $password_desc . '</div>' : '';
+    });
+}
+```
+
+订单提交仍走 `zibpay_ajax_submit_order()`，`order_type=9`。当 `payment_method=card_pass` 时，主题会：
+
+1. 检查用户已登录。
+2. 检查 `_pz('points_pass_exchange_s')`。
+3. 根据 `zibpay_card_pass_is_only_password(9)` 判断是否只需要密码。
+4. 用 `card`、`password`、`type=points_exchange` 查询 `ZibCardPass`。
+5. 要求卡密存在、`status=0`、`meta.points` 大于 0。
+6. 允许 0 元订单：`add_filter('pay_order_price_is_allow_0', '__return_true')`。
+7. 写入 `order_price=0`、`product_id=exchange_{card_id}`、`order_data.card_pass_id={card_id}`。
+8. 把卡密对象保存到 `$GLOBALS['zibpay_card_pass']`，等待支付执行阶段使用。
+
+关键片段：
+
+```php
+$get_args = array(
+    'card'     => $password_card,
+    'password' => $password_password,
+    'type'     => 'points_exchange',
+);
+
+if ($only_password) {
+    unset($get_args['card']);
+}
+
+$card_db = ZibCardPass::get_row($get_args);
+$card_price = zibpay_get_pass_exchange_points($card_db);
+
+$__data['order_price'] = 0;
+$__data['product_id']  = 'exchange_' . $card_db->id;
+$__mate_order_data['card_pass_id'] = $card_db->id;
+$GLOBALS['zibpay_card_pass'] = $card_db;
+```
+
+卡密本身不会在订单创建时直接发积分。真正执行卡密支付的是 `zibpay_initiate_card_pass()`：
+
+```php
+zibpay_use_card_pass($zibpay_card_pass, $order_data['order_num'], $card_pass_new_meta);
+
+$pay = array(
+    'order_num' => $order_data['order_num'],
+    'pay_type'  => 'card_pass',
+    'pay_price' => 0,
+    'pay_num'   => $order_data['order_num'],
+);
+ZibPay::payment_order($pay);
+```
+
+`zibpay_use_card_pass()` 会把卡密更新为：
+
+| 字段           | 写入            |
+| -------------- | --------------- |
+| `status`       | `used`          |
+| `order_num`    | 当前订单号      |
+| `meta.user_id` | 当前兑换用户 ID |
+
+订单成功后才由 `zibpay_payment_order_points()` 监听 `payment_order_success` 发放积分。卡密兑换积分时，它会用 `pay_num` 回查：
+
+```php
+$card_db    = ZibCardPass::get_row(array('order_num' => $pay_order->pay_num, 'type' => 'points_exchange'));
+$pay_points = zibpay_get_pass_exchange_points($card_db);
+```
+
+所以扩展积分卡密时，不要只把卡密标记为 used，也不要在卡密校验阶段直接加积分。正确链路必须同时留下订单、卡密状态和积分流水三份记录。
+
+## 余额充值
+
+余额充值入口按钮：
+
+```php
+echo zibpay_get_balance_charge_link('but c-blue', __('充值', 'zib_language'));
+```
+
+按钮会打开 `balance_charge_modal`：
+
+```php
+add_action('wp_ajax_balance_charge_modal', 'zibpay_ajax_balance_charge_modal');
+```
+
+支付成功后，余额充值由 `zibpay_payment_order_balance()` 监听订单成功状态，再调用 `zibpay_update_user_balance()`。余额充值还支持卡密：
+
+| 类型              | 说明       |
+| ----------------- | ---------- |
+| `balance_charge`  | 余额充值卡 |
+| `points_exchange` | 积分兑换卡 |
+
+卡密兑换同样不要绕过资产函数。兑换后应该生成清晰的 `order_num`、`type` 和 `desc`，方便用户在资产记录里理解来源。
+
+### 余额卡密充值
+
+余额充值弹窗在 `_pz('pay_balance_pass_charge_s')` 开启时允许卡密支付：
+
+```php
+if (_pz('pay_balance_pass_charge_s')) {
+    add_filter('zibpay_is_allow_card_pass_pay', '__return_true');
+    add_filter('zibpay_card_pass_payment_desc', function () {
+        $password_desc = _pz('pay_balance_pass_charge_desc');
+        return $password_desc ? '<div class="muted-box muted-2-color padding-10 mb10 em09">' . $password_desc . '</div>' : '';
+    });
+}
+```
+
+`order_type=8` 且 `payment_method=card_pass` 时，主题通过：
+
+```php
+$recharge_card = zibpay_get_recharge_card($password_card, $password_password, $only_password);
+```
+
+查找 `type=balance_charge` 的卡密。卡密必须满足：
+
+| 条件                                                 | 说明                          |
+| ---------------------------------------------------- | ----------------------------- |
+| 卡号/密码匹配                                        | 单密码模式会忽略 `card`       |
+| `status=0`                                           | 未使用                        |
+| `zibpay_get_recharge_card_price($recharge_card) > 0` | `meta.price` 必须有可充值金额 |
+
+余额卡密和积分卡密有一个差异：余额卡密订单的 `order_price` 会直接写成卡密面额：
+
+```php
+$card_price = zibpay_get_recharge_card_price($recharge_card);
+$__data['order_price'] = $card_price;
+$__mate_order_data['card_pass_id'] = $recharge_card->id;
+$GLOBALS['zibpay_card_pass'] = $recharge_card;
+```
+
+支付执行阶段仍由 `zibpay_initiate_card_pass()` 标记卡密并调用 `ZibPay::payment_order()`。因为 `pay_type=card_pass` 的实际支付金额为 0，余额到账金额不能看支付金额，要看订单的 `order_price`。订单成功后 `zibpay_payment_order_balance()` 监听 `payment_order_success`，`order_type=8` 且没有普通充值商品 ID 时，会把 `pay_order->order_price` 写入余额：
+
+```php
+$data = array(
+    'order_num' => $pay_order->order_num,
+    'value'     => $charge_price,
+    'type'      => __('充值', 'zib_language'),
+    'desc'      => '',
+);
+zibpay_update_user_balance($pay_order->user_id, $data);
+```
+
+因此做余额兑换类扩展时，不能用 `pay_price` 判断到账金额。卡密支付的 `pay_price` 是 0，资产到账依据是订单业务金额和对应的支付成功监听。
+
+### 卡密后台生成与导入
+
+资产卡密管理页在 `zibpay/page/charge-card.php`，卡密表使用 `ZibCardPass`。常见类型：
+
+| 类型              | 用途       | 面额来源                               |
+| ----------------- | ---------- | -------------------------------------- |
+| `balance_charge`  | 余额充值   | `meta.price`                           |
+| `points_exchange` | 积分兑换   | `meta.points`                          |
+| `vip_exchange`    | 会员兑换   | `meta.level`、`meta.time`、`meta.unit` |
+| `custom`          | 自定义卡密 | `meta` 自定义参数                      |
+
+自动生成余额或积分卡密时会调用：
+
+```php
+zibpay_generate_pass_card($type, $num, $meta, $rand_number, $rand_password, $other);
+```
+
+它写入：
+
+```php
+ZibCardPass::add(array(
+    'card'          => ZibCardPass::rand_number($rand_number),
+    'password'      => ZibCardPass::rand_password($rand_password),
+    'type'          => $type,
+    'create_time'   => $time,
+    'modified_time' => $time,
+    'status'        => '0',
+    'meta'          => $meta,
+    'other'         => $other,
+));
+```
+
+导入时，余额和积分卡密的单行格式都包含面额，区别是余额写入 `meta.price`，积分写入 `meta.points`。导出时也分开映射：`zib_card_pass_export_balance_charge_map()` 读取余额面额，`zib_card_pass_points_exchange_charge_map()` 读取积分数。
+
+如果要做自己的卡密用途，优先使用新的 `type` 和清晰的 `meta`，不要复用 `balance_charge` 或 `points_exchange` 来承载无关业务。资产类卡密一旦被 `zibpay_initiate_card_pass()` 标记使用，就会进入订单成功链路，错误复用会产生真实资产变动。
+
+### 卡密后台导出与列表排查
+
+卡密管理页入口是 `admin.php?page=zibpay_charge_card_page`，页面开头会用 `is_super_admin()` 拦截非超级管理员。后台列表默认只查询资产/VIP/自定义这些卡密类型：
+
+```php
+$type_args = array(
+    'balance_charge'  => __('余额充值', 'zib_language'),
+    'vip_exchange'    => __('会员兑换', 'zib_language'),
+    'points_exchange' => __('积分兑换', 'zib_language'),
+    'custom'          => __('自定义卡密', 'zib_language'),
+);
+
+$where = array(
+    'type' => array_keys($type_args),
+);
+```
+
+列表支持按 `type`、`status`、`other` 筛选，搜索会匹配 `card`、`password`、`other`、`meta`。排查兑换问题时，不要只查订单表，应该同时看三处：
+
+| 排查点                 | 后台字段                                               | 说明                                  |
+| ---------------------- | ------------------------------------------------------ | ------------------------------------- |
+| 是否未使用             | `status=0`                                             | 卡密还没有进入订单成功链路            |
+| 是否已兑换             | `status=used`、`order_num`                             | 有 `order_num` 时后台会跳转到订单搜索 |
+| 是否被商城自动发货售出 | `meta.shipped_order_id` 或 `other` 包含 `shipped_{id}` | 列表会显示“已售”并跳到发货订单        |
+| 面额是否正确           | `meta.price` / `meta.points` / VIP 参数                | 列表按类型调用不同读取函数展示        |
+
+导出页提交到 `admin-ajax.php?action=card_pass_export`，对应函数是 `zibpay_ajax_card_pass_export()`。它同样只允许超级管理员执行，并支持 `export_format=text|xls`：
+
+```php
+function zibpay_ajax_card_pass_export()
+{
+    if (!is_super_admin()) {
+        wp_die(__('暂无此权限', 'zib_language'));
+    }
+
+    $export_format = !empty($_REQUEST['export_format']) ? esc_sql($_REQUEST['export_format']) : 'xls';
+    $type          = !empty($_REQUEST['type']) ? esc_sql($_REQUEST['type']) : '';
+}
+```
+
+不同类型的导出字段和转换函数不同：
+
+| 类型              | 导出字段                          | 转换函数                                     | 重点                             |
+| ----------------- | --------------------------------- | -------------------------------------------- | -------------------------------- |
+| `balance_charge`  | `card,password,meta,other,status` | `zib_card_pass_export_balance_charge_map()`  | `meta` 转成余额面额              |
+| `points_exchange` | `card,password,meta,other,status` | `zib_card_pass_points_exchange_charge_map()` | `meta` 转成积分数                |
+| `vip_exchange`    | `card,password,meta,other,status` | `zib_card_pass_vip_exchange_charge_map()`    | VIP 参数导出为 `level/time/unit` |
+| `custom`          | `card,password,other,meta`        | `zib_card_pass_export_custom_map()`          | 已发货卡密导出为已售订单标识     |
+
+文本导出会把每行字段用 `text_division` 拼接；Excel 导出走 `zib_export_excel()`。如果做二次导出，不要直接输出序列化后的 `meta`，应该复用或新增 map 函数，把资产面额、会员时长、已售状态转换成运营能看懂的文本。
+
+批量删除只会删除当前卡密页允许的类型：
+
+```php
+ZibCardPass::delete(array(
+    'id'   => $delete_ids,
+    'type' => array_keys($type_args),
+));
+```
+
+扩展后台清理工具时也要带上明确的 `type` 和 `id` 条件，不能写无条件删除。`ZibCardPass` 表同时承载邀请码、优惠码、自动发货卡密等业务，误删会影响注册、优惠和商城发货链路。
+
+## 余额与积分转账
+
+转账入口：
+
+```php
+echo zibpay_get_transfer_link('points', 'but c-yellow');
+echo zibpay_get_transfer_link('balance', 'but c-blue');
+```
+
+转账弹窗和执行动作：
+
+| Ajax action            | 函数                                 | 作用         |
+| ---------------------- | ------------------------------------ | ------------ |
+| `pay_transfer_modal`   | `zibpay_ajax_pay_transfer_modal()`   | 打开转账弹窗 |
+| `transfer_user_search` | `zibpay_ajax_transfer_user_search()` | 搜索接收用户 |
+| `pay_transfer`         | `zibpay_ajax_pay_transfer()`         | 执行转账     |
+
+执行转账前主题会检查：
+
+- 功能开关是否开启。
+- `zib_ajax_verify_nonce()`。
+- 登录态。
+- `zib_ajax_debounce($type . '_change', $current_user_id)` 节流。
+- 转账金额大于 0。
+- `zib_current_user_can($type . '_transfer')`。
+- 接收用户存在。
+- 不能转给自己。
+- 当前余额或积分足够。
+
+后台开关和功能权限要同时成立，前台才会出现入口：
+
+| 类型 | 总开关          | 转账开关                 | 手续费配置                            | 说明配置                    | 权限能力           |
+| ---- | --------------- | ------------------------ | ------------------------------------- | --------------------------- | ------------------ |
+| 积分 | `points_s`      | `points_transfer_s`      | `points_service_charge`               | `points_transfer_desc`      | `points_transfer`  |
+| 余额 | `pay_balance_s` | `pay_balance_transfer_s` | `pay_balance_transfer_service_charge` | `pay_balance_transfer_desc` | `balance_transfer` |
+
+`zibpay_get_transfer_link()` 只判断登录态和功能开关；真正的能力判断在弹窗和提交阶段各做一次。后台开启积分/余额转账后，还需要到“功能权限/基本权限”配置哪些用户组能使用对应能力，否则弹窗会显示 `zib_get_nocan_info()`。
+
+弹窗有两种进入方式：
+
+| 方式             | 行为                                                 |
+| ---------------- | ---------------------------------------------------- |
+| 不传 `recipient` | 先显示用户搜索页，搜索后点击用户卡片切到金额表单     |
+| 传入 `recipient` | 直接预填接收用户卡片，仍可点“重新选择用户”回到搜索页 |
+
+`transfer_user_search` 会用 `WP_User_Query` 搜索 `user_email`、`user_nicename`、`display_name`、`user_login`，最多返回 30 个用户，并排除当前登录用户和禁封用户。返回的用户卡片由 `zibpay_get_transfer_recipient_user_card()` 生成，会显示头像、昵称和隐藏后的邮箱。二开如果要在作者页、私信页放“给他转账”，优先给 `zibpay_get_transfer_link()` 传入接收用户 ID，而不是自己拼 Ajax URL。
+
+转账先扣除发起人，再增加接收人：
+
+```php
+$del = array(
+    'value' => -$price,
+    'type'  => __('转账', 'zib_language'),
+    'desc'  => sprintf(__('转账给用户[%s]', 'zib_language'), $recipient_user->display_name),
+);
+
+if (!call_user_func($func, $current_user_id, $del)) {
+    zib_send_json_error(__('转账失败，余额不足', 'zib_language'));
+}
+
+call_user_func($func, $recipient, $add);
+```
+
+手续费只影响接收人的到账金额，发起人始终扣除完整的 `price`：
+
+```php
+$add = array(
+    'value' => $service_charge ? ($price - $price * $service_charge / 100) : $price,
+    'type'  => __('转账', 'zib_language'),
+    'desc'  => sprintf(__('来自用户[%s]的转账', 'zib_language'), $current_user->display_name),
+);
+```
+
+余额转账提交时会把金额 `round((float) $_REQUEST['price'], 2)`，接收通知里也按 2 位小数计算；积分转账提交时直接转成 `(int)`，接收通知里的实际到账同样会转成整数。因此积分手续费可能出现小数部分被截断的情况，运营设置手续费比例时要考虑这个取整影响。
+
+当前转账流程不是数据库事务：主题先扣发起人，再给接收人增加资产，最后触发成功 Hook。正常情况下资产更新函数失败概率很低，但二开不要把外部请求、复杂风控或可能抛错的逻辑插在扣款和入账之间；扩展审计、风控记录、外部通知应挂到 `pay_transfer` 成功之后。
+
+转账完成后触发：
+
+```php
+do_action('pay_transfer', $type, $current_user, $recipient_user, $price, $service_charge);
+```
+
+主题消息模块会监听这个 Hook 给接收人发站内消息，并在 `email_transfer_to_recipient` 开启时给有效邮箱发送通知邮件。通知内容会同时展示发起人、转账金额、扣除手续费后的实际到账金额和转账时间：
+
+```php
+function zibpay_pay_transfer_to_recipient($type, $current_user, $recipient_user, $price, $service_charge)
+{
+    $add_price = $service_charge ? ($price - $price * $service_charge / 100) : $price;
+    $add_price = $type === 'balance' ? floatval(round((float) $add_price, 2)) : (int) $add_price;
+
+    if (_pz('email_transfer_to_recipient', true)) {
+        $user_email = $recipient_user->user_email;
+        if (is_email($user_email) && !stristr($user_email, '@no')) {
+            @wp_mail($user_email, $m_title, $message);
+        }
+    }
+}
+```
+
+扩展审计、风控、外部通知时也监听 `pay_transfer`：
+
+```php
+function zib_docs_pay_transfer_log($type, $current_user, $recipient_user, $price, $service_charge)
+{
+    if (empty($current_user->ID) || empty($recipient_user->ID)) {
+        return;
+    }
+
+    zib_update_user_meta($current_user->ID, 'docs_last_transfer_time', current_time('mysql'));
+}
+add_action('pay_transfer', 'zib_docs_pay_transfer_log', 20, 5);
+```
+
+不要另写一个无 nonce 的转账接口。转账是资产操作，必须复用主题的功能开关、能力判断、节流和资产更新函数。
+
+## 后台手动调整
+
+后台手动增减余额和积分走：
+
+| Ajax action                 | 说明               |
+| --------------------------- | ------------------ |
+| `admin_update_user_balance` | 管理员调整用户余额 |
+| `admin_update_user_points`  | 管理员调整用户积分 |
+
+入口函数会要求：
+
+```php
+if (!is_super_admin()) {
+    zib_send_json_error(__('权限不足，仅管理员可操作', 'zib_language'));
+}
+
+zib_ajax_verify_nonce();
+```
+
+然后根据 `type=add` 或扣除写入流水：
+
+```php
+$data = array(
+    'value' => $val,
+    'type'  => __('管理员手动', 'zib_language') . ($type === 'add' ? __('添加', 'zib_language') : __('扣除', 'zib_language')),
+    'desc'  => $decs,
+);
+```
+
+它还有几层服务端边界：
+
+| 校验                                                           | 说明                                        |
+| -------------------------------------------------------------- | ------------------------------------------- |
+| `user_id`                                                      | 必须是明确用户 ID                           |
+| `val`                                                          | 余额保留两位小数，积分转整数，且必须大于 0  |
+| `type`                                                         | 只由 `add` 决定增加，其他值都会转成负数扣除 |
+| `_pz('pay_balance_s')`                                         | 余额功能关闭时不能调整余额                  |
+| `_pz('points_s')`                                              | 积分功能关闭时不能调整积分                  |
+| `zibpay_update_user_balance()` / `zibpay_update_user_points()` | 余额或积分不足时扣减失败                    |
+
+二开后台如果要调整资产，应沿用这套思路：管理员能力、nonce、正数输入、服务端决定加减方向、统一资产函数、写入说明。不要允许普通用户提交目标用户 ID 和变动值，也不要让前端直接提交负数作为扣减依据。
+
+## 后台用户列表资产列与明细弹窗
+
+WordPress 用户列表会在余额或积分功能开启时增加 `assets` 列：
+
+```php
+if ($pay_balance_s || $points_s) {
+    $columns['assets'] = '<a href="' . add_query_arg(array('orderby' => 'balance', 'order' => $order)) . '"><span>' . esc_html__('余额', 'zib_language') . '</span></a>';
+    $columns['assets'] .= ' · <a href="' . add_query_arg(array('orderby' => 'points', 'order' => $order)) . '"><span>' . esc_html__('积分', 'zib_language') . '</span></a>';
+}
+```
+
+用户列表排序通过 `users_list_table_query_args` Filter 处理。`orderby=balance` 或 `orderby=points` 会被转换成用户 meta 的数值排序：
+
+```php
+function zib_admin_users_list_table_query_args($args)
+{
+    $orderby = isset($_REQUEST['orderby']) ? $_REQUEST['orderby'] : '';
+
+    if (in_array($orderby, $mate_orderbys_num)) {
+        $args['orderby']  = 'meta_value_num';
+        $args['meta_key'] = $orderby;
+    }
+
+    return $args;
+}
+```
+
+所以后台用户列表的余额、积分排序看的是当前 `balance` / `points` meta 值，不会汇总历史充值、消费、提现或转账流水。要排查历史变动，必须继续看订单、提现、分佣、卡密或近期资产记录。
+
+列内容不是只展示数字，它还提供三个排查入口：
+
+| 入口         | 链接                                                                      | 用途                      |
+| ------------ | ------------------------------------------------------------------------- | ------------------------- |
+| 余额消费记录 | `zibpay_get_admin_shop_order_url('pay_type=balance&user_id=' . $user_id)` | 查看该用户余额支付订单    |
+| 积分消费记录 | `zibpay_get_admin_shop_order_url('pay_type=points&user_id=' . $user_id)`  | 查看该用户积分支付订单    |
+| 查看明细     | `zibpay_get_user_assets_details_admin_link()`                             | 打开余额/积分近期记录弹窗 |
+
+“查看明细”使用主题刷新弹窗：
+
+```php
+function zibpay_get_user_assets_details_admin_link($user_id, $class = '', $con = null)
+{
+    $args = array(
+        'tag'           => 'a',
+        'data_class'    => 'modal-mini full-sm',
+        'mobile_bottom' => true,
+        'height'        => 330,
+        'text'          => $con,
+        'query_arg'     => array(
+            'action'  => 'admin_assets_details',
+            'user_id' => $user_id,
+        ),
+    );
+
+    return zib_get_refresh_modal_link($args);
+}
+```
+
+弹窗 Ajax 是 `wp_ajax_admin_assets_details`，只允许超级管理员访问，然后复用前台用户中心的记录渲染函数：
+
+```php
+function zibpay_ajax_admin_assets_details()
+{
+    if (!is_super_admin()) {
+        echo __('权限不足', 'zib_language');
+        exit;
+    }
+
+    $balance_record_lists = zibpay_get_user_balance_record_lists($user_id);
+    $points_record_lists  = zibpay_get_user_points_record_lists($user_id);
+}
+```
+
+这里的“明细”不是独立资产审计表，而是用户 meta 里的近期记录。余额读取 `balance_record`，积分读取 `points_record`，两个列表都会在有内容时提示“最多显示近50条记录”。如果要做财务审计、后台导出或长期对账，应另建日志表或从订单、提现、分佣表汇总，不能把这个弹窗当成完整账本。
+
+用户资料页也会在余额或积分功能开启时通过 Codestar Profile Options 增加资产管理区：
+
+```php
+function zib_admin_user_balance_points_csf()
+{
+    if ($pay_balance_s) {
+        CSF::createProfileOptions('user_balance', array(
+            'data_type' => 'unserialize',
+        ));
+        CSF::createSection('user_balance', array(
+            'fields' => zib_csf_user_points_balance_fields('balance'),
+        ));
+    }
+}
+add_action('after_setup_theme', 'zib_admin_user_balance_points_csf');
+```
+
+`zib_csf_user_points_balance_fields()` 只负责渲染当前资产数值和 Ajax 表单，表单会提交到 `admin_update_user_balance` 或 `admin_update_user_points`：
+
+```php
+<input type="hidden" ajax-name="action" value="' . $action . '">
+<input type="hidden" ajax-name="user_id" value="' . $user_id . '">
+<input type="hidden" ajax-name="_wpnonce" value="' . wp_create_nonce($action) . '">
+```
+
+这意味着后台资料页和用户列表弹窗都是“管理入口”，不是新的资产写入协议。二开不要在 CSF 保存回调里直接更新 `balance` 或 `points`，否则会绕过 `zibpay_update_user_balance()` / `zibpay_update_user_points()` 的并发扣减和近期流水。
+
+后台仪表盘资产排行使用 `wp_ajax_admin_asset_ranking_data`：
+
+```php
+function zibpay_ajax_admin_asset_ranking_data()
+{
+    if (!current_user_can('administrator')) {
+        zib_send_json_error(__('您没有权限访问此页面', 'zib_language'));
+    }
+
+    $points_data  = zibpay_get_user_ranking_data('points');
+    $balance_data = zibpay_get_user_ranking_data('balance');
+}
+```
+
+排行只取当前资产大于 0 的前 50 个用户：
+
+```php
+$new_db = ZibDB::table($wpdb->users)
+    ->field($field)
+    ->order('_mt.meta_value+0', 'desc')
+    ->group('ID')
+    ->limit(50);
+```
+
+它适合做运营概览，不适合做资产导出。这里没有时间范围，也不是流水求和；余额和积分排行展示的是当前余额/积分存量。
+
+如果确实需要长期资产流水导出，推荐新增独立日志表或在成功更新后追加审计记录。示例保持资产函数为唯一写入口，然后在业务侧补一份只读审计表：
+
+```php
+function zib_docs_add_balance_with_audit($user_id, $value, $desc)
+{
+    $data = array(
+        'value' => $value,
+        'type'  => __('活动奖励', 'zib_language'),
+        'desc'  => $desc,
+    );
+
+    if (!zibpay_update_user_balance($user_id, $data)) {
+        return false;
+    }
+
+    do_action('zib_docs_balance_audit_record', $user_id, $data);
+    return true;
+}
+```
+
+导出审计表时再用 `zib_export_excel()` 或分批 CSV 输出，并限制为管理员操作。不要从 `balance_record` / `points_record` 反推全量历史，也不要把 `admin_assets_details` 弹窗内容抓取后当导出数据。
+
+## 资产记录展示
+
+用户中心资产页由 `zibpay_user_content_balance()` 输出，余额和积分记录分别来自：
+
+```php
+zibpay_get_user_balance_record_lists($user_id);
+zibpay_get_user_points_record_lists($user_id);
+```
+
+展示记录时只读当前登录用户或管理后台目标用户。不要在公开作者页展示 `balance_record` 或 `points_record`，这些记录里可能包含订单号、转账对象、管理员备注和业务说明。
+
+后台弹窗和前台用户中心复用这两个函数，所以扩展渲染时要同时考虑两个场景：前台要只看本人，后台要只允许管理员查看指定用户；不要为了后台排查方便，把 `user_id` 暴露给普通用户可调用的 Ajax。
+
+## 余额与积分支付异常排查
+
+余额支付入口是 `zibpay_initiate_balance()`。它不是“先标记订单成功再扣余额”，而是先扣用户余额，再调用 `ZibPay::payment_order()` 更新订单状态：
+
+```php
+$data = array(
+    'order_num' => $order_data['order_num'],
+    'value'     => -$order_data['order_price'],
+    'type'      => __('余额支付', 'zib_language'),
+    'desc'      => str_replace('-' . $blog_name, '', str_replace($blog_name . '-', '', $order_data['order_name'])),
+);
+
+if (!zibpay_update_user_balance($order_data['user_id'], $data)) {
+    return array('error' => 1, 'msg' => __('余额不足，请先充值', 'zib_language'));
+}
+
+ZibPay::payment_order($pay);
+```
+
+余额支付前会检查登录态、`zib_ajax_debounce('balance_change', $user_id)`、订单类型是否允许余额支付、当前余额是否足够。订单类型判断来自：
+
+```php
+function zibpay_is_allow_balance_pay($pay_type)
+{
+    if (!_pz('pay_balance_s') || !get_current_user_id()) {
+        return false;
+    }
+
+    $prohibit_types = array(8);
+
+    return apply_filters('zibpay_is_allow_balance_pay', ($user_id && !in_array($pay_type, $prohibit_types)), $pay_type);
+}
+```
+
+商城订单通过 `zibpay_is_allow_balance_pay` 过滤器允许余额支付；余额充值 `order_type=8` 默认禁止用余额再充值余额。二开新增订单类型时，应该通过过滤器明确放行，不要绕开 `zibpay_initiate_balance()` 自己扣款。
+
+积分支付有两条链路：
+
+| 场景               | 入口                                                      | 特点                                                  |
+| ------------------ | --------------------------------------------------------- | ----------------------------------------------------- |
+| 购买积分           | `order_type=9` 普通订单                                   | 支付成功后由 `zibpay_payment_order_points()` 发放积分 |
+| 用积分购买内容/VIP | `points_initiate_pay` -> `zibpay_points_initiate_order()` | 创建订单后立即扣积分并标记支付成功                    |
+
+`zibpay_points_initiate_pay()` 同样先扣积分，再更新订单：
+
+```php
+$update_points_data = array(
+    'order_num' => $order_data['order_num'],
+    'value'     => -$order_data['order_price'],
+    'type'      => __('积分支付', 'zib_language'),
+    'desc'      => $order_data['desc'] ?? __('购买商品', 'zib_language'),
+);
+
+$update_points = zibpay_update_user_points($user_id, $update_points_data);
+
+if (!$update_points) {
+    return array('error' => 1, 'msg' => __('支付失败，请检查积分是否足够，或刷新后重试', 'zib_language'));
+}
+
+ZibPay::payment_order($pay);
+```
+
+排查“用户说钱扣了但订单没变”的问题时，按这个顺序查：
+
+| 排查点       | 看哪里                                                    | 说明                                          |
+| ------------ | --------------------------------------------------------- | --------------------------------------------- |
+| 资产近期记录 | `balance_record` / `points_record`                        | 是否有对应 `order_num` 的扣减记录             |
+| 订单状态     | Zibpay 订单 `status`、`pay_type`、`pay_num`、`pay_detail` | 是否已经由 `ZibPay::payment_order()` 写成成功 |
+| 支付明细     | `pay_detail.balance` / `pay_detail.points`                | 后台订单明细和消息通知展示依赖这里            |
+| 成功 Hook    | `payment_order_success`                                   | 会员、付费内容、分佣、消息等都在这里继续处理  |
+| 类型放行     | `zibpay_is_allow_balance_pay`、积分商品配置               | 订单类型不允许时不会进入资产支付              |
+
+`ZibPay::payment_order()` 只负责把订单写成已支付、合并 `pay_detail`，然后触发：
+
+```php
+do_action('payment_order_success', $order);
+```
+
+所以扩展资产支付时，不要在扣款后自己发会员、给权限、写分佣或发通知。应该让订单进入 `payment_order_success`，再在对应 Hook 里处理业务结果。
+
+订单关闭也要分清边界。用户关闭订单走 `close_order`，会校验 nonce、订单存在、未支付、订单归属或 `order_close` 权限，然后调用：
+
+```php
+zibpay::close_order($order_id, 'user', $reason);
+```
+
+`close_order_single()` 只会把 `status=0` 的订单改为 `-1`，并写入 `order_data.close_type`、`order_data.close_reason`，再触发 `order_closed`。它不是资产退款接口，也不会回滚 `balance_record` 或 `points_record`。已支付订单要走退款、售后或人工资产调整，不要把“关闭订单”当成“退余额/退积分”。
+
+还有一个源码里的特别边界：积分抵扣当前没有启用。`zibpay_is_allow_points_deduction()` 函数开头直接返回 `false`，后面的配置判断不会执行：
+
+```php
+function zibpay_is_allow_points_deduction($pay_type)
+{
+    return false;
+}
+```
+
+下单流程里也注释了“积分抵扣，以及余额组合付款方式涉及到时差问题，可能会导致数据差错”。因此二开不要简单打开积分抵扣开关或复制那段半成品逻辑。若要做混合支付，必须重新设计冻结、释放、支付失败回滚、订单关闭回滚和退款拆分，而不是只在前端减一个金额。
+
+## 和用户成长的关系
+
+积分、余额和用户成长容易混在一起，但源码里职责不同：
+
+| 能力         | 推荐入口                                                                       |
+| ------------ | ------------------------------------------------------------------------------ |
+| 等级经验     | `zib_add_user_level_integral()`                                                |
+| 免费积分     | `zibpay_add_user_free_points()`                                                |
+| 直接积分变动 | `zibpay_update_user_points()`                                                  |
+| 余额变动     | `zibpay_update_user_balance()`                                                 |
+| 邀请码奖励   | `zib_use_invit_code_reward()` 内部调用资产函数，默认奖励使用邀请码注册的新用户 |
+| 签到奖励     | `user_checkined` 触发经验和免费积分                                            |
+
+如果一个活动既奖励经验又奖励积分，应分别调用两个入口：
+
+```php
+function zib_docs_reward_activity($user_id, $activity_id)
+{
+    if (!$user_id || !$activity_id) {
+        return;
+    }
+
+    zib_add_user_level_integral($user_id, 10, 'docs_activity');
+    zibpay_add_user_free_points($user_id, 5, 'docs_activity');
+}
+```
+
+不要把“积分”当成“经验”写入 `level_integral`，也不要把“经验值”写入 `points`。两套数据展示位置、消费场景和每日上限都不同。
+
+## 风险清单
+
+- 不要直接更新 `balance`、`points`、`balance_record` 或 `points_record`。
+- 不要从前端接收资产变动方向、目标用户、订单号后直接执行。
+- 不要把转账接口注册为 `nopriv`。
+- 不要把积分写成小数，积分更新函数会转成整数。
+- 不要用免费积分入口处理购买积分，购买积分应走订单成功流程。
+- 不要在卡密校验阶段直接发放余额或积分，应通过 `zibpay_initiate_card_pass()` 和 `payment_order_success` 完成。
+- 不要用 `pay_price` 判断卡密充值到账金额，卡密支付的实际支付金额是 0。
+- 不要复用 `balance_charge`、`points_exchange` 类型承载无关卡密业务。
+- 不要在支付回调里重复发放积分或余额，必须依赖订单状态幂等。
+- 不要把关闭订单当成资产退款，`close_order` 只关闭未支付订单。
+- 不要直接启用积分抵扣半成品逻辑，混合支付需要完整冻结、回滚和退款设计。
+- 不要把资产记录公开给非本人用户。
+- 不要在缓存页面里输出当前用户余额、积分或转账按钮。
+- 不要让被禁封用户通过自定义入口继续获取免费积分或转账。

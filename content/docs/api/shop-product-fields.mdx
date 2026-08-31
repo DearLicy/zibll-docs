@@ -1,0 +1,472 @@
+---
+title: 商城商品发布字段
+description: 梳理子比主题商城商品 product_config 配置、规格选项、库存、发货类型、售后继承、前台 Vue 数据和扩展时的服务端边界。
+---
+
+商城商品发布字段的核心不是散落的 post meta，而是 `product_config` 这一组序列化配置。后台商品编辑页由 Codestar Framework 生成字段，商品详情页和下单链路再通过主题封装函数读取配置、组装 Vue 数据、校验规格库存，并把最终价格交给服务端重新计算。
+
+扩展商品发布能力时，应该把 `product_config` 当作商品配置的唯一主入口：新增字段可以跟随这组配置保存，但价格、库存、发货、售后、优惠和限购这类会影响交易结果的数据，必须始终在服务端重新读取并校验。
+
+相关源码：
+
+| 文件                                                 | 作用                                                                              |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `inc/functions/shop/admin/options/meta-option.php`   | 创建商品配置 metabox，字段前缀是 `product_config`                                 |
+| `inc/functions/shop/admin/options/option-module.php` | 复用限购、游客购买、邮箱填写、运费、售后、服务等字段模块                          |
+| `inc/functions/shop/inc/product.php`                 | 商品配置读取保存、规格字符串、库存、价格、售后继承、展示数据封装                  |
+| `inc/functions/shop/inc/vue.php`                     | 商品详情页和购物车使用的 Vue 数据结构                                             |
+| `inc/functions/shop/inc/order.php`                   | 订单确认数据重算，按商品、商家、规格组合整理价格、库存、运费和必填项              |
+| `inc/functions/shop/action/action.php`               | `shop_confirm_modal` 与 `shop_submit_order` 二次校验并创建 Zibpay 支付单/业务订单 |
+| `inc/functions/shop/inc/class.init.php`              | 注册 `shop_product`、商品分类、标签、优惠活动和商品页路由                         |
+| `inc/functions/shop/page/product.php`                | 商品详情页模板入口                                                                |
+| `inc/functions/shop/page/product-edit.php`           | 前台商品创建/编辑模板，路由目前只保留内部入口                                     |
+
+## 官网场景校准
+
+官网商城教程把商品创建分成实物商品、虚拟商品和自动发货商品三类，并把“价格、商品选项、库存、发货、运费、售后”作为后台配置重点。落到源码里，这些配置不是分散保存，而是进入同一个 `product_config` 数组，再由商品详情页、确认订单弹窗和提交订单流程分别读取。
+
+这意味着文档里不能只写“后台在哪里点”。需要同时回答：
+
+| 官网配置场景                   | 本地源码落点                                         | 二开边界                                          |
+| ------------------------------ | ---------------------------------------------------- | ------------------------------------------------- |
+| 商品创建、商品简介、封面、参数 | `meta-option.php` 的商品详情 section                 | 只影响展示，列表页/详情页读取前要做长度和空值过滤 |
+| 商品选项与价格浮动             | `product_options[*].opts[*].price_change`            | 确认单按规格下标重新加减价格，不信任前端金额      |
+| 库存与限购                     | `stock_type`、`stock_all`、`stock_opts`、`limit_buy` | 确认单会按商品总量或规格组合再判断一次            |
+| 自动发货、卡密、邀请码         | `shipping_type=auto`、`auto_delivery`                | 自动库存可能覆盖手动库存，付款成功后才真正发货    |
+| 快递发货与运费                 | `shipping_type=express`、`shipping_fee_opt`          | 积分商品运费强制视为无效，确认单按商品总价重算    |
+| 下单必留信息                   | `user_required`                                      | Vue 只补空 `value`，提交订单时服务端检查是否填写  |
+
+## 配置主存储
+
+商品配置 metabox 的前缀是：
+
+```php
+$prefix = 'product_config';
+```
+
+主题用 Codestar Framework 创建 metabox，并把数据以序列化数组存到商品的 `product_config` post meta。读取时不要直接 `get_post_meta()` 后手动拆数组，优先使用主题封装：
+
+```php
+$config = zib_shop_get_product_config($product_id);
+$price  = zib_shop_get_product_config($product_id, 'start_price', 0);
+```
+
+`zib_shop_get_product_config()` 会：
+
+1. 接收商品 ID 或 `WP_Post`。
+2. 从 `product_config` 读取完整数组。
+3. 用全局 `$shop_product_configs` 做本次请求缓存。
+4. 支持点路径读取，例如 `stock_opts.|0_1|1_0`。
+5. 通过第三个参数提供默认值。
+
+保存单个字段用：
+
+```php
+zib_shop_save_product_config($product_id, 'shipping_type', 'manual');
+```
+
+保存时它会先读取当前配置，再用 `zib_set_array_value()` 写入指定路径，最后更新 `product_config`。如果扩展字段会影响前端展示、订单确认或库存计算，保存后不要只改缓存或独立 meta，否则后续链路读不到同一份配置。
+
+## 字段分组
+
+商品配置大致可以按业务分为这些组：
+
+| 分组       | 关键字段                                                             | 说明                                           |
+| ---------- | -------------------------------------------------------------------- | ---------------------------------------------- |
+| 基础展示   | `desc`、商品主图、商品参数、服务承诺                                 | 影响商品详情页展示，不应直接决定交易结果       |
+| 价格与规格 | `pay_modo`、`start_price`、`product_options`                         | 决定现金商品、积分商品、基础价格和规格组合     |
+| 库存与限购 | `stock_type`、`stock_all`、`stock_opts`、限购模块                    | 决定是否可购买和购买数量边界                   |
+| 下单必填   | `user_required`                                                      | 让用户在下单时填写手机号、备注、账号等必要信息 |
+| 发货物流   | `shipping_type`、`shipping_delivery_desc`、`auto_delivery`、运费模块 | 决定实物快递、自动发货或手动虚拟发货           |
+| 售后服务   | `after_sale_opt`、服务模块                                           | 商品、分类、全局三级继承，虚拟商品会被二次修正 |
+| 优惠分佣   | 商品优惠、优惠活动、佣金相关配置                                     | 最终金额仍由订单确认链路重算                   |
+| 前台数据   | `zib_shop_get_product_vue_data()` 输出                               | 给页面交互使用，不是可信交易凭据               |
+
+## 基础展示字段
+
+商品基础展示字段保存在 `product_config`，主要影响商品详情页头部和详情信息，不直接参与价格、库存或订单权限判断。
+
+| 字段           | 类型       | 用途                                                           |
+| -------------- | ---------- | -------------------------------------------------------------- |
+| `desc`         | `textarea` | 商品一句话简介                                                 |
+| `cover_images` | `gallery`  | 商品封面图片，前台轮播的主索引来源                             |
+| `cover_videos` | `repeater` | 商品封面视频，每项保存 `url`，按 `cover_images` 的索引同步显示 |
+| `params`       | `repeater` | 商品参数，例如规格、材质、尺寸                                 |
+| `main_image`   | `upload`   | 自定义商品主图，不等同于封面轮播列表                           |
+
+`cover_videos` 不能脱离 `cover_images` 使用。前台商品封面会遍历 `cover_images`，再用相同 `$index` 读取 `cover_videos[$index]['url']`。所以只保存视频地址但没有同位置封面图片时，轮播可能没有可用封面兜底。
+
+商品封面视频只服务商品详情页头部轮播。如果视频内容需要购买后才能播放，应写入 Zibpay 付费视频字段，而不是放在 `product_config.cover_videos`。
+
+## 价格类型
+
+`pay_modo` 控制商品购买方式：
+
+| 值       | 含义                   |
+| -------- | ---------------------- |
+| `0`      | 普通商品，使用现金价格 |
+| `points` | 积分商品，使用积分兑换 |
+
+基础价格字段是 `start_price`。它是商品默认价格，也是多规格商品建议填写的最低展示价格。实际展示价格会结合规格、优惠、折扣和支付类型计算。
+
+读取展示价格用：
+
+```php
+$price = zib_shop_get_product_display_price($product_id, $option_keys);
+```
+
+注意：前端 Vue 数据里也会输出 `start_price`、`pay_modo` 和 `show_mark`，但这只是为了展示和交互。订单确认、提交订单、支付创建必须回到服务端重新计算价格和积分。
+
+## 商品规格
+
+规格字段是 `product_options`，它是一个 repeater。每一组规格包含规格名称和多个选项，例如颜色、版本、套餐等。主题用规格下标组合来标记具体选择，而不是用选项名称做库存 key。
+
+规格组合的转换函数：
+
+```php
+$options_string = zib_shop_product_options_to_string($options_active);
+$options_array  = zib_shop_product_options_to_array($options_string);
+$is_exists      = zib_shop_product_options_is_exists($product_id, $options_string);
+```
+
+没有规格时，规格字符串通常会归一为：
+
+```php
+'0'
+```
+
+规格 key 的拼接由 `zib_shop_product_options_key_splicing()` 统一处理。按规格库存、按规格发货、购物车和订单项都会依赖同一套格式，因此扩展时不要自己发明另一套规格 ID。
+
+后台字段里有一个很重要的提醒：如果商品开启了按选项配置库存或按选项发货，每次修改 `product_options` 后，必须保存并刷新页面，再重新配置依赖规格组合的字段。原因是规格组合 key 依赖 repeater 下标，选项改动后旧 key 可能已经无法对应原来的规格。
+
+后台生成按规格字段时，会先遍历 `product_options` 的所有组合，再把每个组合的下标拼成字段 ID：
+
+```php
+$id .= zib_shop_product_options_key_splicing($value[0], $value[1]);
+```
+
+所以 `stock_opts`、`auto_delivery.opts`、购物车里的 `$item_key` 和订单里的 `options_active_str` 本质上都是同一套组合 key。示例：
+
+- 无规格：`0`
+- 第 0 组第 1 项：`|0_1`
+- 第 0 组第 1 项 + 第 1 组第 0 项：`|0_1|1_0`
+
+如果要在迁移脚本里批量生成库存或自动发货配置，必须先让 `product_options` 顺序稳定，再按当前顺序生成 key。不要用选项名称生成 key，因为同名、改名、排序调整都会导致历史订单和库存映射不一致。
+
+## 库存结构
+
+库存配置由 `stock_type` 决定：
+
+| 字段         | 值     | 说明                   |
+| ------------ | ------ | ---------------------- |
+| `stock_type` | `all`  | 统一总库存，不区分规格 |
+| `stock_type` | `opts` | 按规格组合设置库存     |
+| `stock_all`  | `-1`   | 无限库存               |
+| `stock_all`  | `0`    | 无库存，不能购买       |
+| `stock_all`  | 正整数 | 剩余总库存             |
+| `stock_opts` | 数组   | 每个规格组合对应的库存 |
+
+读取某个规格库存：
+
+```php
+$stock = zib_shop_get_product_opt_stock($product_id, $options_active);
+```
+
+扣减和返还库存：
+
+```php
+zib_shop_product_deduct_stock($product_id, $options_active, $count);
+zib_shop_product_add_stock($product_id, $options_active, $count);
+```
+
+这两个函数都会根据 `stock_type` 自动判断是修改 `stock_all`，还是修改 `stock_opts` 中对应规格组合的库存。库存为 `-1` 时表示无限库存，返还库存不会把它改成普通数字。
+
+## 自动发货库存覆盖
+
+`shipping_type` 为 `auto` 时，`zib_shop_get_product_stock()` 会继续读取 `auto_delivery` 配置。自动发货内容如果开启自动获取库存，卡密或邀请码库存会覆盖 `stock_all` / `stock_opts` 的手动配置。
+
+这意味着自动发货商品有两层库存来源：
+
+| 来源                                             | 使用场景                                             |
+| ------------------------------------------------ | ---------------------------------------------------- |
+| `stock_all` / `stock_opts`                       | 普通商品、手动发货商品、未开启自动库存的自动发货商品 |
+| `auto_delivery.auto_stock` 对应的卡密/邀请码库存 | 自动发货商品开启自动库存时                           |
+
+扩展自动发货商品时，不要只看 `stock_all`。需要调用：
+
+```php
+$stock_data = zib_shop_get_product_stock($product_id);
+```
+
+这样才能拿到主题最终认可的库存结构。
+
+## 发货类型
+
+`shipping_type` 有三种：
+
+| 值        | 含义         | 常见用途                               |
+| --------- | ------------ | -------------------------------------- |
+| `express` | 物流快递发货 | 实物商品，需要收货地址和运费           |
+| `auto`    | 自动发货     | 卡密、邀请码、固定文本等虚拟内容       |
+| `manual`  | 手动发货     | 话费充值、人工服务、定制交付等虚拟商品 |
+
+物流快递发货会使用运费模块，积分商品即使配置了运费也会被主题提示为无效。自动发货和手动发货不会要求用户填写收货地址，通常要配合 `user_required` 或邮箱填写配置补齐交付所需信息。
+
+自动发货配置在 `auto_delivery` 字段内，常见子字段包括：
+
+| 子字段       | 说明                                         |
+| ------------ | -------------------------------------------- |
+| `type`       | 自动发货内容类型，例如固定内容、卡密、邀请码 |
+| `auto_stock` | 是否由自动发货内容反推库存                   |
+| 其他子字段   | 根据类型保存内容、标识或选择规则             |
+
+前端展示标题由 `zib_shop_get_product_vue_data()` 统一处理。`auto` 默认显示自动发货，`manual` 默认显示商家发货，`express` 默认显示快递发货并读取运费描述。
+
+## 用户必留信息
+
+`user_required` 用来要求用户下单时填写额外信息。后台字段是 repeater，前台 Vue 数据会把每一项追加一个空的 `value`：
+
+```php
+'user_required' => $user_required,
+```
+
+它适合存放业务交付必须的信息，例如充值手机号、定制需求、账号 ID。扩展时要注意两件事：
+
+1. 前端只负责填写和展示，提交后仍要在服务端校验必填项。
+2. 不要把敏感信息作为公开商品字段输出，只在订单私有数据里保存交付所需内容。
+
+## 售后继承
+
+售后策略由 `zib_shop_get_product_after_sale_opt()` 读取，继承顺序是：
+
+1. 商品自己的 `after_sale_opt`。
+2. 商品分类配置里的 `after_sale_opt`。
+3. 全局配置 `_pz('shop_after_sale_opt')`。
+
+商品如果是虚拟商品，主题会继续修正售后能力，例如自动发货或积分商品可能不支持某些退款、换货、保修选项。扩展售后入口时，不要只读取 `product_config.after_sale_opt`，应该读取最终函数返回值。
+
+```php
+$after_sale_opt = zib_shop_get_product_after_sale_opt($product_id);
+```
+
+## 前台 Vue 数据
+
+商品详情页会通过 `zib_shop_get_product_vue_data()` 输出交易交互需要的数据，重要字段包括：
+
+| 字段                                    | 说明                       |
+| --------------------------------------- | -------------------------- |
+| `product_id`                            | 商品 ID                    |
+| `pay_modo`                              | 现金商品或积分商品         |
+| `show_mark`                             | 当前支付类型对应的单位标识 |
+| `is_points`                             | 是否积分商品               |
+| `prices.start_price`                    | 基础展示价格               |
+| `product_options`                       | 商品规格                   |
+| `stock_type`、`stock_all`、`stock_opts` | 最终库存结构               |
+| `shipping_type`                         | 发货类型                   |
+| `shipping_fee_opt`                      | 运费配置                   |
+| `shipping_title`、`shipping_desc`       | 发货展示文案               |
+| `auto_delivery_type`                    | 自动发货类型               |
+| `guest_buy`                             | 是否允许游客购买           |
+| `email_fill`                            | 是否需要用户填写邮箱       |
+| `user_required`                         | 下单必填项                 |
+
+这些字段可以用于页面交互，但不能直接作为提交订单时的可信依据。服务端需要重新判断商品状态、规格是否存在、库存是否足够、优惠是否可用、运费是否正确、当前用户是否有购买权限。
+
+## 确认单服务端闭环
+
+用户从商品页或购物车进入确认单时，前端提交的数据结构是：
+
+```php
+$products_items[$product_id][$options_string] = $count;
+```
+
+如果带备注或必填项，则某个规格组合的值会变成数组：
+
+```php
+$products_items[$product_id][$options_string] = array(
+    'count'         => 1,
+    'remark'        => '备注',
+    'user_required' => array(),
+);
+```
+
+`zib_shop_get_confirm_data()` 会按当前商品重新组装数据，而不是照收前端结果：
+
+| 阶段     | 关键行为                                                                                       |
+| -------- | ---------------------------------------------------------------------------------------------- |
+| 查询商品 | 只查 `post_type=shop_product`、`post_status=publish`、`post__in` 里的商品                      |
+| 读取商品 | 每个商品重新调用 `zib_shop_get_product_vue_data()`，因此会重新拿到库存、发货、运费、限购、优惠 |
+| 校验规格 | `zib_shop_product_options_to_array($item_key)` 拆 key，再检查规格数量和下标是否存在            |
+| 计算价格 | 从 `start_price` 开始，逐个规格读取 `price_change`，再乘以购买数量                             |
+| 选择图片 | 规格项有 `image` 时优先作为本规格商品图，否则使用商品主图                                      |
+| 检查库存 | `stock_type=opts` 用 `zib_shop_get_product_opt_stock()`；统一库存稍后按商品总量检查            |
+| 处理必填 | 根据 `user_required.name` 匹配前端值，并给确认单临时追加 `key` 供表单渲染                      |
+| 计算运费 | 只对非积分、`shipping_type=express` 商品计算，`amount` 类型按当前商品总价判断是否包邮          |
+| 计算优惠 | 每个规格项根据商品、作者、总价和用户依赖数据重新判断命中优惠                                   |
+
+提交订单的 `shop_submit_order` 会再次调用同一个 `zib_shop_get_confirm_data()`。因此二开时不要只在 `shop_confirm_modal` 前做校验；凡是影响金额、库存、发货、限购、必填项的逻辑，都要保证确认弹窗和提交订单使用同一套服务端判断。
+
+确认单最终会把每个规格组合整理进 `item_data`：
+
+```php
+$item_data[$author_id][$product_id][$item_key] = array(
+    'user_required'       => $user_required,
+    'pay_modo'            => $product_data[$product_id]['pay_modo'],
+    'count'               => $item_count,
+    'product_title'       => $product_data[$product_id]['title'],
+    'product_id'          => $product_id,
+    'options_active_str'  => $item_key,
+    'options_active_name' => $options_active_name,
+    'product_image'       => $main_image_url,
+    'stock_all'           => $item_stock_all,
+    'prices'              => $prices,
+    'shipping_type'       => $product_data[$product_id]['shipping_type'],
+);
+```
+
+创建订单时，这份数据会进入 Zibpay 业务订单的 `meta.order_data`，其中 `options_active_str` 同时保存为订单的 `product_id` 字段。后续发货、退款、评价和再次加入购物车都会依赖这个规格组合 key。
+
+## 前台发布和编辑边界
+
+`inc/functions/shop/inc/class.init.php` 中保留了 `shop_product_edit` query var 和 `product-edit.php` 模板加载逻辑，但 rewrite rule 处于注释状态，源码注释也标明新建、编辑页面暂未启用。
+
+因此当前更可靠的扩展边界是：
+
+| 需求                 | 建议位置                                            |
+| -------------------- | --------------------------------------------------- |
+| 后台新增商品配置字段 | 跟随 `product_config` metabox 扩展                  |
+| 前台展示新增字段     | 商品详情模板或现有展示 Hook                         |
+| 前台提交额外购买信息 | 订单确认和提交订单链路中校验                        |
+| 前台商品发布入口     | 需要先完整补路由、权限、nonce、字段白名单和保存逻辑 |
+
+不要只打开 `shop_product_edit` 路由就让用户发布商品。商品发布涉及分类、规格、价格、库存、发货、售后、上传、权限和审核，必须完整补服务端保存流程。
+
+## 读取商品配置
+
+```php
+function zib_ext_get_product_sale_summary($product_id)
+{
+    $product = get_post($product_id);
+    if (!$product || $product->post_type !== 'shop_product') {
+        return array();
+    }
+
+    $pay_modo      = zib_shop_get_product_config($product_id, 'pay_modo', '0');
+    $shipping_type = zib_shop_get_product_config($product_id, 'shipping_type', 'express');
+    $stock_data    = zib_shop_get_product_stock($product_id);
+
+    return array(
+        'pay_modo'      => $pay_modo,
+        'shipping_type' => $shipping_type,
+        'is_points'     => $pay_modo === 'points',
+        'stock_type'    => $stock_data['stock_type'],
+        'stock_all'     => $stock_data['stock_all'],
+        'stock_opts'    => $stock_data['stock_opts'],
+    );
+}
+```
+
+这类只读封装适合给模板、短代码或 Ajax 展示接口使用。即使只是展示，也要先判断 post type，避免普通文章 ID 误读商品配置。
+
+## 安全保存一个字段
+
+```php
+function zib_ext_save_product_shipping_type($product_id, $shipping_type)
+{
+    $product = get_post($product_id);
+    if (!$product || $product->post_type !== 'shop_product') {
+        return false;
+    }
+
+    if (!current_user_can('edit_post', $product_id)) {
+        return false;
+    }
+
+    $allow_types = array('express', 'auto', 'manual');
+    if (!in_array($shipping_type, $allow_types, true)) {
+        return false;
+    }
+
+    zib_shop_save_product_config($product_id, 'shipping_type', $shipping_type);
+
+    return true;
+}
+```
+
+保存商品配置时至少要做三层校验：商品是否存在、当前用户是否能编辑、字段值是否在白名单内。涉及价格、库存、发货内容、售后策略时，还要补类型转换和业务规则校验。
+
+## 判断规格与库存
+
+```php
+function zib_ext_can_buy_product_option($product_id, $options_active, $count)
+{
+    $product = get_post($product_id);
+    if (!$product || $product->post_type !== 'shop_product') {
+        return false;
+    }
+
+    $options_string = zib_shop_product_options_to_string($options_active);
+    if (!zib_shop_product_options_is_exists($product_id, $options_string)) {
+        return false;
+    }
+
+    $stock = zib_shop_get_product_opt_stock($product_id, $options_active);
+    if ($stock !== -1 && $stock < absint($count)) {
+        return false;
+    }
+
+    return true;
+}
+```
+
+这段只适合做前置判断。真正下单时仍要在同一个服务端事务链路里再次读取库存并扣减，避免多个用户同时购买时产生超卖。
+
+## 给自动发货商品追加校验
+
+```php
+function zib_ext_validate_auto_delivery_product($product_id)
+{
+    $shipping_type = zib_shop_get_product_config($product_id, 'shipping_type', 'express');
+    if ($shipping_type !== 'auto') {
+        return true;
+    }
+
+    $auto_delivery = zib_shop_get_product_config($product_id, 'auto_delivery', array());
+    $delivery_type = isset($auto_delivery['type']) ? $auto_delivery['type'] : '';
+
+    if (!$delivery_type) {
+        return false;
+    }
+
+    $stock_data = zib_shop_get_product_stock($product_id);
+    if ($stock_data['stock_all'] === 0) {
+        return false;
+    }
+
+    return true;
+}
+```
+
+自动发货商品不能只判断 `shipping_type`。还要看 `auto_delivery.type` 是否完整，以及自动库存覆盖后的最终库存是否允许购买。
+
+## 常见扩展场景
+
+| 场景                 | 推荐做法                                                  |
+| -------------------- | --------------------------------------------------------- |
+| 增加一个商品展示字段 | 保存到 `product_config`，详情页读取展示                   |
+| 增加一个下单必填项   | 优先复用 `user_required`，提交订单时服务端校验            |
+| 增加发货说明         | 根据 `shipping_type` 扩展展示，不改变订单状态机           |
+| 增加特殊库存规则     | 封装读取函数，订单确认和提交订单都调用同一套判断          |
+| 增加商品售后限制     | 接在最终售后策略之后判断，不直接覆盖全局配置              |
+| 增加前台商品发布     | 先补权限、nonce、字段白名单、上传限制、审核状态和保存流程 |
+
+## 风险清单
+
+- 不要绕过 `zib_shop_get_product_config()` 和 `zib_shop_save_product_config()` 直接散写多个 meta。
+- 不要把规格名称当库存 key，规格组合应使用主题拼接函数生成。
+- 不要在改动 `product_options` 后继续复用旧的 `stock_opts` key。
+- 不要只看 `stock_all` 判断自动发货商品库存。
+- 不要信任前端提交的价格、积分、运费、优惠、库存和发货类型。
+- 不要把 `user_required` 当作公开展示字段输出到列表页。
+- 不要只读商品级售后配置，售后策略有商品、分类、全局继承和虚拟商品修正。
+- 不要在没有完整权限和保存白名单的情况下开放前台商品发布入口。

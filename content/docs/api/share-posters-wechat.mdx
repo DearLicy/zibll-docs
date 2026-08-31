@@ -1,0 +1,546 @@
+---
+title: 分享、海报与微信分享
+description: 扩展子比主题分享平台、移动端分享弹窗、海报生成数据、论坛/商城海报适配和微信 JS-SDK 分享。
+---
+
+## 模块定位
+
+子比主题的分享能力主要由三部分组成：
+
+| 能力                         | 入口                                                         |
+| ---------------------------- | ------------------------------------------------------------ |
+| 分享按钮、平台排序、复制链接 | `inc/functions/zib-share.php`                                |
+| 海报分享 Ajax 数据           | `action/function.php` 的 `poster_share_data`                 |
+| 微信内 JS-SDK 分享           | `inc/functions/zib-share-wechat.php` 与 `js/weixin-share.js` |
+
+分享按钮不是单纯的 HTML 片段。它会读取后台 sorter 排序、根据移动端切换弹窗或 hover 面板、为海报按钮输出 `poster-share` 属性、为复制按钮输出 `data-clipboard-text`，并在开启返利时把 URL 改成当前用户的返利链接。
+
+## 后台开关
+
+后台「社交分享」配置集中在 `inc/options/admin-options.php`：
+
+| 配置 key                 | 作用                                                   |
+| ------------------------ | ------------------------------------------------------ |
+| `share_s`                | 普通文章页是否显示分享按钮，论坛和商城不受这个开关影响 |
+| `share_items`            | CSF sorter，控制分享平台启用状态和排序                 |
+| `wechat_share_s`         | 是否启用微信 JS-SDK 分享有图                           |
+| `wechat_share_option`    | 微信 AppID、AppSecret、是否强制使用站点图标            |
+| `share_img`              | 是否启用海报分享                                       |
+| `share_img_compatible_s` | 是否把图片转 base64，提高跨域和缓存环境兼容性          |
+| `share_img_byimg`        | 海报默认封面图                                         |
+| `share_logo`             | 海报底部 Logo                                          |
+| `share_desc`             | 海报底部文案                                           |
+
+`share_items` 的默认启用项由主题函数提供：
+
+```php
+function zib_get_share_items_sorter_default()
+{
+    $labels = zib_get_share_platform_labels();
+
+    return array(
+        'enabled'  => array(
+            'qzone'  => $labels['qzone'],
+            'weibo'  => $labels['weibo'],
+            'qq'     => $labels['qq'],
+            'poster' => $labels['poster'],
+            'copy'   => $labels['copy'],
+        ),
+        'disabled' => array(
+            'facebook' => $labels['facebook'],
+            'twitter'  => $labels['twitter'],
+            'telegram' => $labels['telegram'],
+            'whatsapp' => $labels['whatsapp'],
+            'linkedin' => $labels['linkedin'],
+            'reddit'   => $labels['reddit'],
+            'line'     => $labels['line'],
+            'vk'       => $labels['vk'],
+            'email'    => $labels['email'],
+        ),
+    );
+}
+```
+
+如果 `share_img` 关闭，主题会从启用平台中移除 `poster`，海报按钮和平台注册表都会同步隐藏海报项。
+
+## 分享入口
+
+文章和分类的分享入口分别由两个函数输出：
+
+```php
+zib_get_post_share_btn($post, $class, $modal);
+zib_get_term_share_btn($term, $class, $modal);
+```
+
+它们内部会判断移动端：
+
+- 移动端或 `$modal = true`：输出 `zib_get_refresh_modal_link()`，Ajax action 为 `share_modal`。
+- PC 端：输出 `.hover-show.dropup`，分享面板在 hover/dropup 容器里展示。
+
+文章分享数据来自：
+
+```php
+function zib_get_posts_share_btns($btns_opt, $post = null)
+{
+    $post = get_post($post);
+
+    if (empty($post->ID)) {
+        return;
+    }
+
+    $subtitle = trim(strip_tags(zib_get_post_meta($post->ID, 'subtitle', true)));
+    $title    = trim(strip_tags(get_the_title($post))) . $subtitle;
+    $desc     = zib_get_excerpt(160, '...', $post);
+    $pic      = zib_post_thumbnail('full', '', true, $post);
+    $url      = get_permalink($post);
+
+    return zib_get_share_btns($btns_opt, $title, $desc, $pic, $url, $post->ID);
+}
+```
+
+分类、标签、专题等 term 分享数据来自 term 名称、描述、封面图和 term 链接：
+
+```php
+$title = trim(strip_tags($term->name));
+$desc  = zib_str_cut($term->description, 0, 160, '...');
+$pic   = zib_get_taxonomy_img_url($term->term_id, 'full');
+$url   = get_term_link($term);
+```
+
+## 分享平台注册
+
+主题支持的平台 key 在 `zib_get_share_platform_labels()` 中定义：
+
+| key        | 平台     |
+| ---------- | -------- |
+| `qzone`    | QQ 空间  |
+| `weibo`    | 微博     |
+| `qq`       | QQ 好友  |
+| `facebook` | Facebook |
+| `twitter`  | X        |
+| `telegram` | Telegram |
+| `whatsapp` | WhatsApp |
+| `linkedin` | LinkedIn |
+| `reddit`   | Reddit   |
+| `line`     | LINE     |
+| `vk`       | VK       |
+| `email`    | 邮件     |
+| `poster`   | 海报分享 |
+| `copy`     | 复制链接 |
+
+启用平台会先读取 `share_items`，再经过 `zib_active_share_items` 过滤：
+
+```php
+function zib_docs_share_items_filter($items)
+{
+    if (!in_array('copy', $items)) {
+        $items[] = 'copy';
+    }
+
+    return $items;
+}
+add_filter('zib_active_share_items', 'zib_docs_share_items_filter');
+```
+
+平台注册表由 `zib_get_share_platform_registry()` 生成。每个平台包含 `text`、`icon`、`href`、`target` 和 `attr`：
+
+```php
+$registry[$key] = array(
+    'text'   => $text,
+    'icon'   => zib_get_svg($key . '-color'),
+    'href'   => zib_build_share_platform_href($key, $ctx),
+    'target' => '_blank',
+    'attr'   => '',
+);
+```
+
+`poster` 和 `copy` 是特殊项：
+
+```php
+if ('poster' === $key) {
+    $item['target'] = '';
+    $item['attr']   = 'poster-share="' . esc_attr($poster_id) . '"';
+} elseif ('copy' === $key) {
+    $item['target'] = '';
+    $item['attr']   = 'data-clipboard-text="' . esc_url($ctx['url']) . '" data-clipboard-tag="' . esc_attr(__('链接', 'zib_language')) . '"';
+}
+```
+
+新增分享平台时，不要改主题核心函数，使用 `zib_share_platform_registry`：
+
+```php
+function zib_docs_add_share_platform($registry, $ctx, $poster_id)
+{
+    $registry['custom_link'] = array(
+        'text'   => __('自定义分享', 'zib_language'),
+        'icon'   => zib_get_svg('share'),
+        'href'   => zib_build_share_query_url('https://example.com/share', array(
+            'url'   => $ctx['url'],
+            'title' => $ctx['link_title'],
+        )),
+        'target' => '_blank',
+        'attr'   => '',
+    );
+
+    return $registry;
+}
+add_filter('zib_share_platform_registry', 'zib_docs_add_share_platform', 10, 3);
+```
+
+同时把平台 key 放入启用项：
+
+```php
+function zib_docs_enable_share_platform($items)
+{
+    $items[] = 'custom_link';
+    return array_values(array_unique($items));
+}
+add_filter('zib_active_share_items', 'zib_docs_enable_share_platform');
+```
+
+### 分享链接与返利
+
+主题不会直接把平台 query 手写到字符串里，而是先通过 `zib_build_share_query_url()` 编码：
+
+```php
+function zib_build_share_query_url($base, $params = array())
+{
+    if (!$params) {
+        return $base;
+    }
+
+    $query = array();
+    foreach ($params as $key => $value) {
+        if ($value === '' || $value === null) {
+            continue;
+        }
+        $query[] = rawurlencode($key) . '=' . rawurlencode($value);
+    }
+
+    $separator = (false !== strpos($base, '?')) ? '&' : '?';
+
+    return $base . $separator . implode('&', $query);
+}
+```
+
+这样标题、描述、图片和 URL 里包含中文、空格、`&`、`#` 时不会破坏平台链接。扩展平台时优先复用这个函数，不要自己拼 `?url=`。
+
+分享链接还会联动返利系统：
+
+```php
+$user_id = get_current_user_id();
+if (_pz('pay_rebate_s') && $user_id) {
+    $url = zibpay_get_rebate_link($user_id, $url);
+}
+```
+
+这段在 `zib_get_share_btns()` 中执行，所以普通分享平台、复制链接和海报入口拿到的都是最终分享 URL。海报 Ajax 里还会再做一次同样判断，保证二维码也带返利链接。自定义分享入口如果绕过 `zib_get_share_btns()`，就要自己补上这段逻辑，否则会出现按钮链接带返利、海报二维码不带返利，或反过来的不一致。
+
+## 分享弹窗
+
+移动端分享弹窗通过 Ajax 动作 `share_modal` 加载：
+
+```php
+add_action('wp_ajax_share_modal', 'zib_ajax_share_modal');
+add_action('wp_ajax_nopriv_share_modal', 'zib_ajax_share_modal');
+```
+
+请求参数：
+
+| 参数   | 说明               |
+| ------ | ------------------ |
+| `id`   | 文章 ID 或 term ID |
+| `type` | `post` 或 `term`   |
+
+弹窗内容会调用 `zib_get_share('horizontal', $post)` 或 `zib_get_term_share('horizontal', $term)`，标题文案可以通过 `share_modal_header_text` 过滤：
+
+```php
+function zib_docs_share_modal_header($text)
+{
+    return __('分享给朋友', 'zib_language');
+}
+add_filter('share_modal_header_text', 'zib_docs_share_modal_header');
+```
+
+分享弹窗高度由启用项数量估算：
+
+```php
+function zib_get_share_modal_height()
+{
+    $count = max(1, count(zib_get_active_share_items()));
+    return min(520, 180 + (int) ceil($count / 5) * 72);
+}
+```
+
+所以启用平台过多时，移动端弹窗会变高。后台提示中也建议同时启用的平台不要过多。
+
+弹窗动作同时注册了 `nopriv`。它只适合输出公开分享按钮，不应该在 `share_modal_header_text` 或后续按钮过滤里读取当前登录用户的隐私数据。如果某个分享入口只允许登录用户使用，应在生成按钮前判断权限，而不是等 Ajax 弹窗打开后再拦截。
+
+## 海报分享数据
+
+海报按钮只负责输出属性：
+
+```html
+<a class="share-btn poster" poster-share="123" href="javascript:;">...</a>
+```
+
+前端 `js/poster-share.js` 监听 `[poster-share]` 点击，创建 Bootstrap modal，然后请求：
+
+```js
+var ajax_data = {
+  action: 'poster_share_data',
+  id: _id,
+};
+```
+
+后端 Ajax：
+
+```php
+add_action('wp_ajax_poster_share_data', 'zib_ajax_poster_share_data');
+add_action('wp_ajax_nopriv_poster_share_data', 'zib_ajax_poster_share_data');
+```
+
+普通文章、term、返利用户会生成不同的数据：
+
+| `poster-share` 值 | 数据来源                     | 典型场景                           |
+| ----------------- | ---------------------------- | ---------------------------------- |
+| `123`             | `get_post(123)`              | 文章、商品、帖子、版块等 post 对象 |
+| `term_12`         | `get_term(12)`               | 分类、标签、专题、论坛话题         |
+| `rebate_8`        | `get_userdata(8)` + 返利配置 | 用户推荐返利海报                   |
+| `user_8`          | `get_userdata(8)` + 返利配置 | 作者或用户推荐海报                 |
+
+后端按这些分支组装基础数据，再统一返回：
+
+| 字段             | 说明                               |
+| ---------------- | ---------------------------------- |
+| `url`            | 最终分享链接，可能已经加入返利参数 |
+| `qrcode`         | 二维码 base64                      |
+| `banner`         | 主封面图                           |
+| `banner_default` | 默认封面图                         |
+| `banner_spare`   | 主题兜底图                         |
+| `logo`           | 海报底部 Logo                      |
+| `title`          | 海报标题                           |
+| `content`        | 海报描述                           |
+| `tags`           | 作者、分类、统计等标签             |
+| `description`    | 底部提示文案                       |
+
+普通文章分支会把标题截到 32 字，描述取 `zib_get_excerpt(70, '...', $post)`，文章类型为 `post` 时补作者和分类：
+
+```php
+$subtitle = trim(strip_tags(zib_get_post_meta($post->ID, 'subtitle', true)));
+$title    = trim(strip_tags($post->post_title)) . $subtitle;
+$title    = zib_str_cut($title, 0, 32);
+
+$desc       = zib_get_excerpt(70, '...', $post);
+$url        = get_permalink($post);
+$banner_url = zib_post_thumbnail('full', '', true, $post);
+```
+
+term 分支会读取 term 名称、描述、封面和文章数：
+
+```php
+$title      = trim(strip_tags($term->name));
+$desc       = zib_str_cut($term->description, 0, 160, '...');
+$banner_url = zib_get_taxonomy_img_url($term->term_id, 'full', '');
+$url        = get_term_link($term);
+$tags       = $term->count ? sprintf(__('%s篇文章', 'zib_language'), $term->count) : '';
+```
+
+返利分支不读取文章，而是使用返利海报配置：
+
+```php
+$url        = zibpay_get_rebate_link($user_id);
+$banner_url = _pz('pay_rebate_poster_img');
+$title      = _pz('pay_rebate_poster_title');
+$desc       = _pz('pay_rebate_poster_desc');
+```
+
+主题在返回前提供 `poster_share_data` 过滤器：
+
+```php
+$data = apply_filters('poster_share_data', $data, $obj, $id);
+```
+
+扩展海报时优先改这份数据，不要改 `poster-share.js` 的绘图流程：
+
+```php
+function zib_docs_poster_share_data_filter($data, $obj, $id)
+{
+    if (isset($obj->post_type) && 'post' === $obj->post_type) {
+        $subtitle = zib_get_post_meta($obj->ID, 'subtitle', true);
+
+        if ($subtitle) {
+            $data['title'] = zib_str_cut(strip_tags($obj->post_title . ' ' . $subtitle), 0, 32);
+        }
+    }
+
+    return $data;
+}
+add_filter('poster_share_data', 'zib_docs_poster_share_data_filter', 10, 3);
+```
+
+如果站点图片使用 OSS、CDN 或防盗链，海报可能因为 canvas 跨域污染而无法导出。主题提供 `share_img_compatible_s`，开启后会把 `banner`、`banner_default` 和 `logo` 转为 base64：
+
+```php
+if (_pz('share_img_compatible_s')) {
+    $data['banner']         = zib_get_img_auto_base64($data['banner']);
+    $data['banner_default'] = zib_get_img_auto_base64($data['banner_default']);
+    $data['logo']           = zib_get_img_auto_base64($data['logo']);
+}
+```
+
+前端 `poster-share.js` 使用三层主图兜底：
+
+1. `banner`：当前内容主图。
+2. `banner_default`：后台海报默认封面图。
+3. `banner_spare`：主题内置 `img/share_img.jpg`。
+
+```js
+if (loadCount == 0) {
+  config.banner ? (image.src = config.banner) : (loadCount = 1);
+}
+if (loadCount == 1) {
+  config.banner_default ? (image.src = config.banner_default) : (loadCount = 2);
+}
+if (loadCount == 2) {
+  image.src = config.banner_spare;
+}
+```
+
+前端还会根据 `type = product` 切换商品海报布局，普通文章海报和商品海报不是两个 Ajax。扩展新海报类型时，可以继续增加 `type`，但要同步确认前端绘制逻辑是否识别这个类型；如果只是改标题、标签、封面，直接过滤 `poster_share_data` 更稳。
+
+## 论坛和商城适配
+
+海报数据是跨模块协议。论坛和商城没有复制一套海报生成器，而是通过 `poster_share_data` 改写字段。
+
+商城商品会把海报类型改成 `product`，并补充价格、原价和积分支付状态：
+
+```php
+function zib_shop_poster_share_data_filter($data, $obj, $id)
+{
+    if (isset($obj->post_type) && 'shop_product' == $obj->post_type) {
+        $data['type']           = 'product';
+        $data['is_points']      = $pay_modo === 'points';
+        $data['price']          = (string) $price;
+        $data['original_price'] = $start_price > $price ? (string) $start_price : '';
+        $data['banner']         = zib_shop_get_product_thumbnail_url($obj);
+    }
+
+    return $data;
+}
+add_filter('poster_share_data', 'zib_shop_poster_share_data_filter', 10, 3);
+```
+
+论坛会针对帖子、版块、话题、标签和版块分类补充作者、版块、帖子数、回复数和热度：
+
+```php
+function zib_docs_bbs_poster_tags($data, $obj, $id)
+{
+    if (isset($obj->post_type) && 'forum_post' === $obj->post_type) {
+        $author = get_userdata($obj->post_author);
+
+        if (!empty($author->display_name)) {
+            $data['tags'] = sprintf(__('作者: %s', 'zib_language'), esc_attr($author->display_name));
+        }
+    }
+
+    return $data;
+}
+add_filter('poster_share_data', 'zib_docs_bbs_poster_tags', 20, 3);
+```
+
+扩展自己的业务类型时，建议也走同一个过滤器。这样前端 modal、下载按钮、二维码、跨域兼容和错误提示都能沿用主题已有逻辑。
+
+分享按钮本体也被多个业务模块复用：
+
+| 模块               | 入口函数                                                            |
+| ------------------ | ------------------------------------------------------------------- |
+| 普通文章底部       | `zib_get_post_share_btn(null, 'action action-share')`               |
+| 移动端文章底栏     | `zib_get_post_share_btn($post, 'tabbar-item single-action-tabbar')` |
+| 论坛帖子           | `zib_get_post_share_btn($post, 'btn-share ' . $class, $modal)`      |
+| 论坛版块           | `zib_get_post_share_btn($plate_id, 'btn-share ' . $class, true)`    |
+| 论坛话题/标签/分类 | `zib_get_term_share_btn($term, $class . ' btn-share', true)`        |
+| 商城商品           | `zib_get_post_share_btn($post_id, 'btn-share ' . $class, true)`     |
+
+因此新增平台、排序和复制协议应在 `zib_get_share_platform_registry()` 这一层扩展。不要只改文章页模板，否则论坛、商城和移动端入口不会同步。
+
+## 微信 JS-SDK 分享
+
+微信分享由 `wechat_share_s` 控制。开启后，主题实例化：
+
+```php
+if (_pz('wechat_share_s')) {
+    new ZibWeChatShare(_pz('wechat_share_option'));
+}
+```
+
+构造函数要求 `appid` 和 `app_secret` 存在，然后在 `wp_footer` 输出 `window.WeChatShareDate`：
+
+```php
+window.WeChatShareDate = {
+    appId: '...',
+    timestamp: '...',
+    nonceStr: '...',
+    signature: '...',
+    url: '...',
+    title: '',
+    img: '...',
+    desc: '',
+}
+```
+
+前端 `js/weixin-share.js` 会读取这份数据，并调用：
+
+```js
+wx.updateTimelineShareData({
+  title: _title,
+  link: _link,
+  imgUrl: _img,
+});
+wx.updateAppMessageShareData({
+  title: _title,
+  desc: _desc,
+  link: _link,
+  imgUrl: _img,
+});
+```
+
+微信分享图来源顺序：
+
+| 页面     | 图片来源                                        |
+| -------- | ----------------------------------------------- |
+| taxonomy | `zib_get_taxonomy_img_url($obj_id, 'full')`     |
+| single   | `zib_post_thumbnail('full', '', true, $obj_id)` |
+| author   | 用户 `custom_avatar`                            |
+| 兜底     | `_pz('iconpng')` 或 `_pz('favicon')`            |
+
+注意，single 页的分享图来源是 `zib_post_thumbnail()`，它和文章顶部封面读取的 `cover_image` 不是完全等价的字段链。前台特色媒体、论坛封面、商品图、SEO 图和 CDN 迁移后的抽查边界，见 [媒体上传：特色媒体在分享图和 SEO 图里的读取边界](/docs/api/media-upload#特色媒体在分享图和-seo-图里的读取边界)。
+
+如果开启 `only_logo`，所有页面都会使用站点图标，适合开启图片防盗链、封面图不稳定或希望统一品牌图的站点。
+
+签名流程会缓存本地 token/ticket，并在过期前约 300 秒刷新。扩展时不要在每次页面加载都请求微信接口，否则容易触发频率限制。
+
+## 安全与兼容边界
+
+- 分享 URL、标题、描述、图片都要在输出前转义，URL 使用 `esc_url()`，属性使用 `esc_attr()`。
+- 新增外部分享平台时，跳转链接用 `zib_build_share_query_url()` 或 `add_query_arg()` 拼装，不手写未编码 query。
+- 不要把未公开内容、付费内容正文、用户隐私字段写进海报数据。
+- 海报封面要准备默认图和兜底图，避免无图文章生成失败。
+- 使用 CDN、OSS、防盗链时优先配置跨域规则；仍有兼容问题再考虑 `share_img_compatible_s`。
+- `poster_share_data` 同时允许未登录请求，不要在过滤器里输出仅登录用户可见的敏感数据。
+- 微信 JS-SDK 的安全域名必须和当前访问域名匹配，移动端微信内分享才会生效。
+
+## 落地清单
+
+| 目标               | 检查点                                                                          |
+| ------------------ | ------------------------------------------------------------------------------- |
+| 新增分享平台       | `zib_share_platform_registry`、`zib_active_share_items`、图标、URL 编码、target |
+| 改分享排序         | 后台 `share_items` sorter，不改模板                                             |
+| 改移动端弹窗文案   | `share_modal_header_text`                                                       |
+| 改文章海报字段     | `poster_share_data`                                                             |
+| 改返利分享         | `zibpay_get_rebate_link()` 链路是否保持一致                                     |
+| 适配商品或论坛内容 | 复用 `poster_share_data`，必要时设置 `type = product`                           |
+| 处理跨域图片       | OSS/CDN CORS、默认图、兜底图、`share_img_compatible_s`                          |
+| 微信分享有图       | `wechat_share_s`、AppID、AppSecret、JS 接口安全域名、分享图来源                 |
+
+本页根据 `inc/functions/zib-share.php`、`action/function.php`、`js/poster-share.js`、`inc/functions/shop/inc/functions.php`、`inc/functions/bbs/inc/functions.php`、`inc/functions/zib-share-wechat.php`、`js/weixin-share.js`、`inc/functions/zib-single.php`、`inc/functions/zib-footer.php`、`inc/options/admin-options.php` 蒸馏整理。

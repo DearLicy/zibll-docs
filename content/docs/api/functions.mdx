@@ -1,0 +1,393 @@
+---
+title: 主题函数
+description: 子比主题常用函数分布、查找方法、读取写入封装、Ajax 响应、用户中心、图标和业务函数调用边界。
+---
+
+## 函数分布
+
+子比主题函数不是集中在一个文件里。按模块看更容易：
+
+| 目录                      | 作用                                                   |
+| ------------------------- | ------------------------------------------------------ |
+| `inc/dependent.php`       | 前置依赖、主题设置、聚合 meta、语言上下文              |
+| `inc/functions/zib-*.php` | 主题展示、文章、用户、搜索、分享、附件、邮件           |
+| `inc/functions/user/*`    | 用户中心、权限、等级、封禁、签到、认证、勋章、邀请码   |
+| `inc/functions/bbs/*`     | 论坛首页、板块、帖子、话题、标签、评论、版主、小工具   |
+| `inc/functions/shop/*`    | 商城商品、购物车、分类、售后、物流、店铺、页面、小工具 |
+| `inc/functions/message/*` | 站内消息、私信、模板消息、消息中心                     |
+| `action/*`                | 登录注册、用户资料、评论、上传、投稿、搜索等 Ajax      |
+| `zibpay/functions/*`      | 订单、支付、余额、积分、VIP、下载、分佣、提现、优惠券  |
+| `oauth/*`                 | 第三方登录                                             |
+| `inc/options/*`           | 后台设置、CSF 字段、保存和后台动作                     |
+
+查函数时先确认模块，再看入口文件如何 `zib_require()`。
+
+## 本地源码校准
+
+当前本地主题快照里，通用函数和 Ajax 工具的边界需要按实际入口理解：
+
+- `functions.php` 只负责进入 `inc/inc.php`，长期二开不要把业务堆进根目录 `func.php`。
+- `inc/inc.php` 在核心模块加载完后执行 `do_action('zib_require_end')`，依赖子比函数的插件初始化可以挂这里。
+- `action/function.php` 会先 `zib_require()` 加载 `main`、`ajax`、`user`、`author`、`sign_register`、`comment`、`documentnav`、`media`、`new_posts`，然后再定义验证码、nonce、上传、分享、列表查询等工具函数。
+- `inc/dependent.php` 里 `_pz()`、`_spz()`、聚合 meta key 清单和前后台语言上下文判断都在主题早期可用。
+
+前台 Ajax 语言上下文也在 `inc/dependent.php` 校准。主题默认把 `zib_`、`zibpay_` 前缀，以及 `initiate_pay`、`check_pay`、`points_initiate_pay`、`get_gzh_open_id` 视为前台 Ajax。插件如果注册了不带这些前缀的前台 action，要补：
+
+```php
+add_filter('zib_locale_frontend_ajax_actions', function ($actions) {
+    $actions[] = 'my_plugin_frontend_action';
+    return $actions;
+});
+```
+
+或者补统一前缀：
+
+```php
+add_filter('zib_locale_frontend_ajax_prefixes', function ($prefixes) {
+    $prefixes[] = 'my_plugin_';
+    return $prefixes;
+});
+```
+
+## 基础配置函数
+
+`inc/dependent.php` 中的 `_pz()` 是主题设置读取入口：
+
+```php
+$shop_s     = _pz('shop_s');
+$ajax_text  = _pz('ajax_trigger', __('加载更多', 'zib_language'));
+$class      = _pz('checkin_header_user_option', 'c-yellow', 'class');
+```
+
+函数定义：
+
+```php
+function _pz($name, $default = false, $subname = '')
+```
+
+特点：
+
+- 读取 `wp_options.zibll_options`。
+- 使用静态变量缓存。
+- 支持读取数组子键。
+- 找不到时返回默认值。
+
+单独更新主题设置：
+
+```php
+_spz('option_key', $value);
+```
+
+不要整包覆盖 `zibll_options`，否则容易丢配置。
+
+## 聚合 Meta 函数
+
+子比主题把一部分 post/user/term/comment meta 聚合到 `zib_other_data`。判断清单来自：
+
+```php
+zib_get_option_meta_keys($type)
+```
+
+读写函数：
+
+```php
+zib_get_post_meta($id, $key, true);
+zib_update_post_meta($id, $key, $value);
+
+zib_get_user_meta($id, $key, true);
+zib_update_user_meta($id, $key, $value);
+
+zib_get_term_meta($id, $key, true);
+zib_update_term_meta($id, $key, $value);
+```
+
+文章封面：
+
+```php
+$cover = zib_get_post_meta($post_id, 'cover_image', true);
+```
+
+用户头像：
+
+```php
+$avatar = zib_get_user_meta($user_id, 'custom_avatar', true);
+```
+
+分类封面：
+
+```php
+$term_cover = zib_get_term_meta($term_id, 'cover_image', true);
+```
+
+凡是主题已有字段，优先用这些封装函数，不要直接 `get_post_meta()` 猜保存位置。
+
+## Ajax 响应函数
+
+`action/ajax.php` 提供子比 Ajax 响应：
+
+```php
+zib_send_json_error($data = false, $type = 'danger');
+zib_send_json_success($data = false, $type = '');
+```
+
+本地源码里的真实结构是：
+
+- `zib_send_json_error()` 默认返回 `error => true` 和 `ys => danger|warning|info|success`。
+- `zib_send_json_success()` 默认返回 `error => false`，传入 `$type` 时写入 `type`。
+- 传入数组会和默认结构合并，传入字符串会兼容成 `msg`。
+- 函数直接设置 `Content-Type: application/json`、`echo json_encode()` 并 `exit()`。
+
+典型使用：
+
+```php
+if (!$user_id) {
+    zib_send_json_error(__('请先登录', 'zib_language'));
+}
+
+zib_send_json_success(array(
+    'msg'  => __('保存成功', 'zib_language'),
+    'html' => $html,
+));
+```
+
+主题前端通常会识别这些响应结构并展示通知、刷新局部 HTML、打开弹窗或跳转页面。
+
+注意旧流程并不总是走 `zib_send_json_*`。例如部分验证码判断函数会直接 `echo json_encode(array('error' => 1, 'msg' => ...))` 后退出。调试时要看回调函数本身，不要只按统一响应函数推断。
+
+## Ajax 校验函数
+
+通用 Ajax 工具在 `action/function.php`：
+
+| 函数                                  | 用途                 |
+| ------------------------------------- | -------------------- |
+| `zib_ajax_wp_verify_nonce()`          | 校验 WordPress nonce |
+| `zib_ajax_verify_nonce()`             | 校验主题 Ajax nonce  |
+| `zib_ajax_man_machine_verification()` | 人机验证             |
+| `zib_ajax_captcha_form_judgment()`    | 表单验证码判断       |
+| `zib_ajax_send_captcha()`             | 发送验证码           |
+| `zib_ajax_is_verify_user()`           | 用户身份认证判断     |
+| `zib_ajax_debounce()`                 | 防抖限频             |
+| `zib_ajax_email_judgment()`           | 邮箱格式与状态判断   |
+| `zib_ajax_username_judgment()`        | 用户名判断           |
+
+写入类 Ajax 不要只校验 nonce。还要确认当前用户、目标对象、状态、金额、库存、权限。
+
+## 数组读取函数
+
+`zib_get_array_value()` 在 `inc/functions/zib-tool.php`：
+
+```php
+function zib_get_array_value($array, $key = null, $default = '')
+```
+
+它常用于读取嵌套配置。导航菜单项配置函数 `zib_menu_pz()` 就依赖它：
+
+```php
+function zib_menu_pz($id, $key = '', $default = '')
+{
+    static $options = [];
+    if (!isset($options[$id])) {
+        $options[$id] = get_post_meta($id, 'zib_menu_options', true);
+    }
+
+    return zib_get_array_value($options[$id], $key, $default);
+}
+```
+
+读取菜单徽章：
+
+```php
+$badge = zib_menu_pz($item->ID, 'badge');
+```
+
+读取高级子菜单配置：
+
+```php
+$opts = zib_menu_pz($item->ID, 'graphic_card_opts', array());
+```
+
+第一个参数必须是菜单项 ID，不是菜单指向对象的 ID。
+
+## 用户中心函数
+
+用户中心入口在：
+
+```txt
+inc/functions/user/user.php
+inc/functions/user/page.php
+```
+
+常用函数：
+
+```php
+zib_get_user_center_url($type = null, $tab = null);
+```
+
+用途：
+
+```php
+$url = zib_get_user_center_url('profile');
+```
+
+用户展示相关 Filter：
+
+```php
+apply_filters('user_show_name', $html, $args['id']);
+apply_filters('user_name_badge', $badge, $user_id);
+apply_filters('user_avatar_badge', $vip_badge, $user_id);
+```
+
+权限相关：
+
+```php
+zib_current_user_can($capability, $args);
+zib_user_can($user_id, $capability, $args);
+```
+
+实际函数分布在 `inc/functions/user/user-cap.php` 等文件中。调用前先确认用户模块已加载。
+
+## 图标与后台链接
+
+CSF 图标输出：
+
+```php
+zib_get_cfs_icon($val, $class = '');
+```
+
+常用于菜单图标、小工具图标、按钮图标：
+
+```php
+$icon = zib_get_cfs_icon($icon_value, 'mr6 fa-fw');
+```
+
+后台主题设置页链接：
+
+```php
+zib_get_admin_csf_url($tab = '');
+```
+
+源码里常见写法：
+
+```php
+zib_get_admin_csf_url('商城商品/商品参数')
+```
+
+适合在后台字段说明里生成“去配置”链接。
+
+## 内容与列表函数
+
+主题文章和列表函数分布：
+
+```txt
+inc/functions/zib-post.php
+inc/functions/zib-posts-list.php
+inc/functions/zib-single.php
+inc/functions/zib-content.php
+```
+
+常见任务：
+
+- 获取文章缩略图。
+- 输出文章列表卡片。
+- 处理文章目录。
+- 处理隐藏内容和付费内容。
+- 输出面包屑、标签、专题、分享按钮。
+
+读这类函数时要看返回值是 HTML 字符串还是直接 echo。子比源码两种都有，调用前先确认。
+
+## Zibpay 函数边界
+
+Zibpay 函数分布在：
+
+```txt
+zibpay/functions/
+zibpay/class/
+zibpay/download.php
+```
+
+涉及这些对象：
+
+- 订单。
+- 支付渠道。
+- 余额和积分。
+- VIP。
+- 下载权限。
+- 作者分成。
+- 推广返佣。
+- 提现。
+- 优惠券。
+
+支付、余额、积分、VIP、库存、下载权限不要只改 meta。应该走订单、状态、日志、Hook 和业务函数。支付成功后关注：
+
+```php
+do_action('payment_order_success', $order);
+```
+
+下载前关注：
+
+```php
+do_action('zibpay_download_before', $post_id, $down_id, $paid, $file_url, $file_local);
+```
+
+## 论坛与商城函数边界
+
+论坛函数主要在：
+
+```txt
+inc/functions/bbs/
+```
+
+读写论坛帖子、板块、话题时要注意：
+
+- `forum_post` 和 `plate` 是 post type。
+- `plate_cat`、`forum_topic`、`forum_tag` 是 taxonomy。
+- 版主、关注、发帖权限、评分、采纳都有自己的流程。
+
+商城函数主要在：
+
+```txt
+inc/functions/shop/
+```
+
+读写商品、购物车、地址、售后、物流时要注意：
+
+- `shop_product` 是商品 post type。
+- `product_config` 是商品配置数组。
+- `shop_cat_config`、`shop_tag_config`、`shop_discount_config` 是 taxonomy 配置数组。
+- 订单状态和支付状态要从 Zibpay 体系判断。
+
+## 查找函数的办法
+
+快速搜索函数定义：
+
+```powershell
+rg -n "function zib_get_user_center_url|zib_get_user_center_url" C:\Users\Administrator\Desktop\zibll -g "*.php"
+```
+
+从 Ajax action 找回调：
+
+```powershell
+rg -n "wp_ajax_user_signin|function zib_ajax_user_signin" C:\Users\Administrator\Desktop\zibll -g "*.php"
+```
+
+从 Hook 找触发点：
+
+```powershell
+rg -n "payment_order_success|zib_user_bind_email|bbs_follow_plate" C:\Users\Administrator\Desktop\zibll -g "*.php"
+```
+
+从文案找渲染函数：
+
+```powershell
+rg -n "签到领取今日奖励|商品参数|阅读权限" C:\Users\Administrator\Desktop\zibll -g "*.php"
+```
+
+## 调用规则
+
+- 先确认函数所在模块已加载。
+- 读主题设置用 `_pz()`。
+- 读写主题字段用 `zib_get_*_meta()` / `zib_update_*_meta()`。
+- Ajax 返回优先保持 `zib_send_json_success/error` 结构。
+- HTML 输出前确认函数是返回还是 echo。
+- 涉及订单、余额、积分、会员、库存、下载权限时走业务流程。
+- Filter 回调必须返回值，Action 回调不要随意 `exit`。

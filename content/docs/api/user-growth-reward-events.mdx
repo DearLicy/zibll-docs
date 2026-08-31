@@ -1,0 +1,356 @@
+---
+title: 用户成长奖励事件
+description: 梳理子比主题经验值与免费积分的同源奖励事件、后台配置、每日上限、防重复字段、论坛联动和任务活动扩展边界。
+---
+
+## 模块定位
+
+子比主题的“成长奖励”分成两条线：
+
+| 奖励线     | 入口函数                        | 配置项              | 明细                                                  |
+| ---------- | ------------------------------- | ------------------- | ----------------------------------------------------- |
+| 等级经验值 | `zib_add_user_level_integral()` | `user_integral_opt` | `level_integral_detail`、`level_integral_date_detail` |
+| 免费积分   | `zibpay_add_user_free_points()` | `points_free_opt`   | `points_record`、`free_points_detail`                 |
+
+两条线监听的业务 Hook 基本相同，例如注册、登录、发文、评论、点赞、收藏、关注、论坛加分、精华、热门和采纳。区别在于：
+
+- 经验值用于计算用户等级。
+- 免费积分进入 Zibpay 积分资产。
+- 两者有各自的每日上限。
+- 两者有各自的防重复 meta。
+- 两者都受禁封状态影响。
+
+做任务活动、每日奖励、内容激励、论坛运营时，先判断你要奖励的是“等级经验”“积分资产”，还是二者都发。不要直接更新 `level_integral` 或 `points`。
+
+## 奖励 key 来源
+
+奖励 key 统一来自 `zib_get_user_integral_add_options()`：
+
+```php
+function zib_get_user_integral_add_options()
+{
+    $options = array(
+        'sign_up'         => array(__('首次注册', 'zib_language'), 20, '', __('用户', 'zib_language')),
+        'sign_in'         => array(__('每日登录', 'zib_language'), 5, __('每日登录', 'zib_language'), __('用户', 'zib_language')),
+        'followed'        => array(__('被关注', 'zib_language'), 5, __('有新的粉丝关注', 'zib_language'), __('用户', 'zib_language')),
+        'post_new'        => array(__('发布文章', 'zib_language'), 5, __('发布优质文章并审核通过', 'zib_language'), __('文章', 'zib_language')),
+        'post_like'       => array(__('文章获赞', 'zib_language'), 1, __('发布内容获得用户点赞，每篇文章最多加5次', 'zib_language'), __('文章', 'zib_language')),
+        'post_favorite'   => array(__('文章被收藏', 'zib_language'), 2, __('发布的内容被用户收藏', 'zib_language'), __('文章', 'zib_language')),
+        'comment_new'     => array(__('发表评论', 'zib_language'), 2, __('发表评论并审核通过', 'zib_language'), __('文章', 'zib_language')),
+        'comment_like'    => array(__('评论获赞', 'zib_language'), 1, __('发布评论获得用户点赞，每个评论最多加5次', 'zib_language'), __('文章', 'zib_language')),
+        'bbs_posts_new'   => array(__('发布帖子', 'zib_language'), 3, __('发布优质帖子并审核通过', 'zib_language'), __('论坛', 'zib_language')),
+        'bbs_score_extra' => array(__('帖子被加分', 'zib_language'), 1, __('帖子被加分，每篇帖子最多加5次', 'zib_language'), __('论坛', 'zib_language')),
+        'bbs_essence'     => array(__('帖子评为精华', 'zib_language'), 2, __('帖子评为精华', 'zib_language'), __('论坛', 'zib_language')),
+        'bbs_posts_hot'   => array(__('帖子成为热门', 'zib_language'), 2, __('帖子成为热门', 'zib_language'), __('论坛', 'zib_language')),
+        'bbs_plate_new'   => array(__('创建版块', 'zib_language'), 2, __('创建新版块并审核通过', 'zib_language'), __('论坛', 'zib_language')),
+        'bbs_plate_hot'   => array(__('版块成为热门', 'zib_language'), 2, __('创建的版块成为热门版块', 'zib_language'), __('论坛', 'zib_language')),
+        'bbs_adopt'       => array(__('回答被采纳', 'zib_language'), 2, __('回答被提问作者采纳', 'zib_language'), __('论坛', 'zib_language')),
+        'bbs_comment_hot' => array(__('评论成为神评', 'zib_language'), 2, __('发表的评论成为神评论', 'zib_language'), __('论坛', 'zib_language')),
+    );
+    return apply_filters('integral_add_options', $options);
+}
+```
+
+这个函数名称虽然带 `integral`，但免费积分的“获取方式列表”也复用它。新增奖励 key 时，最好通过 `integral_add_options` 同时让经验值页和积分页能显示清楚。
+
+## 后台配置
+
+经验值配置保存在 `user_integral_opt`，免费积分配置保存在 `points_free_opt`。两者字段名使用同一批 key：
+
+| key               | 场景         |
+| ----------------- | ------------ |
+| `day_max`         | 每日上限     |
+| `sign_up`         | 首次注册     |
+| `sign_in`         | 每日登录     |
+| `followed`        | 被关注       |
+| `post_new`        | 发布文章     |
+| `post_like`       | 文章获赞     |
+| `post_favorite`   | 文章被收藏   |
+| `comment_new`     | 发表评论     |
+| `comment_like`    | 评论获赞     |
+| `bbs_posts_new`   | 发布帖子     |
+| `bbs_score_extra` | 帖子被加分   |
+| `bbs_essence`     | 帖子评为精华 |
+| `bbs_posts_hot`   | 帖子成为热门 |
+| `bbs_plate_new`   | 创建版块     |
+| `bbs_plate_hot`   | 版块成为热门 |
+| `bbs_adopt`       | 回答被采纳   |
+| `bbs_comment_hot` | 评论成为神评 |
+
+配置为 `0` 时，对应奖励不会发放。排查“Hook 已触发但没有奖励”时，先看开关与配置值：
+
+| 奖励     | 必要条件                                                        |
+| -------- | --------------------------------------------------------------- |
+| 经验值   | `_pz('user_level_s', true)` 开启，`user_integral_opt[$key] > 0` |
+| 免费积分 | `_pz('points_s', true)` 开启，`points_free_opt[$key] > 0`       |
+
+## 经验值写入
+
+经验值统一入口是：
+
+```php
+zib_add_user_level_integral($user_id, $value, $key, $no_limit_day_max);
+```
+
+它会检查：
+
+1. 用户 ID 和经验值是否有效。
+2. 今日经验是否超过 `user_integral_opt.day_max`。
+3. 用户是否处于禁封状态。
+4. 写入 `level_integral_detail`。
+5. 写入 `level_integral_date_detail`。
+6. 更新 `level_integral`。
+
+等级不是调用方直接更新。主题监听 user meta 更新，发现 `level_integral` 变化后自动计算 `level`：
+
+```php
+add_action('updated_user_meta', 'zib_update_user_level', 99, 4);
+add_action('added_user_meta', 'zib_update_user_level', 99, 4);
+```
+
+因此二开时不要直接 `update_user_meta($user_id, 'level', 3)`。要让用户升级，应调用经验值入口。
+
+## 免费积分写入
+
+免费积分统一入口是：
+
+```php
+zibpay_add_user_free_points($user_id, $value, $key);
+```
+
+它会检查：
+
+1. 用户 ID 和积分值是否有效。
+2. 今日免费积分是否超过 `points_free_opt.day_max`。
+3. 用户是否处于禁封状态。
+4. 调用 `zibpay_update_user_points()` 写入积分资产。
+5. 写入 `free_points_detail`。
+
+`zibpay_update_user_points()` 会更新 `points`，并写入 `points_record`。这意味着免费积分既会出现在“免费积分每日详情”，也会出现在用户积分流水里。
+
+积分只允许整数：
+
+```php
+$data['value'] = (int) $data['value'];
+```
+
+不要用免费积分入口发放余额、现金类奖励；余额应走 `zibpay_update_user_balance()`。
+
+## 同源 Hook 矩阵
+
+经验值类 `zib_user_level_integral_add` 和免费积分类 `zibpay_points_free_add` 监听的事件基本一致：
+
+| Hook                             | 场景                 | 经验 key                                     | 积分 key          |
+| -------------------------------- | -------------------- | -------------------------------------------- | ----------------- |
+| `user_checkined`                 | 签到                 | `checkin`                                    | `checkin`         |
+| `user_register`                  | 首次注册             | `sign_up`                                    | `sign_up`         |
+| `admin_init`                     | 每日登录             | `sign_in`                                    | `sign_in`         |
+| `save_post`                      | 发布文章、帖子、版块 | `post_new`、`bbs_posts_new`、`bbs_plate_new` | 同名              |
+| `like-posts`                     | 文章获赞             | `post_like`                                  | `post_like`       |
+| `favorite-posts`                 | 文章被收藏           | `post_favorite`                              | `post_favorite`   |
+| `comment_post`                   | 评论直接通过         | `comment_new`                                | `comment_new`     |
+| `comment_unapproved_to_approved` | 评论审核通过         | `comment_new`                                | `comment_new`     |
+| `like-comment`                   | 评论获赞             | `comment_like`                               | `comment_like`    |
+| `follow-user`                    | 被关注               | `followed`                                   | `followed`        |
+| `bbs_score_extra`                | 帖子被加分           | `bbs_score_extra`                            | `bbs_score_extra` |
+| `bbs_posts_essence_set`          | 帖子设为精华         | `bbs_essence`                                | `bbs_essence`     |
+| `posts_is_hot`                   | 帖子成为热门         | `bbs_posts_hot`                              | `bbs_posts_hot`   |
+| `plate_is_hot`                   | 版块成为热门         | `bbs_plate_hot`                              | `bbs_plate_hot`   |
+| `comment_is_hot`                 | 评论成为热门         | `bbs_comment_hot`                            | `bbs_comment_hot` |
+| `answer_adopted`                 | 回答被采纳           | `bbs_adopt`                                  | `bbs_adopt`       |
+
+签到的积分和经验不是直接读 `user_integral_opt` 或 `points_free_opt` 中的 `checkin` 字段，而是来自签到配置计算出的 `$the_data`：
+
+```php
+add_action('user_checkined', array($this, 'user_checkined'), 10, 2);
+```
+
+`$the_data['integral']` 进入经验值，`$the_data['points']` 进入积分。签到奖励的配置和连续签到周期见 [用户成长与权限体系](/docs/api/user-growth-permissions)。
+
+## 防重复字段
+
+主题通过不同 meta 防止同一事件重复奖励：
+
+| 场景                 | 经验防重复                             | 积分防重复                           | 上限             |
+| -------------------- | -------------------------------------- | ------------------------------------ | ---------------- |
+| 每日登录             | `_signin_integral_time`                | `_signin_points_time`                | 每天一次         |
+| 发布文章、帖子、版块 | post meta `_user_integral_new`         | post meta `_user_points_new`         | 每个内容一次     |
+| 文章获赞             | post meta `_user_integral_like`        | post meta `_user_points_like`        | 每篇最多 5 次    |
+| 文章被收藏           | post meta `_user_integral_favorite`    | post meta `_user_points_favorite`    | 每篇最多 5 次    |
+| 发表评论             | comment meta `_user_integral_new`      | comment meta `_user_points_new`      | 每条评论一次     |
+| 评论获赞             | comment meta `_user_integral_like`     | comment meta `_user_points_like`     | 每条最多 2 次    |
+| 被关注               | user meta `_user_integral_followed`    | user meta `_user_points_followed`    | 同一关注者一次   |
+| 帖子被加分           | post meta `_user_integral_score_extra` | post meta `_user_points_score_extra` | 每篇最多 5 次    |
+| 帖子设为精华         | post meta `_user_integral_essence`     | post meta `_user_points_essence`     | 每篇一次         |
+| 帖子或版块热门       | post meta `_user_integral_hot`         | post meta `_user_points_hot`         | 每篇或每版块一次 |
+| 评论热门             | comment meta `_user_integral_hot`      | comment meta `_user_points_hot`      | 每条评论一次     |
+| 回答采纳             | comment meta `_user_integral_adopt`    | comment meta `_user_points_adopt`    | 每条回答一次     |
+
+扩展自己的任务奖励时，不要复用这些字段。它们是主题内置奖励的幂等标记，混用会导致主题奖励被跳过，或者你的奖励被主题操作误判为已发。
+
+## 审核通过才奖励
+
+发布文章、论坛帖子、版块和评论奖励都要求内容已经发布或审核通过：
+
+| 内容             | 判断                                          |
+| ---------------- | --------------------------------------------- |
+| 文章、帖子、版块 | `save_post` 后检查 `post_status == 'publish'` |
+| 评论             | `comment_approved == '1'`                     |
+| 待审评论         | 等 `comment_unapproved_to_approved` 再补发    |
+
+这点很重要。前台投稿、论坛发帖、评论提交可能先进入待审状态。不要在表单提交成功时立即奖励，否则垃圾内容、待审内容、驳回内容也会拿到成长奖励。
+
+## 自己操作自己无效
+
+互动类奖励会排除自己给自己操作：
+
+| 场景     | 排除条件                               |
+| -------- | -------------------------------------- |
+| 文章点赞 | `$action_user_id == $post_author`      |
+| 文章收藏 | `$action_user_id == $post_author`      |
+| 评论点赞 | `$action_user_id == $comment->user_id` |
+| 帖子加分 | `$action_user_id == $post_author`      |
+
+因此排查“我自己点赞没有奖励”时，这是正常行为。运营活动如果允许自助完成，应该单独设计任务条件，不要改掉主题互动奖励里的防刷逻辑。
+
+## 每日上限
+
+经验值和免费积分都有每日上限，但互不影响：
+
+```php
+$day_max = _pz('user_integral_opt', 100, 'day_max');
+```
+
+```php
+$day_max = _pz('points_free_opt', 100, 'day_max');
+```
+
+当今天累计达到上限后，对应奖励不会继续写入。经验值每日明细最多保存 30 条，免费积分每日明细最多保存 50 条。
+
+| 明细             | 保存字段                     | 上限  |
+| ---------------- | ---------------------------- | ----- |
+| 经验值流水       | `level_integral_detail`      | 50 条 |
+| 经验值每日合计   | `level_integral_date_detail` | 30 条 |
+| 积分流水         | `points_record`              | 50 条 |
+| 免费积分每日合计 | `free_points_detail`         | 50 条 |
+
+如果要做长期任务报表或运营审计，不要只依赖这些用户 meta。它们主要用于用户中心近期展示，生产站点应另建日志表或订单类记录。
+
+## 新增任务奖励
+
+新增任务奖励时，推荐把任务完成、幂等标记、经验、积分分开写清楚：
+
+```php
+function zib_docs_activity_reward($user_id, $activity_id)
+{
+    if (!$user_id || !$activity_id) {
+        return;
+    }
+
+    $rewarded_key = '_docs_activity_rewarded_' . absint($activity_id);
+    if (zib_get_user_meta($user_id, $rewarded_key, true)) {
+        return;
+    }
+
+    zib_update_user_meta($user_id, $rewarded_key, current_time('mysql'));
+
+    if (_pz('user_level_s', true)) {
+        zib_add_user_level_integral($user_id, 10, 'docs_activity');
+    }
+
+    if (_pz('points_s', true)) {
+        zibpay_add_user_free_points($user_id, 20, 'docs_activity');
+    }
+}
+```
+
+如果希望用户中心“获取经验值”和“获取积分”列表能显示你的任务名称，可以补充 `integral_add_options`：
+
+```php
+function zib_docs_integral_add_options($options)
+{
+    $options['docs_activity'] = array(
+        __('完成活动任务', 'zib_language'),
+        10,
+        __('完成指定活动后发放奖励', 'zib_language'),
+        __('活动', 'zib_language'),
+    );
+
+    return $options;
+}
+add_filter('integral_add_options', 'zib_docs_integral_add_options');
+```
+
+这里的第二个数字主要是默认展示值，真实发放多少仍以你调用 `zib_add_user_level_integral()` 或 `zibpay_add_user_free_points()` 时传入的值为准。
+
+## 活动奖励与资产奖励
+
+很多运营活动既想给经验，也想给积分、余额、VIP 或徽章。建议按能力拆分：
+
+| 奖励             | 推荐入口                        |
+| ---------------- | ------------------------------- |
+| 经验值           | `zib_add_user_level_integral()` |
+| 免费积分         | `zibpay_add_user_free_points()` |
+| 普通积分资产变动 | `zibpay_update_user_points()`   |
+| 余额             | `zibpay_update_user_balance()`  |
+| VIP              | `zibpay_update_user_vip()`      |
+| 徽章             | `zib_add_user_medal()`          |
+
+免费积分入口适合“每日可免费获取、有上限、用户行为奖励”的积分。后台人工补偿、订单退款、购买积分、活动大额发放更适合直接走 `zibpay_update_user_points()`，并写清楚 `type` 和 `desc`。
+
+示例：一次活动给经验、积分和徽章：
+
+```php
+function zib_docs_campaign_finished($user_id, $campaign_id)
+{
+    if (!$user_id || !$campaign_id) {
+        return;
+    }
+
+    $key = '_docs_campaign_finished_' . absint($campaign_id);
+    if (zib_get_user_meta($user_id, $key, true)) {
+        return;
+    }
+
+    zib_update_user_meta($user_id, $key, current_time('mysql'));
+
+    zib_add_user_level_integral($user_id, 15, 'docs_campaign');
+    zibpay_update_user_points($user_id, array(
+        'order_num' => '',
+        'value'     => 50,
+        'type'      => __('活动奖励', 'zib_language'),
+        'desc'      => __('完成限时活动奖励积分', 'zib_language'),
+    ));
+
+    if (_pz('user_medal_s', true)) {
+        zib_add_user_medal($user_id, __('活动达人', 'zib_language'), __('完成限时活动', 'zib_language'));
+    }
+}
+```
+
+## 排查顺序
+
+| 现象                 | 优先检查                                                               |
+| -------------------- | ---------------------------------------------------------------------- |
+| 没有经验值           | `user_level_s`、`user_integral_opt[$key]`、每日上限、禁封状态          |
+| 没有免费积分         | `points_s`、`points_free_opt[$key]`、每日上限、禁封状态                |
+| 发文没有奖励         | 内容是否已发布，`_user_integral_new` 或 `_user_points_new` 是否已存在  |
+| 评论没有奖励         | 评论是否已审核通过，是否已经通过 `comment_unapproved_to_approved` 补发 |
+| 点赞没有奖励         | 是否自己给自己点赞，单篇或单条评论是否达到上限                         |
+| 被关注没有奖励       | 同一个关注者是否已经关注过并写入 `_user_*_followed`                    |
+| 论坛奖励没有发       | 论坛 Hook 是否触发，配置 key 是否为 `bbs_*`，内容是否已发布            |
+| 用户中心没有显示任务 | 是否通过 `integral_add_options` 补充任务 key                           |
+
+## 开发边界
+
+- 不要直接写 `level`、`level_integral`、`points`。
+- 不要在内容待审时发放发布奖励。
+- 不要复用主题 `_user_integral_*` 和 `_user_points_*` 防重复字段。
+- 不要把免费积分当作完整资产账本。
+- 不要把用户输入作为奖励 key。
+- 不要绕过禁封判断给被禁用户继续发任务奖励。
+- 不要只靠前端隐藏按钮控制任务领取，服务端必须做幂等判断。
+
+## 参考来源
+
+本页根据 `inc/dependent.php`、`inc/functions/user/user-level.php`、`zibpay/functions/zibpay-points.php`、[用户成长与权限体系](/docs/api/user-growth-permissions)、[用户资产、积分与余额](/docs/api/user-assets-points-balance) 和论坛相关奖励 Hook 蒸馏整理。

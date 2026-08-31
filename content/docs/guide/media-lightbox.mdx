@@ -1,0 +1,205 @@
+---
+title: 图片灯箱与媒体
+description: 蒸馏子比官网图片灯箱教程，结合主题源码说明灯箱、懒加载、图片结构、排除 class 和常见异常排查。
+---
+
+## 图片能力分层
+
+子比主题的图片体验主要由三层组成：
+
+| 层级     | 配置或函数                                           | 作用                           |
+| -------- | ---------------------------------------------------- | ------------------------------ |
+| 懒加载   | `lazy_other`、`zib_is_lazy()`、`zib_get_lazy_attr()` | 延迟加载普通图片、头像、模块图 |
+| 图片灯箱 | `imagelightbox`、`imagelightbox_type`                | 点击文章图片查看大图           |
+| 灯箱工具 | 缩略图、播放、缩放、全屏、下载                       | 控制灯箱 UI 能力               |
+
+图片灯箱不是简单给图片加一个链接。主题会在内容过滤时处理图片结构，在页脚输出灯箱配置，并由前端脚本接管点击行为。
+
+## 配置项
+
+图片灯箱配置在 `inc/options/admin-options.php`：
+
+| 配置项                   | 说明               |
+| ------------------------ | ------------------ |
+| `imagelightbox`          | 是否启用图片灯箱   |
+| `imagelightbox_type`     | 灯箱模式           |
+| `imagelightbox_thumbs_s` | 是否显示缩略图工具 |
+| `imagelightbox_play_s`   | 是否显示播放工具   |
+| `imagelightbox_zoom_s`   | 是否显示缩放工具   |
+| `imagelightbox_full_s`   | 是否显示全屏工具   |
+| `imagelightbox_down_s`   | 是否显示下载工具   |
+
+`imagelightbox_type` 支持：
+
+| 模式    | 说明                                 |
+| ------- | ------------------------------------ |
+| `alone` | 单图模式，每张图片独立打开           |
+| `group` | 组合模式，将文章全部图片组成一组灯箱 |
+
+工具开关通常按 PC 和移动端分别控制。页脚读取逻辑在 `inc/functions/zib-footer.php`：
+
+```php
+$imagelightbox_thumbs_s = (array) _pz('imagelightbox_thumbs_s', array('m_s', 'pc_s'));
+$imagelightbox_zoom_s   = (array) _pz('imagelightbox_zoom_s', array('m_s', 'pc_s'));
+$imagelightbox_full_s   = (array) _pz('imagelightbox_full_s', array('pc_s'));
+$imagelightbox_play_s   = (array) _pz('imagelightbox_play_s', array('m_s', 'pc_s'));
+$imagelightbox_down_s   = (array) _pz('imagelightbox_down_s', array('m_s', 'pc_s'));
+```
+
+## 懒加载
+
+懒加载判断在 `inc/functions/zib-tool.php`：
+
+```php
+function zib_is_lazy($key, $default = false)
+{
+    return _pz($key, $default);
+}
+
+function zib_get_lazy_attr($key, $src, $class = '', $lazy_src = ZIB_TEMPLATE_DIRECTORY_URI . '/img/thumbnail.svg')
+{
+    return zib_is_lazy($key) ? ' class="lazyload ' . $class . '" src="' . $lazy_src . '" data-src="' . $src . '"' : ' class="' . $class . '" src="' . $src . '"';
+}
+```
+
+开发时优先使用主题封装：
+
+```php
+$img = '<img' . zib_get_lazy_attr('lazy_other', $image, 'fit-cover radius8') . ' alt="' . esc_attr($title) . '">';
+```
+
+这样能跟随主题懒加载开关，不需要自己判断 `lazyload`、`src`、`data-src`。
+
+## 哪些图片不进灯箱
+
+主题里很多图片会显式加 `no-imgbox`，例如文章卡片缩略图、隐藏内容里的说明图、播放器封面、模块背景等。这类图片通常不应该触发文章灯箱。
+
+常见规则：
+
+| class 或场景     | 说明                             |
+| ---------------- | -------------------------------- |
+| `no-imgbox`      | 不进入灯箱                       |
+| 头像、徽章、图标 | 主要是 UI 元素，不应作为文章图片 |
+| 背景图、模块封面 | 通常由模块交互控制               |
+| 商品图           | 商城单页有自己的图片查看逻辑     |
+
+新增图片输出时，如果是文章正文图片，可以让灯箱接管；如果是按钮图标、头像、装饰图或模块背景，建议加 `no-imgbox`。
+
+```php
+echo '<img class="no-imgbox" src="' . esc_url($icon) . '" alt="">';
+```
+
+## 文章内容图片处理
+
+图片灯箱开启后，主题会对正文中的图片做过滤。源码在 `inc/functions/zib-theme.php` 的“图片灯箱”区域：
+
+```php
+if (_pz('imagelightbox')) {
+    // 处理文章图片，让灯箱脚本可以识别
+}
+```
+
+当懒加载启用时，主题还会把图片替换为占位图和 `data-src`：
+
+```php
+$replacement = '<img$1src="' . ZIB_TEMPLATE_DIRECTORY_URI . '/img/thumbnail-lg.svg' . '" data-src=$2$3.$4$5 $6>';
+```
+
+因此图片灯箱异常时，不要只看图片 URL，还要看最终 HTML 是否被缓存插件、编辑器或优化插件改写。
+
+## 消息和论坛图片
+
+消息内容会处理 `[img=...]`：
+
+```php
+$con = preg_replace('/\[img=(.*?)\]/', '<img class="lazyload' . (_pz('imagelightbox') ? ' cursor-zoom-in' : '') . '" src="$1">', $con);
+```
+
+论坛帖子图片也会根据灯箱开关添加 `cursor-zoom-in` 并配合懒加载。也就是说，图片灯箱影响的不只是普通文章正文，还会影响消息、论坛、商城等模块里的图片查看体验。
+
+## 常见异常
+
+### 点击图片没反应
+
+优先检查：
+
+1. `imagelightbox` 是否开启。
+2. 浏览器控制台是否有 JS 报错。
+3. 缓存插件是否合并或延迟了主题脚本。
+4. 图片是否带了 `no-imgbox`。
+5. 图片是否是背景图，不是 `<img>`。
+6. 文章内容是否被编辑器或插件改写成特殊结构。
+
+### 图片只显示占位图
+
+优先检查：
+
+1. `data-src` 是否存在。
+2. 懒加载脚本是否加载。
+3. CDN 是否拦截图片。
+4. 图片地址是否 403 或 404。
+5. HTTPS 页面是否加载 HTTP 图片。
+
+### 组合灯箱图片不全
+
+优先检查：
+
+1. `imagelightbox_type` 是否为 `group`。
+2. 图片是否都在文章正文范围内。
+3. 是否有图片带 `no-imgbox`。
+4. 是否有图片由异步内容后加载，灯箱初始化时还不存在。
+
+### Ajax 后追加图片不进灯箱
+
+灯箱脚本不是只在首屏初始化。主题把动态内容初始化集中到 `window.auto_fun = debounce(z_auto_fun, 100)`，并在 Ajax Tab、远程模块、弹窗内容、评论提交、窗口 resize、折叠面板展开等场景后再次执行。
+
+`z_auto_fun()` 里会先给动态追加的 `img[data-src]` 补 `lazyload`，然后根据下面这些选择器判断是否加载灯箱脚本：
+
+```js
+$(
+  '.alone-imgbox-img,a[data-imgbox],.comment-content .box-img,.wp-posts-content img,.imgbox-container',
+);
+```
+
+也就是说，自定义 Ajax 模块追加图片后，如果没有进入这些容器或选择器，主题可能不会加载 `imgbox` 模块；如果已经加载过脚本但新内容没有被识别，也要在插入 HTML 后主动调用 `auto_fun()`。
+
+| 现象                   | 优先检查                                                     | 处理方向                                              |
+| ---------------------- | ------------------------------------------------------------ | ----------------------------------------------------- |
+| Ajax 列表图片没有放大  | 自定义脚本追加 HTML 后是否调用 `auto_fun()`                  | 插入完成后执行 `window.auto_fun && window.auto_fun()` |
+| 模块图片不能点击       | 是否是背景图、头像、图标、播放器封面或带 `no-imgbox`         | 正文图片输出真实 `<img>`，UI 图片继续保留 `no-imgbox` |
+| 组合灯箱图片不全       | 图片是否在同一 `.wp-posts-content` 或 `.imgbox-container` 内 | 组合图集放进统一容器，避免分散到多个无关模块          |
+| 评论或评价图片不进灯箱 | 是否保留 `.comment-content .box-img` 等业务容器              | 不要只复制 `<img>`，要保留主题原本容器结构            |
+| CDN 后首次点击失败     | JS 延迟、`data-src` 改写或灯箱脚本被延后                     | 先关闭 JS 延迟/合并验证，再恢复 CDN 规则              |
+
+自定义动态模块建议输出真实 `<img>`，并放入 `.imgbox-container`，或复用 `a[data-imgbox]` / `.alone-imgbox-img`。如果只是把图片 URL 写到背景图、CSS 变量或自定义 JSON 里，主题灯箱不会自动接管。
+
+### 移动端工具不显示
+
+灯箱工具按设备开关。检查 `imagelightbox_thumbs_s`、`imagelightbox_zoom_s`、`imagelightbox_full_s`、`imagelightbox_play_s`、`imagelightbox_down_s` 是否包含 `m_s` 或 `pc_s`。
+
+## CDN 与图片优化
+
+图片 CDN 可以提升速度，但要注意：
+
+- 不要把动态 HTML 缓存到用户登录态。
+- 图片域名要支持 HTTPS。
+- 防盗链不要拦截本站和 CDN 回源。
+- WebP、压缩、缩略图处理不要破坏原图地址。
+- JS 延迟加载不要延迟灯箱初始化脚本。
+
+如果源站正常、接 CDN 后灯箱异常，先暂停 CDN 或关闭图片处理功能测试，再逐项恢复。
+
+附件 URL、图片输出、跨域和 CDN 边界请结合 [媒体上传](/docs/api/media-upload) 的源码链路检查。
+
+## 开发建议
+
+- 正文图片交给主题灯箱，不要重复绑定第三方相册插件。
+- UI 图标、头像、徽章、背景图加 `no-imgbox`。
+- 懒加载输出优先用 `zib_get_lazy_attr()`。
+- 输出图片 URL 用 `esc_url()`。
+- 输出 alt 用 `esc_attr()`。
+- Ajax 后追加的新图片如果要进入灯箱，插入后调用 `auto_fun()`，并确保图片落在灯箱识别容器里。
+
+## 参考来源
+
+本页吸收了子比官网图片灯箱功能详解，并结合主题源码 `inc/options/admin-options.php`、`inc/functions/zib-theme.php`、`inc/functions/zib-footer.php`、`inc/functions/zib-tool.php`、`js/main.js` 整理为内置知识。

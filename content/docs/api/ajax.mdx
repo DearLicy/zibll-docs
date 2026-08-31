@@ -1,0 +1,345 @@
+---
+title: Ajax 动作
+description: 子比主题 WordPress Ajax 动作分布、命名、权限校验、响应函数、游客入口和调试边界。
+---
+
+## Ajax 总览
+
+子比主题大量交互走 WordPress Ajax，入口仍然是：
+
+```txt
+wp-admin/admin-ajax.php?action=动作名
+```
+
+注册方式保持 WordPress 标准：
+
+```php
+add_action('wp_ajax_user_signin', 'zib_ajax_user_signin');
+add_action('wp_ajax_nopriv_user_signin', 'zib_ajax_user_signin');
+```
+
+命名习惯很清晰：
+
+| 前缀              | 含义                         |
+| ----------------- | ---------------------------- |
+| `zib_ajax_*`      | 主题主流程 Ajax 回调函数     |
+| `zibpay_ajax_*`   | Zibpay 支付、订单、资产 Ajax |
+| `zib_bbs_ajax_*`  | 论坛模块 Ajax                |
+| `zib_shop_ajax_*` | 商城模块 Ajax                |
+
+动作名通常不带 `zib_` 前缀，例如 `user_signin`、`posts_save`、`follow_plate`、`submit_order`。
+
+## 本地 Ajax 入口校准
+
+本地主题入口 `action/function.php` 当前实际加载：
+
+```txt
+action/main.php
+action/ajax.php
+action/user.php
+action/author.php
+action/sign_register.php
+action/comment.php
+action/documentnav.php
+action/media.php
+action/new_posts.php
+```
+
+因此排查某个主流程 Ajax 时，先看 `action/function.php` 的加载列表，再按动作名搜注册：
+
+```bash
+rg -n "add_action\\('wp_ajax_{action}'|add_action\\('wp_ajax_nopriv_{action}'" 主题插件子主题/zibll
+```
+
+如果是支付、论坛或商城，再分别扩展到：
+
+```bash
+rg -n "add_action\\('wp_ajax_{action}'" 主题插件子主题/zibll/zibpay/functions
+rg -n "add_action\\('wp_ajax_{action}'" 主题插件子主题/zibll/inc/functions/bbs/action
+rg -n "add_action\\('wp_ajax_{action}'" 主题插件子主题/zibll/inc/functions/shop/action
+```
+
+几个容易误判的点：
+
+- `wp_ajax_nopriv_*` 只表示游客能打到回调，不代表游客能完成写入；回调里仍可能要求登录、nonce、验证码、订单状态或权限。
+- 主题响应函数是 `error => true|false` 的子比结构，不一定是 WordPress 原生 `success => true|false`。
+- 前台 Ajax 多语言上下文由 `zib_locale_frontend_ajax_prefixes` 和 `zib_locale_frontend_ajax_actions` 控制。插件 action 如果不以 `zib_`、`zibpay_` 开头，又需要前台语言，应加入对应 filter。
+- 同一业务可能先打开 modal，再提交动作。例如支付有 `pay_cashier_modal`、`order_pay_modal`、`initiate_pay`、`check_pay`；不要只看最后一个请求。
+
+## 主题响应函数
+
+子比在 `action/ajax.php` 中定义了统一响应函数：
+
+```php
+function zib_send_json_error($data = false, $type = 'danger')
+function zib_send_json_success($data = false, $type = '')
+```
+
+本地源码里错误响应会写入 `error => true` 和 `ys => $type`，成功响应会写入 `error => false`，传入成功 `$type` 时才写 `type`。字符串参数会变成 `msg`，数组参数会与默认结构合并。
+
+常见写法：
+
+```php
+if (!$user_id) {
+    zib_send_json_error(__('请先登录', 'zib_language'));
+}
+
+zib_send_json_success(array(
+    'msg'  => __('操作成功', 'zib_language'),
+    'html' => $html,
+));
+```
+
+主题很多旧流程会直接使用这两个函数，不一定使用 `wp_send_json_success()`。读源码时优先按子比响应结构理解前端处理。
+
+## 登录注册动作
+
+文件：
+
+```txt
+action/sign_register.php
+```
+
+核心动作：
+
+| Action                  | 回调                             | 游客 |
+| ----------------------- | -------------------------------- | ---- |
+| `user_signin`           | `zib_ajax_user_signin`           | 是   |
+| `user_signup`           | `zib_ajax_user_signup`           | 是   |
+| `user_signin_nopas`     | `zib_ajax_user_signin_nopas`     | 是   |
+| `signup_captcha`        | `zib_ajax_signup_captcha`        | 是   |
+| `signin_captcha`        | `zib_ajax_signin_captcha`        | 是   |
+| `resetpassword_captcha` | `zib_ajax_resetpassword_captcha` | 是   |
+| `reset_password`        | `zib_ajax_reset_password`        | 是   |
+
+这类动作会调用：
+
+```php
+zib_ajax_captcha_form_judgment()
+zib_ajax_send_captcha()
+zib_ajax_email_judgment()
+zib_ajax_username_judgment()
+```
+
+登录成功后会触发 WordPress 原生 Hook：
+
+```php
+do_action('wp_login', $user->user_login, $user);
+```
+
+注册会经过：
+
+```php
+$errors = apply_filters('registration_errors', $errors, $sanitized_user_login, $email);
+```
+
+## 用户资料动作
+
+文件：
+
+```txt
+action/user.php
+```
+
+核心动作：
+
+| Action                 | 回调                            | 用途               |
+| ---------------------- | ------------------------------- | ------------------ |
+| `user_edit_datas`      | `zib_ajax_user_edit_datas`      | 保存用户资料       |
+| `user_upload_avatar`   | `zib_ajax_user_upload_avatar`   | 上传头像           |
+| `user_upload_cover`    | `zib_ajax_user_upload_cover`    | 上传封面           |
+| `user_change_password` | `zib_ajax_user_change_password` | 修改密码           |
+| `bind_email_captcha`   | `zib_ajax_bind_email_captcha`   | 发送绑定邮箱验证码 |
+| `user_bind_email`      | `zib_ajax_user_bind_email`      | 绑定邮箱           |
+| `bind_phone_captcha`   | `zib_ajax_bind_phone_captcha`   | 发送绑定手机验证码 |
+| `user_bind_phone`      | `zib_ajax_user_bind_phone`      | 绑定手机           |
+| `verify_user`          | `zib_ajax_verify_user`          | 用户身份认证       |
+| `user_rewards_modal`   | `zib_ajax_user_rewards_modal`   | 打赏资料弹窗       |
+
+用户资料写入统一走主题封装：
+
+```php
+zib_update_user_meta($cuid, 'custom_avatar', $image_url[0]);
+zib_update_user_meta($cuid, 'cover_image', $image_url[0]);
+```
+
+重要 Hook：
+
+```php
+do_action('user_save_custom_avatar', $cuid, $img_id, $image_url[0]);
+do_action('zib_user_bind_email', $cuid, $captcha_val, $email);
+do_action('zib_user_bind_phone', $cuid, $captcha_val, $old_phone);
+```
+
+## 投稿与文章动作
+
+文件：
+
+```txt
+action/new_posts.php
+action/media.php
+action/comment.php
+action/function.php
+```
+
+核心动作：
+
+| Action              | 回调                         | 用途         |
+| ------------------- | ---------------------------- | ------------ |
+| `posts_save`        | `zib_ajax_new_posts`         | 前台投稿保存 |
+| `posts_draft`       | `zib_ajax_new_posts`         | 保存草稿     |
+| `new_post_delete`   | `zib_ajax_new_post_delete`   | 删除投稿     |
+| `user_upload_image` | `zib_ajax_user_upload_image` | 上传图片     |
+| `user_split_upload` | `zib_ajax_user_split_upload` | 分片上传     |
+| `submit_comment`    | `zib_ajax_submit_comment`    | 提交评论     |
+| `get_comment`       | `zib_ajax_get_comment`       | 拉取评论     |
+| `query_posts_lists` | `zib_ajax_query_posts_lists` | Ajax 列表    |
+| `views_record`      | `zib_post_views_record`      | 浏览记录     |
+
+投稿保存前后 Hook：
+
+```php
+do_action('zib_pre_insert_post', $postarr);
+do_action('new_' . ($is_new ? 'add' : 'edit') . '_posts', $new_post_obj);
+do_action('new_posts_pending', $new_post_obj);
+```
+
+评论流程里常见 Hook：
+
+```php
+do_action('comment_is_topping', $comment);
+do_action('set_comment_cookies', $comment, wp_get_current_user());
+```
+
+## 论坛动作
+
+文件：
+
+```txt
+inc/functions/bbs/action/
+```
+
+核心动作：
+
+| Action                         | 回调                          | 用途               |
+| ------------------------------ | ----------------------------- | ------------------ |
+| `bbs_posts_save`               | `zib_bbs_ajax_edit_posts`     | 发布或编辑论坛帖子 |
+| `bbs_posts_draft`              | `zib_bbs_ajax_edit_posts`     | 保存论坛草稿       |
+| `follow_plate`                 | `zib_bbs_ajax_follow_plate`   | 关注板块           |
+| `favorite_posts`               | `zib_bbs_ajax_favorite_posts` | 收藏论坛帖子       |
+| `score_extra` / `score_deduct` | `zib_bbs_ajax_posts_score`    | 评分               |
+| `submit_vote`                  | `zib_bbs_ajax_submit_vote`    | 投票               |
+| `answer_adopt`                 | `zib_bbs_ajax_answer_adopt`   | 采纳回答           |
+| `save_plate`                   | `zib_bbs_ajax_save_plate`     | 保存板块           |
+| `save_plate_cat`               | `zib_bbs_ajax_save_term`      | 保存板块分类       |
+| `save_forum_topic`             | `zib_bbs_ajax_save_term`      | 保存话题           |
+| `save_forum_tag`               | `zib_bbs_ajax_save_term`      | 保存标签           |
+
+论坛动作常触发：
+
+```php
+do_action('bbs_follow_plate', $id, $user_id);
+do_action('bbs_favorite_posts', $id, $user_id, $type);
+do_action('bbs_' . ($is_new ? 'add' : 'edit') . '_posts', $new_post_obj);
+do_action('bbs_posts_topping_set', $post_id, $topping);
+do_action('bbs_posts_essence_set', $post_id, $val);
+```
+
+## 商城动作
+
+文件：
+
+```txt
+inc/functions/shop/action/action.php
+```
+
+核心动作：
+
+| Action                     | 回调                                   | 用途         |
+| -------------------------- | -------------------------------------- | ------------ |
+| `cart_add`                 | `zib_shop_ajax_cart_add`               | 加入购物车   |
+| `update_cart`              | `zib_shop_ajax_update_cart`            | 更新购物车   |
+| `shop_save_user_address`   | `zib_shop_ajax_save_user_address`      | 保存收货地址 |
+| `shop_delete_user_address` | `zib_shop_ajax_delete_user_address`    | 删除收货地址 |
+| `shop_order_comment`       | `zib_shop_order_comment`               | 商品订单评价 |
+| `order_receive_confirm`    | `zib_shop_ajax_order_receive_confirm`  | 确认收货     |
+| `order_after_sale_apply`   | `zib_shop_ajax_order_after_sale_apply` | 申请售后     |
+| `favorite_product`         | `zib_shop_ajax_favorite_product`       | 收藏商品     |
+
+收藏商品后会触发：
+
+```php
+do_action('shop_favorite_product', $id, $user_id);
+```
+
+商城订单、售后、物流动作必须以服务端订单状态为准，不要信任前端传来的价格、数量、收货人或订单归属。
+
+## Zibpay 动作
+
+文件：
+
+```txt
+zibpay/functions/ajax.php
+zibpay/functions/zibpay-ajax.php
+zibpay/functions/zibpay-order.php
+zibpay/functions/balance-ajax.php
+```
+
+核心动作：
+
+| Action                | 回调                              | 用途         |
+| --------------------- | --------------------------------- | ------------ |
+| `submit_order`        | `zibpay_ajax_submit_order`        | 创建订单     |
+| `initiate_pay`        | `zibpay_ajax_initiate_pay`        | 发起支付     |
+| `check_pay`           | `zibpay_check_pay`                | 检查支付状态 |
+| `pay_cashier_modal`   | `zibpay_ajax_pay_cashier_modal`   | 收银台弹窗   |
+| `order_details_modal` | `zibpay_ajax_order_details_modal` | 订单详情     |
+| `coupon_submit`       | `zibpay_ajax_coupon_submit`       | 提交优惠码   |
+| `pay_vip`             | `zibpay_pay_vip_modal`            | VIP 支付弹窗 |
+| `pay_transfer`        | `zibpay_ajax_pay_transfer`        | 余额转账     |
+| `apply_withdraw`      | `zibpay_ajax_apply_withdraw`      | 申请提现     |
+
+订单创建和支付成功 Hook：
+
+```php
+do_action('order_created', $order_data);
+do_action('payment_order_success', $order);
+```
+
+支付类动作必须幂等。`payment_order_success` 可能因为回调、轮询、后台修正重复触发，权益发放要检查订单状态和发放记录。
+
+## 权限与校验
+
+子比 Ajax 常见校验函数：
+
+```php
+zib_ajax_wp_verify_nonce()
+zib_ajax_verify_nonce()
+zib_ajax_man_machine_verification()
+zib_ajax_captcha_form_judgment()
+zib_ajax_is_verify_user()
+zib_ajax_debounce()
+```
+
+写入类动作至少确认：
+
+1. 当前用户是否登录。
+2. nonce 是否正确。
+3. 用户是否能操作目标对象。
+4. 目标 post、term、comment、order 是否存在。
+5. 状态是否允许变化。
+6. 金额、积分、库存、权限是否由服务端重新计算。
+
+游客动作只适合登录注册、验证码、搜索、展示弹窗、公开列表、支付游客流程等明确允许的场景。
+
+## 调试方式
+
+浏览器 Network 面板重点看：
+
+- `admin-ajax.php` 是否请求成功。
+- `action` 是否和源码注册一致。
+- 是否带 `_wpnonce`、`post_id`、`id`、`type` 等必要参数。
+- 响应 JSON 是否是子比 `zib_send_json_*` 结构。
+- 是否被 WAF、CDN、防火墙、缓存或登录态拦截。
+
+PHP 侧调试建议写受控日志，不要把 SQL、服务器路径、密钥、支付回调原文直接返回给前端。

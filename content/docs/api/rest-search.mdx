@@ -1,0 +1,70 @@
+---
+title: REST 搜索扩展
+description: 说明子比主题对 WordPress REST 搜索的补充，以及它与开放接口的区别。
+---
+
+## 它不是开放接口平台
+
+子比主题源码里的 `inc/functions/rest-api/function.php` 并没有注册一套完整的业务 REST API。它主要通过 `rest_post_search_query` 过滤器，给 WordPress 官方搜索 REST 查询补充论坛内容类型。
+
+这意味着不应该把“主题扩展”理解成开放接口手册。子比主题真正的扩展入口仍然是函数、Hook、Ajax、短代码、模板覆盖和业务模块。
+
+## 当前能力
+
+当论坛功能启用时，主题会让 WordPress REST 搜索查询包含：
+
+- `plate`
+- `forum_post`
+
+如果请求里显式传了 `post_type`，则使用请求指定的类型；否则将论坛类型合并到搜索范围。
+
+## 适合的场景
+
+- 让编辑器或搜索组件能搜到论坛版块和帖子。
+- 给 WordPress 官方 REST 搜索补充主题自定义内容类型。
+- 在不新增完整接口的情况下改善站内搜索候选。
+
+## 不适合的场景
+
+- 第三方系统订单同步。
+- 支付回调。
+- 用户资料修改。
+- 文件上传。
+- 余额、积分、VIP、下载权限处理。
+- 需要签名、权限、频率限制的开放接口。
+
+这些需求应该单独设计 REST 路由、webhook 或后台任务，并做好认证和日志。
+
+## 如果要新增 REST 路由
+
+新增 REST 路由时至少考虑：
+
+1. namespace 和 route 命名。
+2. `permission_callback`。
+3. 参数 schema 和 sanitize。
+4. 当前用户权限。
+5. 签名或 token。
+6. 频率限制。
+7. 错误响应和状态码。
+8. 日志和审计。
+
+示例结构：
+
+```php
+add_action('rest_api_init', function () {
+    register_rest_route('zib-docs/v1', '/ping', array(
+        'methods'             => 'GET',
+        'callback'            => 'zib_docs_rest_ping',
+        'permission_callback' => '__return_true',
+    ));
+});
+
+function zib_docs_rest_ping(WP_REST_Request $request)
+{
+    return rest_ensure_response(array(
+        'ok' => true,
+    ));
+}
+```
+
+涉及用户、订单、支付、资产的数据，不要使用 `__return_true`，必须写明确的权限判断。

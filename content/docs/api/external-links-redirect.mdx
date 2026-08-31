@@ -1,0 +1,412 @@
+---
+title: 外链重定向与网址导航
+description: 解读子比主题 go.php 外链中转、go_link 生成函数、nonce 鉴权、排除域名、文章内容外链、评论链接、用户网址和友情链接模块。
+---
+
+## 模块定位
+
+子比主题的外链重定向不是独立插件，而是主题 SEO 和链接展示体系的一部分。它由三层组成：
+
+| 层级     | 入口                                                                                                        |
+| -------- | ----------------------------------------------------------------------------------------------------------- |
+| 配置项   | `inc/options/admin-options.php` 的 `go_link_s`、`go_link_nonce_s`、`go_link_post`、`go_link_exclude_domain` |
+| 链接生成 | `inc/functions/zib-theme.php` 的 `zib_get_gourl()`、`go_link()`、`zib_is_go_link()`                         |
+| 跳转模板 | 主题根目录 `go.php`                                                                                         |
+
+典型链路是：
+
+```txt
+外部链接
+  -> go_link($url, true)
+  -> /?golink={base64_url}&nonce={nonce}
+  -> template_redirect 加载 go.php
+  -> go.php 校验来源、nonce、协议
+  -> 延迟跳转到目标 URL
+```
+
+## 后台配置
+
+外链重定向配置位于「SEO 优化」相关设置：
+
+| 配置 key                 | 作用                                             |
+| ------------------------ | ------------------------------------------------ |
+| `go_link_s`              | 是否启用外链重定向                               |
+| `go_link_nonce_s`        | 是否给中转链接加 nonce 鉴权                      |
+| `go_link_post`           | 是否处理文章正文里的外链                         |
+| `go_link_exclude_domain` | 排除域名列表，逗号、中文逗号、空格、换行都可分隔 |
+
+主题说明里有一个非常重要的缓存边界：开启 `go_link_nonce_s` 后，转换后的链接会定期变化，有这些链接的位置不能被长期静态缓存。尤其是文章正文、网址导航页、友情链接小工具和用户资料外链，要么排除缓存，要么关闭 nonce 鉴权。
+
+## 路由与模板加载
+
+主题先把 `golink` 加入公开 query var：
+
+```php
+function zib_add_gophp_query_vars($public_query_vars)
+{
+    if (!is_admin()) {
+        $public_query_vars[] = 'golink';
+    }
+    return $public_query_vars;
+}
+add_filter('query_vars', 'zib_add_gophp_query_vars');
+```
+
+然后在 `template_redirect` 中捕获 `golink`，加载主题根目录的 `go.php`：
+
+```php
+function zib_gophp_template()
+{
+    $golink = get_query_var('golink');
+    if ($golink) {
+        global $wp_query;
+        $wp_query->is_home = false;
+        $wp_query->is_page = true;
+        $template          = get_theme_file_path('/go.php');
+
+        @session_start();
+        $_SESSION['GOLINK'] = $golink;
+        load_template($template);
+        exit;
+    }
+}
+add_action('template_redirect', 'zib_gophp_template', 5);
+```
+
+这里把 `golink` 放进 `$_SESSION['GOLINK']`，是为了让 `go.php` 可以用更兼容的方式读取完整参数。开发时不要在这个流程前输出内容，否则 `go.php` 的 header、HTML 和跳转脚本可能失效。
+
+## 生成中转链接
+
+主题使用 `zib_get_gourl()` 生成中转 URL：
+
+```php
+function zib_get_gourl($url)
+{
+    $url   = base64_encode($url);
+    $nonce = '';
+    if (_pz('go_link_nonce_s')) {
+        $nonce = '&nonce=' . wp_create_nonce('go_link_nonce');
+    }
+
+    return esc_url(home_url('?golink=' . $url . $nonce));
+}
+```
+
+普通开发里更常用的是 `go_link()`：
+
+```php
+$url = go_link($url, true);
+```
+
+第二个参数为 `true` 时，表示传入的是一个 URL 字符串。主题会先判断是否应该中转，只有外链才会转换：
+
+```php
+function go_link($text = '', $link = false)
+{
+    if (!$text || !_pz('go_link_s')) {
+        return $text;
+    }
+
+    if ($link) {
+        if (zib_is_go_link($text)) {
+            $text = zib_get_gourl($text);
+        }
+        return $text;
+    }
+
+    return $text;
+}
+```
+
+如果传入的是一段 HTML，主题会扫描其中的 `<a>` 标签，把外链替换为中转链接，并追加 `target="_blank"`：
+
+```php
+$content = go_link($content);
+```
+
+主题已经把评论作者链接和评论正文接入了这条链路：
+
+```php
+add_filter('get_comment_author_link', 'add_redirect_comment_link', 5);
+add_filter('comment_text', 'add_redirect_comment_link', 99);
+
+function add_redirect_comment_link($text = '')
+{
+    return go_link($text);
+}
+```
+
+## 判断是否外链
+
+`zib_is_go_link()` 是外链判断的核心：
+
+```php
+function zib_is_go_link($url)
+{
+    if (strpos($url, '://') == false) {
+        return false;
+    }
+
+    if (strpos($url, zib_get_url_top_host())) {
+        return false;
+    }
+
+    $go_link_exclude_domain = _pz('go_link_exclude_domain');
+    if ($go_link_exclude_domain) {
+        $exclude_domain = preg_split("/,|，|\s|\n/", $go_link_exclude_domain);
+        if (in_array(zib_get_url_top_host($url), $exclude_domain)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+```
+
+注意它判断的是顶级域名，不是完整 host。`zib_get_url_top_host()` 会处理常见二级后缀：
+
+```php
+function zib_get_url_top_host($url = '')
+{
+    $url   = $url ? $url : home_url();
+    $url   = strtolower($url);
+    $hosts = parse_url($url);
+    $host  = !empty($hosts['host']) ? $hosts['host'] : $url;
+
+    $data = explode('.', $host);
+    $n    = count($data);
+    $preg = '/[\w].+\.(com|net|org|gov|edu)\.cn$/';
+
+    if (($n > 2) && preg_match($preg, $host)) {
+        $host = $data[$n - 3] . '.' . $data[$n - 2] . '.' . $data[$n - 1];
+    } elseif (($n > 1)) {
+        $host = $data[$n - 2] . '.' . $data[$n - 1];
+    }
+
+    return $host;
+}
+```
+
+所以排除域名应该填顶级域名，例如：
+
+```txt
+example.com
+baidu.com
+qq.com
+```
+
+不要填 `https://www.example.com/path`。填完整 URL 时可能无法命中排除规则。
+
+## go.php 安全边界
+
+`go.php` 会先做请求长度和危险片段过滤：
+
+```php
+if (
+    strlen($_SERVER['REQUEST_URI']) > 384 ||
+    strpos($_SERVER['REQUEST_URI'], 'eval(') ||
+    strpos($_SERVER['REQUEST_URI'], 'base64')
+) {
+    @header('HTTP/1.1 414 Request-URI Too Long');
+    @exit;
+}
+```
+
+然后读取 `$_SESSION['GOLINK']` 或 query string 中 `url=` 后面的值。目标可以是 base64 编码后的 URL，也可以是明文 URL：
+
+```php
+$t_url = !empty($_SESSION['GOLINK']) ? $_SESSION['GOLINK'] : preg_replace('/^url=(.*)$/i', '$1', $_SERVER['QUERY_STRING']);
+
+if ($t_url == base64_encode(base64_decode($t_url))) {
+    $t_url = base64_decode($t_url);
+}
+```
+
+接着对输出值做 XSS 处理，并只允许这些协议：
+
+```php
+preg_match('/^(http|https|thunder|qqdl|ed2k|Flashget|qbrowser):\/\//i', $t_url, $matches);
+```
+
+如果没有协议但看起来像域名，会补 `http://`；如果参数错误，则回到首页。
+
+`go.php` 还会检查来源站点：
+
+```php
+$host    = zib_get_url_top_host($_SERVER['HTTP_HOST']);
+$referer = isset($_SERVER['HTTP_REFERER']) ? $_SERVER['HTTP_REFERER'] : '';
+if (!empty($referer) && !preg_match('/' . preg_quote($host, '/') . '/i', $referer)) {
+    $url   = $_SERVER['REQUEST_SCHEME'] . '://' . $_SERVER['HTTP_HOST'];
+    $title = '非法请求，正在返回首页...';
+}
+```
+
+开启 `go_link_nonce_s` 后，还会验证 nonce：
+
+```php
+if (_pz('go_link_nonce_s')) {
+    $nonce = isset($_GET['nonce']) ? $_GET['nonce'] : '';
+    if (empty($nonce) || !wp_verify_nonce($nonce, 'go_link_nonce')) {
+        $url   = $_SERVER['REQUEST_SCHEME'] . '://' . $_SERVER['HTTP_HOST'];
+        $title = '非法请求，正在返回首页...';
+    }
+}
+```
+
+最后页面用 `setTimeout` 延迟跳转：
+
+```js
+setTimeout(link_jump, 1500);
+setTimeout(function () {
+  window.opener = null;
+  window.close();
+}, 15000);
+```
+
+如果你改跳转页样式，可以改 `go.php` 的 HTML/CSS，但不要删除 `noindex,nofollow`、nonce 校验、referer 校验和协议判断。
+
+## 文章内容外链
+
+开启 `go_link_s` 和 `go_link_post` 后，主题会过滤文章正文：
+
+```php
+if (_pz('go_link_s') && _pz('go_link_post')) {
+    add_filter('the_content', 'the_content_nofollow', 999);
+}
+```
+
+过滤器只改外链 `href`：
+
+```php
+function the_content_nofollow($content)
+{
+    $pattern = '/<a(.*?)href="(.*?)"(.*?)>/';
+    preg_match_all($pattern, $content, $matches);
+    if ($matches) {
+        foreach ($matches[2] as $val) {
+            if (zib_is_go_link($val)) {
+                $content = str_replace("href=\"$val\"", 'href="' . zib_get_gourl($val) . '" ', $content);
+            }
+        }
+    }
+    return $content;
+}
+```
+
+它不会检查文章权限，也不会理解业务语义。因此付费内容、隐藏内容、下载按钮等模块如果输出外链，应该在自己的输出阶段明确决定是否使用 `go_link($url, true)`，不要只依赖正文过滤器。
+
+## 友情链接和网址导航
+
+网址导航模板 `pages/links.php` 会读取页面 Meta：
+
+| Meta key                | 作用                    |
+| ----------------------- | ----------------------- |
+| `page_links_category`   | 友情链接分类            |
+| `page_links_orderby`    | 排序字段                |
+| `page_links_order`      | 升序或降序              |
+| `page_links_limit`      | 数量限制                |
+| `page_links_style`      | 展示样式                |
+| `page_links_go_s`       | 是否启用中转            |
+| `page_links_blank_s`    | 是否新窗口打开          |
+| `page_links_nofollow_s` | 是否加 `rel="nofollow"` |
+
+最终通过 `zib_links_box()` 统一渲染：
+
+```php
+zib_links_box(get_bookmarks($args), $page_links_style, $args_nofollow_s, $args_go_s, $args_blank_s);
+```
+
+`zib_links_box()` 会兼容 WordPress bookmark 字段和主题自己的数组字段：
+
+```php
+if (empty($link['href']) && !empty($link['link_url'])) {
+    $link['href'] = $link['link_url'];
+}
+if (empty($link['title']) && !empty($link['link_name'])) {
+    $link['title'] = $link['link_name'];
+}
+```
+
+开启中转时：
+
+```php
+if (!empty($link['go_link']) || $go_link) {
+    $href = go_link($href, true);
+}
+```
+
+如果你新增一个链接列表模块，优先复用 `zib_links_box()`，这样 card、bigcard、image、simple 四种样式、nofollow、新窗口和 go_link 都能保持一致。
+
+## 小工具和用户资料外链
+
+部分小工具也提供 `go_link` 开关，例如合作伙伴滚动卡片、复合信息卡片、友情链接小工具：
+
+```php
+if ($go_link && $url !== 'javascript:void(0)') {
+    $url = go_link($url, true);
+}
+```
+
+用户资料里的个人网址也会被中转：
+
+```php
+function zib_get_url_link($user_id, $class = 'focus-color')
+{
+    $user_url = get_userdata($user_id)->user_url;
+    $url_name = zib_get_user_meta($user_id, 'url_name', true) ?: $user_url;
+    $user_url = go_link($user_url, true);
+    return $user_url ? '<a class="' . $class . '" href="' . esc_url($user_url) . '" target="_blank">' . esc_attr($url_name) . '</a>' : 0;
+}
+```
+
+这类用户可填写 URL 的地方，一定要用 `esc_url()` 输出，并让 `go_link()` 只处理 URL，不要把用户输入拼成 HTML 后再不加筛选地输出。
+
+## 自定义链接输出
+
+新增外链按钮时，按这个顺序处理：
+
+```php
+function zib_docs_get_external_button($url, $text)
+{
+    if (!$url || !$text) {
+        return '';
+    }
+
+    $url = go_link($url, true);
+
+    return '<a class="but c-blue" href="' . esc_url($url) . '" target="_blank" rel="nofollow noopener noreferrer">' . esc_html($text) . '</a>';
+}
+```
+
+如果这个链接是站内页面，不要强行中转：
+
+```php
+if (zib_is_go_link($url)) {
+    $url = zib_get_gourl($url);
+}
+```
+
+需要跳过中转的第三方域名，优先让站长配置 `go_link_exclude_domain`，不要在业务代码里散落多个硬编码白名单。
+
+## 缓存与 SEO 注意事项
+
+- 中转页应该保持 `noindex,nofollow`，不要让搜索引擎收录跳转页。
+- 开启 nonce 鉴权后，带中转链接的页面不能长期静态缓存。
+- CDN 缓存规则要排除 `?golink=` 请求，避免不同目标链接返回同一个跳转页。
+- 不要把中转页当下载鉴权页。它只负责外链跳转，不负责验证用户是否购买、是否登录、是否有下载权限。
+- `go.php` 允许 `thunder`、`qqdl`、`ed2k` 等下载协议，前端按钮要清楚告诉用户即将离开本站或调用客户端协议。
+- 排除域名只填顶级域名，多个域名用逗号、空格或换行分隔。
+- 如果评论区允许访客填写网址，保留评论链接中转可以降低直接外链风险。
+
+## 落地清单
+
+| 目标                   | 首选做法                                 |
+| ---------------------- | ---------------------------------------- |
+| 输出单个外链按钮       | `go_link($url, true)` 后再 `esc_url()`   |
+| 处理一段 HTML 中的外链 | `go_link($html)`                         |
+| 判断是否外链           | `zib_is_go_link($url)`                   |
+| 生成中转 URL           | `zib_get_gourl($url)`                    |
+| 友情链接列表           | 复用 `zib_links_box()`                   |
+| 排除可信域名           | 配置 `go_link_exclude_domain`            |
+| 开启 nonce 后缓存异常  | 排除包含 `?golink=` 或中转链接的页面缓存 |
+| 修改跳转页视觉         | 只改 `go.php` 的展示层，不删安全校验     |

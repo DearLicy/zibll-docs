@@ -1,0 +1,29 @@
+{
+  "name": "zibll-theme-dev",
+  "version": "0.1.0",
+  "description": "Specialized Codex guidance for Zibll theme, child theme, plugin, Hook, Ajax, Meta and Codestar development.",
+  "author": {
+    "name": "子比主题开发文档"
+  },
+  "homepage": "https://dearlicy.github.io/zibll-docs/docs/ai/codex-plugin",
+  "keywords": ["zibll", "wordpress", "theme", "plugin", "codestar"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "子比主题二开助手",
+    "shortDescription": "专注子比主题插件、子主题、Hook、Ajax、Meta 和 Codestar 二开。",
+    "longDescription": "面向子比主题二次开发的专业 Codex 插件。它会引导 Codex 先读取本站主题扩展、插件制作、子主题制作和 Codestar Framework 文档，再结合用户项目源码选择 Hook、Filter、短代码、模板覆盖或独立插件方案，避免直接改主题核心文件。",
+    "developerName": "Zibll Docs",
+    "category": "Productivity",
+    "capabilities": ["Documentation", "MCP", "WordPress Development"],
+    "websiteURL": "https://dearlicy.github.io/zibll-docs",
+    "defaultPrompt": [
+      "按子比主题文档帮我写一个独立插件",
+      "检查这个子主题改法是否会影响主题更新",
+      "根据 Codestar 文档写文章 Meta 配置"
+    ],
+    "brandColor": "#1EBC44",
+    "composerIcon": "./assets/favicon.svg",
+    "logo": "./assets/favicon.svg"
+  },
+  "mcpServers": "./.mcp.json"
+}

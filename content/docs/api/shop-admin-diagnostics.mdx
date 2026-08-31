@@ -1,0 +1,731 @@
+---
+title: 商城后台与订单排查
+description: 蒸馏子比主题商城后台商品列表、优惠活动列、商品评价后台展示、后台订单查询、用户中心计数缓存和异常订单排查边界。
+---
+
+## 适用范围
+
+本页关注商城后台和排查，不重复讲商品发布字段、下单、发货、售后的完整状态机。需要先理解：
+
+| 主题                          | 文档                                                                          |
+| ----------------------------- | ----------------------------------------------------------------------------- |
+| 商品配置和前台购买            | [商城模块](/docs/api/shop)、[商城商品发布字段](/docs/api/shop-product-fields) |
+| 购物车和确认下单              | [商城购物车与确认下单](/docs/api/shop-cart-checkout)                          |
+| 发货、物流、售后和退款        | [商城发货、售后与优惠](/docs/api/shop-shipping-after-sale)                    |
+| Zibpay 订单、余额、积分和分佣 | [Zibpay 扩展](/docs/api/zibpay)                                               |
+
+商城后台能力分散在两个模块：
+
+| 位置                                               | 负责                                                                  |
+| -------------------------------------------------- | --------------------------------------------------------------------- |
+| `inc/functions/shop/admin/admin.php`               | 商城后台 notice、后台配置文件加载                                     |
+| `inc/functions/shop/admin/options/meta-option.php` | 商品编辑页 Meta、优惠活动侧边栏、快速编辑和批量编辑                   |
+| `inc/functions/shop/inc/class.init.php`            | 商品 post type、后台商品列表列、标签/优惠活动列表列、商品评价后台展示 |
+| `zibpay/functions/admin/admin-ajax.php`            | 后台订单、发货、售后列表查询和数据整理                                |
+| `inc/functions/shop/inc/user.php`                  | 用户中心订单数量统计和缓存                                            |
+| `zibpay/functions/zibpay-user.php`                 | 用户中心订单 Tab 查询和排序                                           |
+
+商城关闭时，`shop.php` 不会加载商城前台函数和 Ajax。后台仍会加载基础类和后台设置，但商品前台动作、购物车、小工具等能力不可用。排查时先确认 `_pz('shop_s')` 是否开启。
+
+## 商品后台列表
+
+`shop_product` 后台列表由 `zib_shop::product_columns()` 重排列，并由 `zib_shop::product_custom_column()` 输出内容。核心列不是 WordPress 默认评论列，而是主题合并出来的业务列：
+
+| 列          | 来源                                            | 内容                                      |
+| ----------- | ----------------------------------------------- | ----------------------------------------- |
+| `pay_data`  | `product_columns()` / `product_custom_column()` | 起始价、积分/金额标记、销量和销售明细链接 |
+| `all_count` | `product_columns()` / `product_custom_column()` | 评分、评价次数、阅读数、收藏数            |
+| `author`    | `product_columns()`                             | 文案改为商家                              |
+
+新商品创建时，主题会初始化这些 meta：
+
+```php
+$key['shop_product'] = array(
+    'score'          => 0,
+    'sales_volume'   => 0,
+    'views'          => 0,
+    'favorite_count' => 0,
+);
+```
+
+所以后台商品列表的排序和展示依赖这些 meta：
+
+| Meta                         | 用途                                 |
+| ---------------------------- | ------------------------------------ |
+| `score`                      | 后台按评分排序，也作为商品评分扁平值 |
+| `score_data`                 | 展示平均分、评价次数和好评统计       |
+| `sales_volume`               | 销量排序和销售明细入口               |
+| `views`                      | 阅读数                               |
+| `favorite_count`             | 收藏数                               |
+| `product_config.start_price` | 起始价展示                           |
+| `product_config.pay_modo`    | 判断价格符号是金额还是积分           |
+
+评分列会链接到 WordPress 后台评论列表：
+
+```php
+'/wp-admin/edit-comments.php?p=' . $id . '&comment_status=approved';
+```
+
+这意味着商品评价后台入口仍是评论列表，只是通过 `p={product_id}` 和 `comment_status=approved` 聚焦当前商品。不要单独做一套评价表，除非同时同步 WordPress comment、comment meta、商品 `score_data` 和订单 `comment_status`。
+
+扩展商品后台列时，优先追加新列，不要覆盖 `pay_data` 和 `all_count` 的语义。销量、评分、阅读、收藏已经被商品列表、排序、小工具和用户侧展示复用，随意改字段名会让前后台表现不一致。
+
+## 优惠活动和标签后台列
+
+商品标签后台列会追加 `priority`，展示 `zib_shop_get_tag_config($id)` 中的优先级、样式类和重点标记。
+
+优惠活动配置保存在 taxonomy meta `shop_discount_config`。后台字段来自 `inc/functions/shop/admin/options/term-option.php`，读取入口是：
+
+```php
+function zib_shop_get_discount_config($discount_id, $key = null, $default = '')
+{
+    return zib_shop_get_term_config('shop_discount', $discount_id, $key, $default);
+}
+```
+
+配置分三组：
+
+| 分组     | 字段                              | 说明                                 |
+| -------- | --------------------------------- | ------------------------------------ |
+| 基础配置 | `small_badge`                     | 商品页和后台列表显示的小标签         |
+| 基础配置 | `priority`                        | 优先级，数值越小越先计算             |
+| 基础配置 | `is_important`、`important_class` | 重点活动及颜色类                     |
+| 优惠政策 | `discount_scope`                  | `item`、`product`、`author`、`order` |
+| 优惠政策 | `discount_type`                   | `reduction`、`discount`、`gift`      |
+| 优惠政策 | `reduction_amount`                | 立减金额                             |
+| 优惠政策 | `discount_amount`                 | 折扣，必须在 `0.01` 到 `9.99` 之间   |
+| 优惠政策 | `gift_config`                     | 买赠配置                             |
+| 优惠限制 | `price_limit`                     | 按优惠范围计算原价是否达标           |
+| 优惠限制 | `user_limit`                      | `vip`、`vip_2`、`auth`               |
+| 优惠限制 | `time_limit`、`time_limit_config` | 开始时间、结束时间、倒计时           |
+
+`discount_scope` 只影响立减优惠和金额限制的计算范围：
+
+| 值        | 计算范围                       |
+| --------- | ------------------------------ |
+| `item`    | 单件商品，购买多件时每件都立减 |
+| `product` | 同一商品总量                   |
+| `author`  | 同一商家商品总量               |
+| `order`   | 整个订单                       |
+
+优惠有效性由 `zib_shop_get_discount_policy()` 判断。常见无效状态包括：
+
+| `discount_error`   | 原因                                                           |
+| ------------------ | -------------------------------------------------------------- |
+| `config_error`     | 未配置优惠类型、立减金额小于等于 0、折扣不在合法范围、赠品为空 |
+| `time_limit_start` | 活动尚未开始                                                   |
+| `time_limit_end`   | 活动已结束                                                     |
+
+后台列表和商品编辑选择框都会显示这些错误状态，所以二开时不要只读取 term 是否存在。应该用 `zib_shop_get_discount_data()` 或 `zib_shop_get_product_discount()`，让主题先完成有效性判断、优先级排序和错误提示组装。
+
+优惠活动后台列会重排为：
+
+| 列         | 内容                                         |
+| ---------- | -------------------------------------------- |
+| `discount` | 活动类型、立减/折扣/赠品、重点标记、错误提示 |
+| `limit`    | 满额限制、用户限制、时间限制                 |
+| `priority` | 优先级和 term ID 拼接值                      |
+
+优惠活动下拉选项来自：
+
+```php
+zib_shop_get_discount_meta_options();
+```
+
+它最多取 200 个 `shop_discount` term，并把活动类型、优惠文案和重点标记拼进选项名称。商品编辑页侧边栏和快速/批量编辑都复用这组选项。
+
+商品编辑页侧边栏 Meta Box 是 `shop_product_discount`：
+
+```php
+function zib_shop_add_meta_box_product_discount()
+{
+    add_meta_box('shop_product_discount', __('优惠活动', 'zib_language'), 'zib_shop_meta_box_product_discount', array('shop_product'), 'side', 'high');
+}
+add_action('add_meta_boxes', 'zib_shop_add_meta_box_product_discount');
+```
+
+保存时只写 taxonomy 关系：
+
+```php
+if (!empty($_POST['meta_box_save_product_discount'])) {
+    $discount_ids = !empty($_POST['meta_box_product_discount']) ? array_map('intval', (array) $_POST['meta_box_product_discount']) : array();
+    wp_set_post_terms($post_id, $discount_ids, 'shop_discount', false);
+}
+```
+
+这意味着优惠活动的“政策”在 term meta，商品只是通过 `shop_discount` 关系参与活动。不要把优惠政策复制一份到商品 `product_config`，否则后台活动列表、商品批量编辑、商品页 badge 和下单计算会分裂成两套数据。
+
+快速编辑和批量编辑只处理 `shop_discount`：
+
+```php
+if (!empty($_GET['post_type']) && $_GET['post_type'] === 'shop_product') {
+    add_action('bulk_edit_custom_box', 'zib_shop_bulk_edit_custom_box_product', 50, 2);
+    add_action('quick_edit_custom_box', 'zib_shop_bulk_edit_custom_box_product', 50, 2);
+}
+add_action('save_post', 'zib_shop_bulk_edit_save_post_product', 10, 3);
+```
+
+保存时只在 `screen=edit-shop_product` 且请求里存在 `zib_bulk_edit['shop']` 时写入：
+
+```php
+wp_set_post_terms($post_ID, $discount_ids, 'shop_discount', false);
+```
+
+因此不要把批量编辑当成完整商品配置保存入口。价格、库存、发货、售后、返佣、商品参数和详情页样式仍应走商品 Meta Box 或前台设置保存链路。
+
+### 买赠配置过滤
+
+买赠活动不是保存什么就发什么。`zib_shop_filter_discount_gift_config()` 会按站点功能开关过滤赠品：
+
+| 赠品类型         | 生效条件                                       |
+| ---------------- | ---------------------------------------------- |
+| `vip_1`          | VIP1 功能开启，`vip_time` 是数字或 `Permanent` |
+| `vip_2`          | VIP2 功能开启，`vip_time` 是数字或 `Permanent` |
+| `auth`           | 用户认证开启，且填写认证名称                   |
+| `level_integral` | 等级功能开启，经验值大于 0                     |
+| `points`         | 积分功能开启，积分大于 0                       |
+| `product`        | 商品 ID 大于 0                                 |
+| `other`          | 填写物品名称                                   |
+
+如果同时配置了 VIP1 和 VIP2，主题会移出 VIP1，只保留更高等级。二开赠品时要复用过滤后的 `gift_config`，不要直接读取后台原始数组发放权益。
+
+买赠权益最终在确认收货时处理。`zib_shop_order_receive_confirm()` 会读取 `order_data.gift_data`，再根据 `gift_type` 发放会员、认证资格、经验值、积分等。因此买赠不是支付成功就立刻发放；它跟随商城收货流程，避免退款、退货和未完成订单提前发权益。
+
+## 商品评价后台展示
+
+商品评价存在 WordPress comment 表里，但后台展示由商城模块增强。`zib_shop::manage_comments_nav()` 会在评论列表渲染阶段追加：
+
+```php
+add_filter('comment_text', array($this, 'manage_comments_comment_text'), 8, 3);
+```
+
+`manage_comments_comment_text()` 只处理 `shop_product`：
+
+| 数据     | 来源                                          | 展示                                             |
+| -------- | --------------------------------------------- | ------------------------------------------------ |
+| 评论正文 | comment content                               | 空内容时显示“用户未填写评价内容”或“系统默认好评” |
+| 评分     | comment meta `score_data.average`             | `评分：x` badge，`>= 3.5` 为绿色，否则红色       |
+| 购买规格 | comment meta `order_data.options_active_name` | 小 badge                                         |
+| 评价图片 | comment meta `score_data.img_ids`             | 后台缩略图列表                                   |
+
+后台评论列表还保留 `response_2` 列，通过 `WP_Comments_List_Table::column_response($comment_id)` 展示被评价商品。商品评价后台展示只是把评分和购买信息追加到评论文本，不会重新计算评分。
+
+如果后台看到评价正文存在但商品评分没有变化，排查顺序是：
+
+1. 评论是否属于 `shop_product`。
+2. 评论 meta 是否有 `score` 和 `score_data`。
+3. 商品 post meta 是否有 `score_data` 和 `score`。
+4. 评论状态是否为 approved。
+5. 是否触发过 `transition_comment_status`。
+6. 订单 meta `comment_status` 是否已变为 `1`。
+
+不要在后台评论列表里直接用 JavaScript 修改评分显示。评分真实数据在 comment meta 和 product meta；只改 UI 会让前台筛选、商品排序、用户订单按钮继续异常。
+
+## 后台订单查询
+
+后台订单数据整理在 `zibpay/functions/admin/admin-ajax.php`。公共查询函数是：
+
+```php
+function zibpay_ajax_order_query($args = array())
+{
+    $query_args = array_merge(array(
+        'orderby'  => $orderby,
+        'order'    => $order,
+        'paged'    => $paged,
+        'per_page' => $pagesize,
+    ), $args);
+
+    $db_data = zibpay::order_query($query_args);
+}
+```
+
+后台请求支持：
+
+| 参数                       | 说明                            |
+| -------------------------- | ------------------------------- |
+| `paged` / `pagesize`       | 分页                            |
+| `order` / `orderby`        | 排序                            |
+| `search` / `search_filter` | 搜索和搜索字段                  |
+| `filter`                   | 普通筛选，会合并进 `query_args` |
+| `timefilter`               | 时间筛选，会合并进 `query_args` |
+
+`zibpay_ajax_get_order_lits_data()` 会继续补充商城字段：
+
+| 字段                | 来源                                                  |
+| ------------------- | ----------------------------------------------------- |
+| `shipping_time`     | 订单 meta `shipping_time`                             |
+| `shipping_status`   | 订单 meta `shipping_status`，并会检查自动确认收货时效 |
+| `express_data`      | `order_data.express_data`                             |
+| `shipping_data`     | `order_data.shipping_data`                            |
+| `consignee`         | `order_data.consignee`                                |
+| `after_sale_time`   | 订单 meta `after_sale_time`                           |
+| `after_sale_status` | 订单 meta `after_sale_status`，并会检查退货发货时效   |
+| `after_sale_data`   | `order_data.after_sale_data`                          |
+| `after_sale_record` | `order_data.after_sale_record`                        |
+| `pay_detail_lists`  | Zibpay 支付明细格式化                                 |
+
+后台列表还会组装一批适合界面展示的对象：
+
+| 字段           | 内容                                                  | 边界                                                  |
+| -------------- | ----------------------------------------------------- | ----------------------------------------------------- |
+| `user_info`    | 下单用户 ID、昵称、邮箱、头像、用户主页、后台搜索链接 | 未登录订单只返回“未登录用户”                          |
+| `product_info` | 商品标题、规格名、缩略图、前台链接、编辑链接          | 商品被删除时会显示 `商品已删除[ID:%s]`                |
+| `author_info`  | 商品作者昵称、头像、商家退货地址                      | 地址读取依赖商城功能开启                              |
+| `rebate_info`  | 推荐人、返佣金额、返佣状态、返佣明细                  | 只有 `referrer_id` 和 `rebate_price > 0` 才有完整数据 |
+| `income_info`  | 作者分成金额、积分分成、分成状态、分成明细            | 积分订单会优先显示 `income_detail.points`             |
+| `prices`       | 后台价格结构                                          | 旧订单没有 `order_data.prices` 时会临时补全           |
+
+所以后台订单列表返回的数据不是订单表的原样镜像，而是“订单主表 + 订单 meta + 用户/商品信息 + 状态实时判断”的界面模型。扩展后台导出时不要直接把整包 JSON 暴露给普通用户；里面可能包含邮箱、收件人、手机号、物流、作者地址、返佣和分成明细。
+
+### 订单列表汇总栏
+
+`wp_ajax_admin_order_table_list` 不只返回分页列表，还会基于当前查询条件计算 `statistics_data`。它先调用 `zibpay_ajax_get_order_lits_data()` 拿到本次筛选后的查询对象，再克隆同一个 `$db_data['db']` 分别统计现金、积分、佣金和分成。
+
+核心口径可以简化理解成：
+
+```php
+$data_1 = $db_1->field('sum(count) as count,sum(order_price) as order_price')->where('pay_type', '!=', 'points')->find()->toArray();
+$data_2 = $db_2->field('sum(count) as count,sum(order_price) as order_price')->where('pay_type', '=', 'points')->find()->toArray();
+
+$data_3 = $db_3->field('sum(income_price) as income_price,sum(rebate_price) as rebate_price')->where(array(array('status', '=', 1)))->find()->toArray();
+$data_4 = $db_4->field('sum(income_price) as income_price')->where(array(array('status', '=', 1), array('income_status', '!=', 1)))->find()->toArray();
+$data_5 = $db_5->field('sum(rebate_price) as rebate_price')->where(array(array('status', '=', 1), array('rebate_status', '!=', 1)))->find()->toArray();
+```
+
+汇总栏返回四组数据：
+
+| 汇总       | 口径                                                               |
+| ---------- | ------------------------------------------------------------------ |
+| 现金销量   | 当前筛选结果中 `pay_type != points` 的 `sum(count)`                |
+| 积分销量   | 当前筛选结果中 `pay_type = points` 的 `sum(count)`                 |
+| 现金金额   | 当前筛选结果中 `pay_type != points` 的 `sum(order_price)`          |
+| 积分金额   | 当前筛选结果中 `pay_type = points` 的 `sum(order_price)`           |
+| 佣金合计   | 当前筛选结果中已支付订单的 `sum(rebate_price)`                     |
+| 佣金待提现 | 当前筛选结果中已支付且 `rebate_status != 1` 的 `sum(rebate_price)` |
+| 分成合计   | 当前筛选结果中已支付订单的 `sum(income_price)`                     |
+| 分成待提现 | 当前筛选结果中已支付且 `income_status != 1` 的 `sum(income_price)` |
+
+这里有几个容易踩坑的点：
+
+| 现象                         | 原因                                                                                      |
+| ---------------------------- | ----------------------------------------------------------------------------------------- |
+| 列表汇总和仪表盘不一致       | 列表汇总基于当前筛选后的订单查询，仪表盘有自己的默认排除和时间口径                        |
+| 金额看起来像实付但对不上     | 现金/积分金额用的是 `order_price`，不是统一使用 `pay_price`                               |
+| 待提现和用户中心可提现不一致 | 这里按订单筛选结果和状态汇总，用户中心还会受当前用户、处理中提现和提现申请流程影响        |
+| 积分分成没有进入分成金额     | 汇总栏的分成金额统计 `income_price`，积分分成主要在订单列表的 `income_info.detail` 里展示 |
+
+如果要扩展后台订单导出，建议把“订单明细导出”和“当前筛选汇总”分开。明细导出按订单逐行展开；汇总导出则明确标注筛选参数、时间字段和使用的金额字段，避免客服或财务把当前列表汇总当成全站累计总账。
+
+### 旧订单兼容
+
+后台订单列表会对旧数据做兼容整理，尤其是积分订单和旧价格结构：
+
+```php
+if ($order['pay_type'] === 'points') {
+    if (!(int) $order['order_price'] && !empty($order['pay_detail']['points'])) {
+        $order['order_price'] = $order['pay_detail']['points'];
+    }
+
+    if ($order['status'] == 1 && !empty($order['pay_detail']['points'])) {
+        if (!(int) $order['pay_price']) {
+            $order['pay_price'] = $order['pay_detail']['points'];
+        }
+
+        if (!empty($order['income_detail']['points']) && !(int) $order['income_status']) {
+            $order['income_status'] = 1;
+        }
+    }
+}
+```
+
+如果旧订单没有 `order_data.prices`，后台会临时补一个价格结构：
+
+```php
+$meta_order_data['prices'] = array(
+    'pay_price'   => $order['order_price'],
+    'total_price' => $order['order_price'],
+    'unit_price'  => $order['order_price'],
+);
+```
+
+当 `pay_price < unit_price` 时，还会推导 `total_discount`，并把旧 `pay_detail.rebate_discount` 兼容到 `prices.rebate_discount`。这些兼容只是在后台列表整理数据时发生，不等于把旧订单永久迁移到新结构。
+
+排查旧订单时，要同时看：
+
+| 字段                                 | 说明                                            |
+| ------------------------------------ | ----------------------------------------------- |
+| 订单主表 `pay_type`                  | 旧积分订单可能是 `points`                       |
+| 订单主表 `order_price` / `pay_price` | 旧数据可能为 0，需要从 `pay_detail.points` 兜底 |
+| `pay_detail.points`                  | 积分订单的旧明细                                |
+| `income_detail.points`               | 积分收益旧明细                                  |
+| `income_status`                      | 旧积分收益可能在列表整理时临时视作已入账        |
+| `order_data.prices`                  | 新结构价格明细，旧订单可能不存在                |
+
+不要把后台列表里临时补出来的 `prices` 当成数据库已经保存。需要做永久迁移时，应写一次性升级脚本，逐单校验订单类型、支付状态、退款状态和资产记录，再通过 `zibpay::update_meta()` 写回。
+
+后台列表里看到的状态可能是实时计算后的状态。例如 `shipping_status` 原本是 `1`，但确认收货时效已过，列表整理时会把它视作 `2`。所以排查“列表显示已收货但 meta 还是待收货”时，要检查 `zib_shop_get_order_receipt_over_time()` 是否已经返回 `over`。
+
+### 售后后台动作
+
+售后后台列表和处理动作分布在两个位置。排查时先分清是“列表查询不对”，还是“处理动作没有推进状态”：
+
+| 入口                                    | 文件                                        | 排查重点                                                  |
+| --------------------------------------- | ------------------------------------------- | --------------------------------------------------------- |
+| `admin_after_sale_table_list`           | `zibpay/functions/admin/admin-ajax.php`     | 查询参数、`after_sale_status`、`order_type`、列表实时整理 |
+| `admin_after_sale_record_html`          | `zibpay/functions/admin/admin-ajax.php`     | `shop_s`、管理员权限、`after_sale_record`                 |
+| `admin_after_sale_handle_submit`        | `inc/functions/shop/admin/actions/ajax.php` | nonce、管理员权限、拒绝原因、退款渠道、退货地址           |
+| `admin_after_sale_refund_return_handle` | `inc/functions/shop/admin/actions/ajax.php` | 只支持 `refund_return` 且 `status=2`                      |
+| `after_sale_express_data`               | `inc/functions/shop/admin/actions/ajax.php` | 订单用户、商品作者或管理员权限，物流缓存                  |
+
+`admin_after_sale_handle_submit` 只是首次处理售后。它同意 `refund` 和 `insured_price` 时会直接进入结束流程；同意 `refund_return`、`replacement`、`warranty` 时只写入 `return_address` 并等待用户发货。用户发货后，主源码里只有 `refund_return` 有后台二次处理入口 `admin_after_sale_refund_return_handle`。换货和保修如果要做完整商家回寄闭环，需要额外实现写入 `author_return_data` 和用户确认收货动作。
+
+## 用户中心计数缓存
+
+用户中心订单数量由 `zib_shop_get_user_order_count()` 计算，缓存组是 `user_order_data`，key 形如：
+
+```php
+'user_order_count_' . $user_id . '_' . $status
+```
+
+不同 Tab 的查询条件不同：
+
+| Tab             | 查询条件                                                                    |
+| --------------- | --------------------------------------------------------------------------- |
+| `wait-pay`      | `status=0`，且未超过支付时效                                                |
+| `paid`          | `status=1`                                                                  |
+| `closed`        | `status=-1`                                                                 |
+| `wait-shipped`  | 商城订单、已支付、`shipping_status=0`                                       |
+| `wait-receive`  | 商城订单、已支付、`shipping_status=1`，且未超过确认收货时效                 |
+| `wait-evaluate` | 商城订单、已支付、`shipping_status=2`、`comment_status=0`，且未超过评价时效 |
+| `after-sale`    | 商城订单、`status` 为 `-2` 或 `1`，`after_sale_status` 为 `1` 或 `2`        |
+
+缓存清理挂在订单 meta 保存后：
+
+```php
+add_action('save_order_meta', 'zib_shop_user_order_count_cache_delete', 10, 2);
+```
+
+只会针对这些 meta 清理：
+
+| Meta                | 清理的用户中心计数             |
+| ------------------- | ------------------------------ |
+| `shipping_status`   | `wait-shipped`、`wait-receive` |
+| `comment_status`    | `wait-evaluate`                |
+| `after_sale_status` | `after-sale`                   |
+
+如果扩展里只改 `order_data.shipping_data.receive_time`，但没有通过主题函数更新 `shipping_status`，用户中心计数不会自然刷新。正确方式是走 `zib_shop_order_receive_confirm()`、`zib_shop_manual_shipping()`、`zib_shop_after_sale_to_end()` 等主题函数，让状态、时间、消息和缓存一起变化。
+
+## 异常订单排查
+
+排查商城订单时，先把订单拆成四层看：
+
+| 层              | 关键字段                                                                                                                                | 典型异常                                   |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| Zibpay 订单主表 | `status`、`order_type`、`pay_type`、`pay_price`、`income_status`                                                                        | 支付状态不对、积分旧数据兼容、收益状态异常 |
+| 商城发货        | `shipping_status`、`shipping_time`、`order_data.shipping_data`、`order_data.express_data`                                               | 待发货不显示、物流缓存旧、自动确认收货     |
+| 商城售后        | `after_sale_status`、`after_sale_time`、`after_sale_type`、`refund_price`、`order_data.after_sale_data`、`order_data.after_sale_record` | 售后卡住、重复退款、退货超时               |
+| 商城评价        | `comment_status`、comment meta `score_data`、product meta `score_data`                                                                  | 评价按钮不显示、自动好评、评分统计不更新   |
+
+常见现象优先这样查：
+
+| 现象                             | 优先检查                                                                                               |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| 后台 notice 有待发货，列表找不到 | `shipping_status=0`、订单 `status=1`、是否商城订单、后台筛选是否叠加了搜索或时间                       |
+| 用户中心待收货数量不对           | `shipping_status`、`shipping_time`、确认收货时效、`user_order_data` 缓存                               |
+| 待评价按钮不显示                 | 订单已支付、已收货、非售后中、`comment_status=0`、评价时效未过                                         |
+| 商品评分显示暂无评价             | 商品 `score_data` 是否存在、评论是否 approved、评价是否走 `zib_shop_order_comment_handle()`            |
+| 售后一直显示处理中               | `after_sale_status`、`after_sale_data.progress`、退货发货时效、是否调用 `zib_shop_after_sale_to_end()` |
+| 已退款但订单仍异常               | `order_data.prices.refund`、订单 meta `refund_price`、Zibpay 主订单状态、售后记录                      |
+| 物流信息不刷新                   | `order_data.express_data` 是否被旧数据缓存，修改发货信息时是否走 `zib_shop_update_order_shipping()`    |
+| 后台价格和数据库不一致           | 是否为旧订单兼容补全的 `prices`，检查 `pay_detail.points`、`pay_detail.rebate_discount`                |
+| 优惠活动选了但不生效             | `discount_error`、时间限制、用户身份限制、金额限制、商品是否真正挂上 `shop_discount`                   |
+
+### 后台手动补单
+
+后台订单列表在两类状态下提供人工处理入口：
+
+| 订单状态    | 后台动作 | 说明                     |
+| ----------- | -------- | ------------------------ |
+| `status=-1` | 手动补单 | 已关闭订单可人工确认支付 |
+| `status=0`  | 手动支付 | 待支付订单可人工确认支付 |
+
+弹窗只在 `[-1, 0]` 状态下显示表单；已支付订单和已退款订单不会进入这个人工支付表单。表单字段包括支付方式、支付金额和支付订单号：
+
+```php
+<el-form v-if="[-1,0].includes(~~payment_dialog_data.status)" class="order-edit-form">
+    <el-select v-model="payment_dialog_data.payment_method"></el-select>
+    <el-input v-model="payment_dialog_data.pay_price"></el-input>
+    <el-input v-model="payment_dialog_data.pay_num"></el-input>
+</el-form>
+```
+
+后台提交入口是 `wp_ajax_admin_payment_submit`，函数为 `zibpay_ajax_admin_payment_submit()`。它会验证后台订单页 nonce，并要求管理员权限：
+
+```php
+function zibpay_ajax_admin_payment_submit()
+{
+    zib_ajax_verify_nonce('admin_order_page_ajax_submit');
+
+    if (!current_user_can('administrator')) {
+        zib_send_json_error(__('权限不足', 'zib_language'));
+    }
+}
+```
+
+参数校验通过后，它会直接调用 `ZibPay::payment_order()`：
+
+```php
+$pay_data = array(
+    'order_num' => $order_num,
+    'pay_type'  => $payment_method,
+    'pay_price' => $pay_price,
+    'pay_num'   => $pay_num,
+);
+
+$order = ZibPay::payment_order($pay_data);
+```
+
+这一步的副作用和正常支付成功一样：主订单会写入 `pay_type`、`pay_num`、`pay_price`、`pay_time`、`status=1`，并触发 `payment_order_success`。因此补单不是“只改后台显示状态”，它会继续触发会员、资源权限、分佣、返佣、消息、商城发货等成功订单链路。
+
+补单成功后，源码还会覆盖订单 `pay_detail`：
+
+```php
+$pay_detail = array(
+    $payment_method  => $pay_price,
+    'payment_method' => $payment_method,
+);
+$wpdb->update($wpdb->zibpay_order, array('pay_detail' => $pay_detail), array('id' => $order->id));
+```
+
+排查人工补单时要注意这些边界：
+
+| 风险点              | 说明                                                                                       |
+| ------------------- | ------------------------------------------------------------------------------------------ |
+| 不会扣用户余额/积分 | 选择 `balance` 或 `points` 作为补单支付方式，只会写订单支付信息，不会调用余额/积分扣减函数 |
+| 会触发成功 Hook     | 如果订单原本因为超时关闭，补单后仍会触发 `payment_order_success`                           |
+| 会覆盖 `pay_detail` | 旧的组合支付、优惠拆分或其它支付明细可能被替换成单一支付方式                               |
+| 不适合修正退款订单  | `status=-2` 已退款订单不应通过补单改回成功状态                                             |
+| 支付单号靠人工填写  | `pay_num` 应填写真实渠道流水或清晰的人工标识，方便后续对账                                 |
+
+如果是余额或积分被扣但订单没有成功，应先按 [用户资产、积分与余额](/docs/api/user-assets-points-balance) 的资产支付异常排查确认资产记录和订单状态。不要直接用手动补单绕过资产扣减，否则会出现订单成功但资产流水缺失，或资产已经扣减又重复触发成功权益的问题。
+
+### 订单超时关闭与清理
+
+待支付订单不是靠后台列表临时隐藏。主题读取订单状态时会检查支付超时：
+
+```php
+function zibpay_get_order_pay_over_time(array &$order)
+{
+    if ($order['status'] != 0) {
+        return false;
+    }
+
+    $max_time  = zibpay_get_order_pay_max_time();
+    $last_time = strtotime('+' . $max_time * 60 . ' Second', strtotime($order['create_time']));
+    if (strtotime(current_time('Y-m-d H:i:s')) > $last_time) {
+        $order['status'] = -1;
+        zibpay::close_order($order['id'], 'timeout', __('超时自动关闭', 'zib_language'));
+        return 'over';
+    }
+
+    return $last_time;
+}
+```
+
+支付有效期来自 `_pz('order_pay_max_minutes', 30)`，最小值会被限制为 5 分钟：
+
+```php
+function zibpay_get_order_pay_max_time()
+{
+    $max_time = (int) _pz('order_pay_max_minutes', 30) ?: 30;
+    $max_time = $max_time < 5 ? 5 : $max_time;
+
+    return $max_time;
+}
+```
+
+如果订单有 `payment_id`，关闭单个订单时会先转到 `close_payment()`，把同一个支付单下所有仍待支付的子订单一起关闭：
+
+```php
+public static function close_order($order_id, $type = 'timeout', $reason = '')
+{
+    $get_order = self::get_order($order_id, 'payment_id');
+    if (!empty($get_order['payment_id'])) {
+        return self::close_payment($get_order['payment_id'], $type, $reason);
+    }
+
+    return self::close_order_single($order_id, $type, $reason);
+}
+```
+
+`close_order_single()` 只更新 `status=0` 的订单，写入 `order_data.close_type` 和 `order_data.close_reason`，然后触发 `order_closed`。商城会监听这个 Hook 恢复库存、清购买缓存等；所以二开关闭订单不要只把主表 `status` 改成 `-1`。
+
+后台“清理订单”和定时任务调用的是 `ZibPay::clear_order(14)`。它不是关闭订单，而是物理删除 14 天前已经关闭的订单：
+
+```php
+public static function clear_order($days_ago = 15)
+{
+    $ago_time = date('Y-m-d H:i:s', strtotime("-$days_ago day", strtotime(current_time('Y-m-d H:i:s'))));
+    $where    = "`status` = -1 and `create_time` < '$ago_time'";
+    $wpdb->query("DELETE FROM $wpdb->zibpay_payment WHERE $where");
+
+    $order_ids = $wpdb->get_col("SELECT id FROM $wpdb->zibpay_order WHERE $where");
+    if (!empty($order_ids)) {
+        $wpdb->query("DELETE FROM $wpdb->zibpay_order WHERE id IN ($order_ids)");
+        $wpdb->query("DELETE FROM $wpdb->zibpay_order_meta WHERE order_id IN ($order_ids)");
+    }
+}
+```
+
+自动清理任务在后台初始化时注册，每月执行一次：
+
+```php
+function zib_pay_auto_clear_order()
+{
+    ZibPay::clear_order(14);
+}
+
+add_action('zib_auto_clear_order', 'zib_pay_auto_clear_order');
+```
+
+排查订单关闭/清理问题时按这张表看：
+
+| 现象                         | 重点检查                                                                                      |
+| ---------------------------- | --------------------------------------------------------------------------------------------- |
+| 待支付订单突然变已关闭       | `create_time` 是否超过 `order_pay_max_minutes`，是否调用过 `zibpay_get_order_pay_over_time()` |
+| 一个支付单下多个订单一起关闭 | 订单是否共享同一个 `payment_id`，`close_order()` 会转到 `close_payment()`                     |
+| 库存或购买缓存没有恢复       | 是否绕过了 `zibpay::close_order()`，导致 `order_closed` 没触发                                |
+| 后台找不到旧关闭订单         | 是否被 `clear_order(14)` 或每月定时任务物理删除                                               |
+| 关闭原因缺失                 | 是否通过 `close_order_single()` 写入了 `order_data.close_type` 和 `order_data.close_reason`   |
+
+清理订单不可恢复，且会删除订单 meta。需要长期对账、风控追溯或客服查单时，不要缩短 `clear_order()` 的保留天数，也不要把 `status=-1` 之外的订单纳入清理条件。
+
+### 后台仪表盘统计口径
+
+商城后台仪表盘不是财务账本，它更接近运营看板。入口集中在 `zibpay/functions/admin/admin-ajax.php`，前端模板在 `zibpay/page/template/dashboard.php`。排查“后台数字对不上”时，先确认当前看的模块，因为每个模块的时间字段、排除条件和汇总字段并不完全一样。
+
+后台首页概览来自 `wp_ajax_admin_statistics_data`，函数是 `zibpay_ajax_admin_statistics_data()`。它只允许管理员访问，返回三类数据：
+
+| 数据块                        | 来源                                                           | 口径                                       |
+| ----------------------------- | -------------------------------------------------------------- | ------------------------------------------ |
+| `mini_chart_data.today_sales` | `zibpay_get_order_chart_data($time_start, $time_end, 'day')`   | 近 7 天订单曲线                            |
+| `mini_chart_data.month_sales` | `zibpay_get_order_chart_data($time_start, $time_end, 'month')` | 近 7 个月订单曲线                          |
+| `todo_data.shipping_count`    | `zib_shop_get_shipping_status_count('0')`                      | 待发货订单数                               |
+| `todo_data.after_sale_count`  | `zib_shop_get_after_sale_status_count(array(1, 2))`            | 待处理售后数                               |
+| `todo_data.withdraw_count`    | `zibpay_get_withdraw_pending_count()`                          | 待处理提现数                               |
+| `mini_card_data`              | 订单、会员、返佣、分成统计函数                                 | 总收款、今年收款、VIP 用户、佣金和分成概览 |
+
+概览卡片里的收款使用 `zibpay_get_order_statistics_totime('all')` 和 `zibpay_get_order_statistics_totime('thisyear')` 的 `sum`。VIP 用户数来自 `zib_get_vip_user_count(1)` 和 `zib_get_vip_user_count(2)`。佣金和分成分别来自：
+
+```php
+$mini_card_data = array(
+    'rebate_all'      => zibpay_get_rebate_statistics_totime('all'),
+    'rebate_pending'  => zibpay_get_rebate_statistics_totime('0'),
+    'income_all'      => zibpay_get_income_statistics_totime('all'),
+    'income_pending'  => zibpay_get_income_statistics_totime('0'),
+);
+```
+
+后台订单图表来自 `wp_ajax_admin_order_chart_data`，函数是 `zibpay_ajax_admin_order_chart_data()`。`cycle` 支持 `day`、`month`、`year`，默认区间分别是近 15 天、近 5 个月、近 3 年。真正的汇总函数是 `zibpay_get_order_chart_data($time_start, $time_end, $cycle, $order_type)`。
+
+订单图表默认口径要特别注意：
+
+| 条件                          | 说明                                     |
+| ----------------------------- | ---------------------------------------- |
+| `status=1`                    | 只统计已支付订单                         |
+| `pay_type not in ('points')`  | 默认排除积分支付订单                     |
+| `order_type != 8`             | 未选择订单类型时，默认不含余额充值订单   |
+| `create_time`                 | 图表按创建时间筛选和分组，不是按支付时间 |
+| `sum(pay_price)` / `count(*)` | 金额曲线汇总实付金额，数量曲线统计订单数 |
+
+前端模板的提示也明确说明：订单图表默认不含积分订单、不含余额充值订单；选择商品类型后仍不含积分订单。因此后台图表金额对不上支付渠道后台时，不要直接判断是订单丢失，要先检查是否混入了积分支付、余额充值、退款订单，或按支付时间去对比了按创建时间分组的图表。
+
+类型饼图来自 `wp_ajax_admin_type_pie_data`。当 `type=count` 时统计订单数量，否则统计 `sum(pay_price)`，并排除 `pay_type=points`。它可以按 `pay_time` 做时间筛选，类型映射大致是：
+
+| `order_type` | 展示类型 |
+| ------------ | -------- |
+| `1`          | 付费阅读 |
+| `2`          | 付费下载 |
+| `4`          | 购买会员 |
+| `5`          | 付费图片 |
+| `6`          | 付费视频 |
+| `8`          | 余额充值 |
+| `9`          | 购买积分 |
+| `10`         | 购买商品 |
+| 其他         | 其他     |
+
+热销商品来自 `wp_ajax_admin_hot_product_data`，默认只查 `status=1`、`post_id>0` 的订单，并按商品汇总 `sum(count)` 和 `sum(pay_price)`。如果没有传 `pay_mode`，同样会排除 `pay_type=points`。它支持按 `order_type`、`pay_mode` 和 `pay_time` 筛选，最多返回 50 条；商品已删除时，标题会显示 `商品已删除[ID:%s]`。
+
+资产排行来自 `wp_ajax_admin_asset_ranking_data`，不是一个统一口径的排行榜，而是四个不同来源：
+
+| 排行     | 来源                                             | 口径                                                                       |
+| -------- | ------------------------------------------------ | -------------------------------------------------------------------------- |
+| 佣金排行 | `zibpay_get_order_ranking_data('rebate', $time)` | 已支付、非积分订单，`rebate_price > 0`，按推荐人汇总，可按 `pay_time` 筛选 |
+| 分成排行 | `zibpay_get_order_ranking_data('income', $time)` | 已支付、非积分订单，`income_price > 0`，按作者汇总，可按 `pay_time` 筛选   |
+| 积分排行 | `zibpay_get_user_ranking_data('points')`         | 读取当前 user meta `points`，按当前余额倒序，不受时间筛选                  |
+| 余额排行 | `zibpay_get_user_ranking_data('balance')`        | 读取当前 user meta `balance`，按当前余额倒序，不受时间筛选                 |
+
+所以“本月资产排行”里，佣金和分成是本月支付订单产生的汇总；余额和积分却是当前用户资产快照。二开后台报表时不要把这四块混成同一种时间口径。
+
+如果要做对账后台，建议把运营看板和财务明细分开。运营看板可以复用这些统计函数；财务对账应回到订单主表、支付流水、退款/售后记录、提现和分佣状态逐单核对。尤其是售后退款、后台手动补单、余额/积分支付异常、关闭订单清理都会改变“看板数字”和“真实财务过程”的理解方式。
+
+可以写只读诊断函数辅助后台排查。示例保持主题常用写法，只读取和汇总，不直接修复：
+
+```php
+function zib_docs_shop_order_health_check($order_id)
+{
+    $order_id = (int) $order_id;
+    if (!$order_id) {
+        return new WP_Error('order_id_empty', __('订单ID不能为空', 'zib_language'));
+    }
+
+    $order = zibpay::get_order($order_id);
+    if (!$order || $order['order_type'] != zib_shop_get_order_type()) {
+        return new WP_Error('order_invalid', __('订单不存在或不是商城订单', 'zib_language'));
+    }
+
+    $order_data = zibpay::get_meta($order_id, 'order_data');
+    $result     = array(
+        'order_id'          => $order_id,
+        'status'            => $order['status'],
+        'shipping_status'   => zib_shop_get_order_shipping_status($order_id),
+        'comment_status'    => zib_shop_get_order_comment_status($order_id),
+        'after_sale_status' => zib_shop_get_order_after_sale_status($order_id),
+        'refund_price'      => zibpay::get_meta($order_id, 'refund_price'),
+        'receive_time'      => $order_data['shipping_data']['receive_time'] ?? '',
+        'after_sale_type'   => $order_data['after_sale_data']['type'] ?? '',
+    );
+
+    $result['tips'] = array();
+    if ($result['shipping_status'] == 2 && $result['comment_status'] === 0 && empty($result['receive_time'])) {
+        $result['tips'][] = __('订单已收货但缺少收货时间，评价时效可能无法计算', 'zib_language');
+    }
+    if ($result['after_sale_status'] && empty($order_data['after_sale_data'])) {
+        $result['tips'][] = __('售后状态存在但缺少售后数据', 'zib_language');
+    }
+
+    return $result;
+}
+```
+
+真正修复异常时，不要直接在数据库里批量改深层 meta。先找对应的业务函数：
+
+| 要修复的流程 | 优先入口                                                                                               |
+| ------------ | ------------------------------------------------------------------------------------------------------ |
+| 发货或改物流 | `zib_shop_manual_shipping()`、`zib_shop_update_order_shipping()`                                       |
+| 确认收货     | `zib_shop_order_receive_confirm()`                                                                     |
+| 评价状态     | `zib_shop_init_order_comment_status()`、`zib_shop_update_order_comment_status()`，必要时重新走评价处理 |
+| 售后结束     | `zib_shop_after_sale_to_end()`                                                                         |
+| 退款         | 售后处理链路或 Zibpay 退款链路                                                                         |
+| 用户中心计数 | 修正真实订单 meta 后让 `save_order_meta` 清缓存                                                        |
+
+## 扩展边界
+
+- 不要把商品后台列表里的 `score` 当成唯一评分来源，完整评分在 `score_data`。
+- 不要把 `shop_discount` 批量编辑扩展成任意商品配置保存器；复杂字段要走 Codestar 商品 Meta。
+- 不要直接读取 `shop_discount_config` 原始数组下单计算；应使用 `zib_shop_get_discount_data()`、`zib_shop_get_product_discount()` 和限制校验函数。
+- 不要把后台订单列表的旧数据兼容结果当成真实写库结果。
+- 不要只改 `order_data` 深层字段，状态 meta、时间 meta、用户中心缓存、后台列表和消息通知都可能不同步。
+- 不要把后台订单列表返回的收件人、手机号、物流原始数据暴露给普通前台页面。
+- 不要把后台评论列表的评价图片样式照搬到前台；前台评价模板有自己的懒加载和灯箱规则。
+- 不要为了清待办 notice 直接清零 `shipping_status` 或 `after_sale_status`。待办应该随着真实发货、售后处理自然消失。

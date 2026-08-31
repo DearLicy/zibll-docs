@@ -1,0 +1,49 @@
+---
+title: 参与共建
+description: 通过 MDX、源码核对和 Pull Request 持续完善子比主题开发文档。
+---
+
+## 文档编辑原则
+
+每一篇文档都应该回答一个明确的开发问题，并尽量给出可验证的文件路径、函数名、Hook、Ajax action、字段名或复现步骤。不要把未经核对的推测写成主题行为，也不要把某个版本的实现描述成所有版本都一致。
+
+推荐的页面结构：
+
+1. 先说明适用场景和前置条件。
+2. 给出真实源码中的入口和调用链。
+3. 提供最小可运行的 PHP、JavaScript 或配置示例。
+4. 写清权限、转义、nonce、缓存、版本差异和停用边界。
+5. 最后列出常见误区和排错顺序。
+
+## 修改流程
+
+```bash
+git clone https://github.com/DearLicy/zibll-docs.git
+cd zibll-docs
+npm ci
+```
+
+编辑 `content/docs` 下对应分类的 MDX 和 `meta.json`。新增页面时必须同步加入所属分类的 `meta.json`，否则页面不会出现在侧栏。文档内部链接使用 `/docs/...`，不要写 `localhost`、临时端口或构建机路径，也不要重新引入已经移除的在线部署入口。
+
+提交前执行：
+
+```bash
+npm run prebuild
+npx tsc --noEmit
+npm run mcp:check
+npm run build
+```
+
+如果修改了布局、导航或交互，再运行 `npm run test:navigation`，并检查桌面端和移动端。`public/docs`、`public/en`、`public/ja`、`public/llms*.txt`、`public/mcp` 和 `out` 等是构建产物，不要手工编辑或在 Pull Request 中提交临时产物。
+
+## Pull Request 检查清单
+
+- 页面属于正确的顶部分类和侧栏，不会把入口显示到无关分类。
+- 内部链接在中文、英文、日文路由下都能解析。
+- 示例已经脱敏，不包含密钥、Cookie、域名后台凭据或个人数据。
+- 主题升级后仍有清晰的兼容边界，必要时注明版本。
+- Pages 页面仍然可以静态导出，不新增登录、数据库、Redis 或常驻 Node 进程依赖。
+- 需要动态写入时，放入独立 Worker 或 GitHub Actions，并明确密钥、来源校验和失败行为。
+- 需要 AI 工具能力时，优先放入本地只读 MCP 或 Codex 插件，并说明启动方式。
+
+维护者会在合并前重新生成 Fumadocs source、全文索引、搜索数据、sitemap 和 MCP 资源清单。生成文件与源码不一致时，以源码和构建结果为准。

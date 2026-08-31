@@ -1,0 +1,629 @@
+---
+title: 商城购物车与确认下单
+description: 梳理子比主题商城购物车数据结构、Vue 数据组装、确认下单弹窗、提交订单校验、Zibpay payment/order 创建和购物车清理链路。
+---
+
+商城购物车不是一个独立页面功能，它连接了商品规格、库存、优惠、收货地址、自动发货邮箱、用户必填项、支付方式和 Zibpay 订单创建。扩展这条链路时，前端只能提交用户选择；金额、积分、运费、优惠、库存、限购、订单归属必须由服务端重新计算。
+
+相关源码：
+
+| 文件                                   | 作用                                                                                 |
+| -------------------------------------- | ------------------------------------------------------------------------------------ |
+| `inc/functions/shop/inc/cart.php`      | 购物车 user meta 读写、导航购物车按钮、加入/移除/清空                                |
+| `inc/functions/shop/inc/user.php`      | 买家收货地址和商家退货地址读写                                                       |
+| `inc/functions/shop/inc/vue.php`       | 商品详情、购物车、用户、规格弹窗的 Vue 数据                                          |
+| `inc/functions/shop/inc/order.php`     | `zib_shop_get_confirm_data()` 订单确认数据与服务端价格计算                           |
+| `inc/functions/shop/inc/template.php`  | 购物车模板、确认下单弹窗模板、商城资源加载                                           |
+| `inc/functions/shop/action/action.php` | `cart_add`、`update_cart`、`shop_confirm_modal`、`shop_submit_order`、地址保存和删除 |
+| `inc/functions/shop/assets/js/main.js` | 购物车选择、同步、确认弹窗、地址管理、优惠弹窗、提交订单、发起支付                   |
+
+## 本地链路校准
+
+当前本地源码里，商城购物车到支付的真实顺序是：
+
+1. 商品详情页调用 `cart_add` 加入购物车，或直接构造 `products` 打开确认弹窗。
+2. 购物车页数量、删除、选择变化后，前端把最新结构提交到 `update_cart`。
+3. 结算按钮调用 `shop_confirm_modal`，服务端用 `zib_shop_get_confirm_data()` 重算确认数据，并按主题版本缓存确认弹窗 HTML。
+4. 确认弹窗点击提交后调用 `shop_submit_order`，服务端再次重算确认数据、校验价格/积分/地址/邮箱/必填项，再创建 `zibpay_payment` 和一组 Zibpay 业务订单。
+5. `shop_submit_order` 返回 `payment_data`，前端再通过确认弹窗里的 `shop_zibpay_form` 点击 `.initiate-pay`，进入 Zibpay 的 `initiate_pay`。
+6. 现金扫码支付后，Zibpay 前端轮询 `check_pay`；查到成功时走 `ZibPay::payment_order()` 更新订单状态，并触发 `payment_order_success`。
+
+这一点和 Zibpay 通用下单入口不同：通用 `submit_order` 会在创建 payment/order 后直接调用 `zibpay_ajax_initiate_pay($payment_id)`；商城新版 `shop_submit_order` 是先把 `payment_data` 返回给 Vue 弹窗，再由前端发起支付。
+
+## 购物车数据结构
+
+购物车保存到当前用户的 `shop_cart` user meta：
+
+```php
+$items[$product_id][$options_string] = $count;
+```
+
+其中：
+
+| 字段              | 说明                                     |
+| ----------------- | ---------------------------------------- |
+| `$product_id`     | `shop_product` 商品 ID                   |
+| `$options_string` | 商品规格组合字符串，没有规格时通常为 `0` |
+| `$count`          | 当前规格组合数量                         |
+
+读取时使用：
+
+```php
+$items = zib_shop_get_cart_items($user_id);
+```
+
+`zib_shop_get_cart_items()` 内部会按用户 ID 做静态缓存，并在用户未登录时返回空数组。购物车数量由 `zib_shop_get_cart_count()` 统计，它统计的是规格组合数量，不是所有商品件数的总和。
+
+## 导航购物车按钮
+
+顶部导航购物车按钮挂在：
+
+```php
+add_filter('zib_nav_radius_button', 'zib_shop_add_nav_cart_button', 10, 2);
+```
+
+未登录用户不显示购物车按钮。已登录用户会读取购物车数量，输出 `nav-cart` 图标和 `cart-count` badge。
+
+如果要调整购物车按钮样式，优先通过 CSS 或过滤 `zib_nav_radius_button` 后追加自己的按钮，不要改 `cart.php`。
+
+## 加入购物车
+
+Ajax action 是 `cart_add`：
+
+```php
+add_action('wp_ajax_cart_add', 'zib_shop_ajax_cart_add');
+add_action('wp_ajax_nopriv_cart_add', 'zib_shop_ajax_cart_add');
+```
+
+服务端流程：
+
+1. 获取当前用户，未登录返回 `no_logged`。
+2. 读取 `product_id`、`count`、`options_active`。
+3. 校验商品存在且类型为 `shop_product`。
+4. 调用 `zib_shop_can_add_cart()` 校验商品状态和规格是否存在。
+5. 调用 `zib_shop_cart_add()` 写入 `shop_cart`。
+6. 返回 `cart_items` 和最新购物车数量。
+
+`zib_shop_can_add_cart()` 只做基础校验：
+
+```php
+function zib_shop_can_add_cart($product, $options_key = '0')
+{
+    if (!is_object($product)) {
+        $product = get_post($product);
+    }
+
+    if (!$product || $product->post_type !== 'shop_product') {
+        return false;
+    }
+
+    if ($product->post_status !== 'publish') {
+        return false;
+    }
+
+    if (!zib_shop_product_options_is_exists($product, $options_key)) {
+        return false;
+    }
+
+    return true;
+}
+```
+
+库存、限购、优惠和最终金额不在加入购物车时最终裁决，而是在确认下单和提交订单时重新计算。
+
+## 更新和移除购物车
+
+前端购物车在数量变化、移除商品后，会把当前购物车结构提交到 `update_cart`：
+
+```php
+add_action('wp_ajax_update_cart', 'zib_shop_ajax_update_cart');
+add_action('wp_ajax_nopriv_update_cart', 'zib_shop_ajax_update_cart');
+```
+
+源码会直接接收 `cart_data` 并调用：
+
+```php
+$items = zib_shop_cart_update($cart_data, $user_id);
+```
+
+扩展这里时要注意：如果你允许新的前端入口修改购物车，应在服务端重新校验商品 ID、商品状态、规格组合和数量边界，不要把未经校验的 `cart_data` 直接写入用户 meta。
+
+单个规格组合移除用：
+
+```php
+zib_shop_cart_remove($product_id, $options_key, $user_id);
+```
+
+提交订单成功后批量移除已下单商品用：
+
+```php
+zib_shop_cart_remove_multi($order_data, $user_id);
+```
+
+批量移除依赖每个订单返回项里的：
+
+```php
+array(
+    'product_id' => $product_id,
+    'opt_key'    => $options_string,
+)
+```
+
+## 购物车 Vue 数据
+
+购物车页面的数据来自 `zib_shop_get_cart_vue_data($user_id)`。它会读取 `shop_cart`，查询对应 `shop_product`，并组装成按商家分组的数据结构：
+
+```php
+$cart_data[$post_author][$product_id][$item_key] = array(
+    'selected_count'       => $item_count,
+    'product_id'           => $product_id,
+    'options_active_str'   => $item_key,
+    'options_active_name'  => __('请选择商品选项', 'zib_language'),
+    'options_active'       => zib_shop_product_options_to_array($item_key),
+    'stock_all'            => -1,
+    'checked'              => false,
+    'options_active_error' => false,
+    'prices'               => array(
+        'start_price'          => 0,
+        'unit_price'           => 0,
+        'unit_discount_price'  => 0,
+        'total_price'          => 0,
+        'total_discount_price' => 0,
+        'total_discount'       => 0,
+    ),
+);
+```
+
+返回数据主要包括：
+
+| Key                   | 说明                                               |
+| --------------------- | -------------------------------------------------- |
+| `cart_modal_data`     | 规格选择弹窗默认数据                               |
+| `product_data`        | 商品详情、规格、库存、优惠、发货方式、邮箱填写要求 |
+| `author_data`         | 商家头像、名称、链接和选中状态                     |
+| `cart_data`           | 按商家、商品、规格组合分组的购物车数据             |
+| `user_data`           | 用户邮箱、收货地址、积分、收藏 Ajax 地址           |
+| `cart_original_items` | 原始 `shop_cart` 数据                              |
+| `total_data`          | 前端选择后的合计数据                               |
+| `config`              | 是否编辑、商家显示、按钮文案、占位骨架             |
+
+为了减少查询字段，源码在购物车查询前临时挂了 `posts_fields`，只取 `ID`、`post_author`、`post_title`、`post_type`。扩展购物车列表时，如果需要额外字段，应优先通过已有商品函数读取，不要直接在列表查询里拉全量字段。
+
+## 购物车模板
+
+购物车模板由 `zib_shop_v_cart_template()` 输出，核心交互包括：
+
+| 交互             | 前端方法                                           |
+| ---------------- | -------------------------------------------------- |
+| 全选             | `checkAll`                                         |
+| 按商家选择       | `checkAuthor`                                      |
+| 选择单个规格组合 | `checkItem`                                        |
+| 修改规格         | `cartModal(opt_data)`                              |
+| 修改数量         | `v-spinner` + `listCountChange(opt_data)`          |
+| 删除单项         | `removeItem(author_id, product_id, opt_key, true)` |
+| 删除选中         | `removeChecked`                                    |
+| 结算             | `goConfirm`                                        |
+
+`goConfirm` 会收集已选商品，构造：
+
+```js
+{
+  products: cart_data,
+  is_cart: true
+}
+```
+
+然后调用确认下单弹窗。
+
+## 确认下单数据
+
+确认下单 Ajax action 是 `shop_confirm_modal`：
+
+```php
+add_action('wp_ajax_shop_confirm_modal', 'zib_shop_ajax_shop_confirm_modal');
+add_action('wp_ajax_nopriv_shop_confirm_modal', 'zib_shop_ajax_shop_confirm_modal');
+```
+
+服务端会调用：
+
+```php
+$confirm_data = zib_shop_get_confirm_data($products);
+```
+
+`zib_shop_get_confirm_data()` 接收的商品数据格式和购物车一致，也支持在每个规格组合里带备注、用户必填项：
+
+```php
+$products[$product_id][$options_string] = array(
+    'count'         => 1,
+    'remark'        => '备注',
+    'user_required' => array(),
+);
+```
+
+它会在服务端重新计算：
+
+| 计算项     | 说明                               |
+| ---------- | ---------------------------------- |
+| 商品规格   | 规格组合是否存在、规格名称、规格图 |
+| 单价和总价 | 基础价加规格浮动价                 |
+| 库存       | 规格库存或商品总库存               |
+| 限购       | 用户已购数量、限购数量             |
+| 优惠       | 商品、商家、全局维度的优惠命中     |
+| 赠品       | 命中赠品优惠后写入 `gift_data`     |
+| 运费       | 包邮、固定运费、满额包邮           |
+| 发货类型   | 自动发货、手动发货、快递发货       |
+| 邮箱填写   | 自动发货商品的邮箱填写要求         |
+| 支付类型   | 现金商品、积分商品、是否混合支付   |
+
+返回结构包含：
+
+| Key                        | 说明                                   |
+| -------------------------- | -------------------------------------- |
+| `error_data`               | 库存、限购、规格错误                   |
+| `product_data`             | 商品数据                               |
+| `author_data`              | 商家数据                               |
+| `item_data`                | 确认订单里的商品明细                   |
+| `user_data`                | 用户地址、邮箱、积分等                 |
+| `discount_data`            | 优惠数据                               |
+| `total_data`               | 总价、优惠价、运费、应付金额、应付积分 |
+| `shipping_has_express`     | 是否包含快递商品                       |
+| `shipping_has_auto`        | 是否包含自动发货商品                   |
+| `shipping_has_manual`      | 是否包含手动发货商品                   |
+| `email_fill`               | 邮箱填写要求                           |
+| `has_points` / `has_price` | 是否包含积分/现金商品                  |
+| `is_mix`                   | 是否混合支付                           |
+| `pay_data`                 | 可用支付方式、余额、积分               |
+
+如果同时包含积分商品和现金商品，`is_mix` 为 `true`，确认弹窗和提交订单都会阻止继续支付。
+
+## 确认下单模板
+
+确认下单模板由 `zib_shop_v_confirm_modal_template()` 输出，主要块包括：
+
+| 区块       | 条件                                           |
+| ---------- | ---------------------------------------------- |
+| 收货地址   | `shipping_has_express`                         |
+| 收货邮箱   | `shipping_has_auto && email_fill !== 'off'`    |
+| 商品明细   | `item_data`                                    |
+| 发货说明   | 每个商品的 `shipping_type` 和 `shipping_title` |
+| 赠品       | `gift_data`                                    |
+| 备注       | 每个规格组合的 `remark`                        |
+| 用户必填项 | `user_required`                                |
+| 价格信息   | `total_data`                                   |
+| 支付方式   | `pay_data.pay_methods`                         |
+| 提交按钮   | `submitOrInitiatePay`                          |
+
+前端 `submitOrder` 会再做一层用户体验校验，例如邮箱、地址、用户必填项。但这些只是提示层，真正有效的校验仍在 `shop_submit_order`。
+
+## 收货地址管理
+
+确认下单弹窗里的地址并不是一次性表单。前端通过 `VShopAddress(manual_address)` 维护一套可复用的地址管理对象，订单确认弹窗和订单修改地址弹窗都会复用它。
+
+地址保存到用户 meta：
+
+| 场景         | Meta key           | 入口                                          |
+| ------------ | ------------------ | --------------------------------------------- |
+| 买家收货地址 | `shop_addresses`   | `zib_shop_get_user_addresses($user_id)`       |
+| 商家退货地址 | `author_addresses` | `zib_shop_get_user_addresses($user_id, true)` |
+
+后端读写函数共用同一套参数，只靠 `$is_author` 区分买家地址和商家地址：
+
+```php
+zib_shop_get_user_addresses($user_id, $is_author);
+zib_shop_get_user_default_address($user_id, $is_author);
+zib_shop_save_user_address($address, $user_id, $is_author);
+zib_shop_delete_user_address($address_id, $user_id, $is_author);
+```
+
+地址结构是一个数组项：
+
+| 字段                           | 说明                                               |
+| ------------------------------ | -------------------------------------------------- |
+| `id`                           | 地址 ID，新增时由 `time() . rand(1000, 9999)` 生成 |
+| `name`                         | 收货人或退货联系人                                 |
+| `phone`                        | 联系电话                                           |
+| `province` / `city` / `county` | 省市区                                             |
+| `address`                      | 详细地址                                           |
+| `tag`                          | 地址标签，如家、公司、学校或自定义                 |
+| `is_default`                   | 是否默认地址                                       |
+
+保存地址时，主题会做这些处理：
+
+1. 必须有姓名、电话、省、市和详细地址。
+2. 新地址没有 `id` 时自动生成。
+3. 设为默认地址时，取消其他地址的默认状态。
+4. 新增地址插到列表最前面。
+5. 只有一个地址时自动设为默认。
+6. 默认地址会被排序到最前面。
+
+Ajax action 分两组：
+
+| Action                       | 函数                                  | 说明                       |
+| ---------------------------- | ------------------------------------- | -------------------------- |
+| `shop_get_user_addresses`    | `zib_shop_ajax_get_user_addresses()`  | 获取当前登录用户的买家地址 |
+| `shop_save_user_address`     | `zib_shop_ajax_save_user_address()`   | 保存买家地址               |
+| `shop_delete_user_address`   | `zib_shop_ajax_delete_user_address()` | 删除买家地址               |
+| `shop_save_author_address`   | `zib_shop_ajax_save_user_address()`   | 保存商家退货地址           |
+| `shop_delete_author_address` | `zib_shop_ajax_delete_user_address()` | 删除商家退货地址           |
+
+`shop_save_author_address` 和 `shop_delete_author_address` 会让 `$is_author=true`，从而写入 `author_addresses`。如果请求里传了 `user_id`，只有本人或管理员可以操作：
+
+```php
+if ($user_id != $current_user_id && !current_user_can('administrator')) {
+    zib_send_json_error(__('无权限操作', 'zib_language'));
+}
+```
+
+前端 `VShopAddress` 会创建两个模态框：
+
+| 模态框                      | 用途                                 |
+| --------------------------- | ------------------------------------ |
+| `user-manage-address-modal` | 地址列表、选择、设为默认、编辑、删除 |
+| `user-address-edit-modal`   | 新增或编辑地址                       |
+
+它还提供两个回调用于和业务弹窗同步：
+
+```js
+address_data.setSelectAddressCallback(function (address) {
+  // 用户选择地址后同步到业务数据
+});
+
+address_data.setUpdateAddressesCallback(function (addresses) {
+  // 地址列表保存或删除后同步默认地址
+});
+```
+
+确认下单弹窗里，`showAddressModal()` 会打开地址列表；没有地址时 `showAddAddressModal()` 会直接打开新增地址弹窗。订单修改收货地址弹窗也使用 `VShopAddress`，但它把选择结果写到 `new_address`，再由 `order_modify_address` 申请流程提交给商家或管理员处理。
+
+扩展地址功能时，不要把买家 `shop_addresses` 和商家 `author_addresses` 混用。退货地址用于售后处理，收货地址用于下单和订单地址修改，两者的可见范围和业务语义不同。
+
+## 优惠徽章与明细弹窗
+
+确认下单和购物车会在商品行、总价行里展示优惠。前端使用 `v-discount-badge` 指令输出徽章：
+
+```html
+<div
+  v-discount-badge="product_data[product_id].discount"
+  data-hit-discount="opt_data.discount_hit"
+  class="product-discount-box scroll-x mini-scrollbar"
+  @click="discountModal(discount_data,opt_data.discount_hit)"
+></div>
+```
+
+`v-discount-badge` 只负责展示徽章，不负责计算优惠。优惠是否可用、是否命中、减多少钱，已经由服务端确认数据写进 `discount_data`、`discount_hit`、`total_data` 和每个 `opt_data.prices`。
+
+| 数据                                            | 说明                                     |
+| ----------------------------------------------- | ---------------------------------------- |
+| `discount_data`                                 | 所有可展示的优惠活动数据，以优惠 ID 组织 |
+| `opt_data.discount_hit`                         | 当前商品规格命中的优惠 ID 列表           |
+| `total_data.discount_hit`                       | 整单命中的优惠                           |
+| `opt_data.gift_data`                            | 当前规格命中的赠品数据                   |
+| `prices.total_discount`                         | 商品行优惠金额                           |
+| `total_data.discount_price` / `discount_points` | 总优惠后金额或积分                       |
+
+点击优惠徽章会进入 `discountModal(discount_data, hit_data, valid_show)`。它会：
+
+1. 如果有 `hit_data`，只展示命中的优惠；否则展示传入的优惠列表。
+2. 默认跳过 `is_valid=false` 的优惠。
+3. 区分 `reduction`、`discount` 和 `gift`。
+4. 展示金额门槛、作用范围、用户身份限制和时间限制。
+5. 赠品优惠会把 `gift_config` 拆成独立赠品卡片。
+6. 优惠卡片链接到 `item.link`，通常是优惠活动归档页。
+
+优惠作用范围在弹窗里会被翻译成用户能理解的门槛：
+
+| `discount_scope` | 弹窗含义         |
+| ---------------- | ---------------- |
+| `item`           | 单规格满减或满折 |
+| `product`        | 同商品维度       |
+| `author`         | 同商家维度       |
+| `order`          | 跨商品整单维度   |
+
+总价区域点击“优惠”会走 `showDiscountHitModal()`，它会把当前确认订单或购物车中参与计算的规格项收集起来，再交给 `discountHitModal()` 展示命中明细。单个商品行可以走 `showItemDiscountHitModal(opt_data)`，只看当前规格组合的优惠。
+
+扩展优惠展示时，不要在前端重新计算折扣。前端只展示服务端计算结果；真正的优惠命中、门槛、赠品和最终金额仍要回到 `zib_shop_get_confirm_data()` 与商品优惠策略函数。赠品的最终兑现不在确认弹窗里完成，会员、认证、经验值和积分会在确认收货时发放；`product` 和 `other` 赠品目前只展示或需要人工处理，详见 [商城发货、售后与优惠](/docs/api/shop-shipping-after-sale) 的“买赠兑现”。
+
+## 提交订单校验
+
+提交订单 Ajax action 是 `shop_submit_order`：
+
+```php
+add_action('wp_ajax_shop_submit_order', 'zib_shop_ajax_submit_order');
+add_action('wp_ajax_nopriv_shop_submit_order', 'zib_shop_ajax_submit_order');
+```
+
+服务端会再次调用 `zib_shop_get_confirm_data($products)`，而不是信任确认弹窗里的旧结果。
+
+提交前校验顺序：
+
+1. `products` 不能为空。
+2. 商品必须存在且能组成确认数据。
+3. 游客购买时，所有商品都必须允许游客购买。
+4. 不允许积分商品和现金商品混合支付。
+5. 快递商品必须有收货人、电话和地址。
+6. 自动发货商品按 `email_fill` 校验邮箱是否必填和格式。
+7. 规格、库存、限购错误会从 `error_data` 返回。
+8. 前端提交金额或积分必须和服务端重算结果一致。
+9. 现金商品金额大于 0 时必须选择合法支付方式。
+10. 每个商品规格的用户必填项都必须填写。
+
+金额校验是关键边界：
+
+```php
+$payment_price = $is_points
+    ? (int) $confirm_data['total_data']['pay_points']
+    : zib_floatval_round($confirm_data['total_data']['pay_price']);
+
+$_post_price = $is_points ? $_POST['points'] ?? 0 : $_POST['price'] ?? 0;
+
+if (round((float) $_post_price, 2) !== round((float) $payment_price, 2)) {
+    zib_send_json_error(array(
+        'code' => 'price_error',
+        'msg'  => __('订单金额发生变化，请重新提交', 'zib_language'),
+    ));
+}
+```
+
+扩展下单流程时，不要移除这类服务端重算和对比。
+
+## 创建支付和订单
+
+通过校验后，先创建 payment：
+
+```php
+$zibpay_payment = zibpay::add_payment(array(
+    'method' => $payment_method,
+    'price'  => $payment_price,
+));
+```
+
+然后按商家、商品、规格组合循环创建 Zibpay order：
+
+```php
+$__order_data = array(
+    'count'        => $__mate_order_data['count'] ?? 1,
+    'post_id'      => $item_data_item['product_id'],
+    'post_author'  => $author_id,
+    'user_id'      => $user_id,
+    'product_id'   => $item_data_item['options_active_str'],
+    'order_type'   => $order_type,
+    'order_price'  => $__order_price,
+    'pay_price'    => $__pay_price,
+    'payment_id'   => $zibpay_payment_id,
+    'referrer_id'  => $referrer_id,
+    'rebate_price' => $rebate_price,
+    'pay_detail'   => $__pay_detail,
+    'meta'         => $__meta,
+);
+
+$add_order_data = zibpay::add_order($__order_data);
+```
+
+订单 meta 中会保存：
+
+| Meta         | 内容                                               |
+| ------------ | -------------------------------------------------- |
+| `order_data` | 商品规格、数量、价格、发货信息、备注、用户必填项等 |
+| `pay_modo`   | `points` 或 `price`                                |
+| `consignee`  | 自动发货邮箱或快递收货地址                         |
+| `pay_detail` | 支付方式、优惠、积分等明细                         |
+
+如果是现金商品，会调用推广返佣计算；积分商品不计算佣金。商城返佣还要同时满足商品返佣配置开启、推荐人可识别、比例或固定金额大于 0，最终才会把 `referrer_id` 和 `rebate_price` 写入订单。
+
+## 成功返回和发起支付
+
+创建订单成功后返回：
+
+```php
+zib_send_json_success(array(
+    'order_data'   => $order_data,
+    'payment_data' => $zibpay_payment,
+));
+```
+
+前端拿到 `payment_data` 后进入 `initiatePay()`，通过确认弹窗里的 `shop_zibpay_form` 发起支付。
+
+如果 `payment_data.order_num` 已存在，再点击按钮时会走 `initiatePay()`，不会重复提交订单。
+
+前端的关键触发点在 `inc/functions/shop/assets/js/main.js`：
+
+```js
+order_data.action = 'shop_submit_order';
+```
+
+提交成功后：
+
+```js
+_this.order_data = n.order_data;
+_this.payment_data = n.payment_data;
+_this.initiatePay();
+```
+
+`initiatePay()` 会绑定 `.initiate-pay` 的成功事件并触发主题 Zibpay 支付脚本。支付脚本最终提交：
+
+```js
+pay_inputs.action = 'initiate_pay';
+```
+
+## 从购物车移除已下单商品
+
+如果本次订单来自购物车：
+
+```php
+if ($confirm_data['config']['is_cart']) {
+    zib_shop_cart_remove_multi($order_data, $user_id);
+}
+```
+
+这一步发生在订单创建成功之后。不要在确认弹窗打开或前端点击提交时提前移除购物车，否则支付数据创建失败、订单创建失败、用户关闭弹窗时会丢失购物车。
+
+## 扩展示例：下单成功后写业务记录
+
+商城订单最终进入 Zibpay 订单体系。需要在支付成功后发放权益或记录业务数据时，优先挂到订单状态 Hook，而不是改 `shop_submit_order`：
+
+```php
+add_action('payment_order_success', 'zib_docs_shop_payment_success_log', 20, 1);
+
+function zib_docs_shop_payment_success_log($order)
+{
+    if (empty($order->id) || (int) $order->order_type !== zib_shop_get_order_type()) {
+        return;
+    }
+
+    $user_id = !empty($order->user_id) ? (int) $order->user_id : 0;
+    if (!$user_id) {
+        return;
+    }
+
+    update_user_meta($user_id, '_docs_last_shop_order_id', $order->id);
+}
+```
+
+本地 `order-class.php` 里 `payment_order_success` 只传一个 `$order` 对象，不是 payment 和 orders 数组。联合付款单会在 `payment_payment()` 中逐个业务订单调用 `payment_order()`，因此商城多商品合并支付时，这个 Hook 会按每个业务订单分别触发。
+
+如果只是订单创建后记录原始扩展 meta，可以挂 `order_created`；如果要等支付完成后发放权益，应挂 `payment_order_success`。
+
+## 扩展示例：限制加入购物车
+
+`zib_shop_can_add_cart()` 本身没有 filter。需要限制某类商品加入购物车时，可以拦截 Ajax 前置请求：
+
+```php
+add_action('wp_ajax_cart_add', 'zib_docs_shop_cart_add_limit', 1);
+add_action('wp_ajax_nopriv_cart_add', 'zib_docs_shop_cart_add_limit', 1);
+
+function zib_docs_shop_cart_add_limit()
+{
+    $product_id = !empty($_POST['product_id']) ? (int) $_POST['product_id'] : 0;
+    if (!$product_id || get_post_type($product_id) !== 'shop_product') {
+        return;
+    }
+
+    if (get_post_meta($product_id, '_docs_disable_cart', true)) {
+        zib_send_json_error(array(
+            'msg'  => __('该商品暂不支持加入购物车', 'zib_language'),
+            'code' => 'cart_disabled',
+        ));
+    }
+}
+```
+
+这种写法只拦截加入购物车。真正下单仍然要在确认数据或提交订单阶段做服务端校验，避免用户绕过购物车直接提交 `shop_confirm_modal`。
+
+## 风险清单
+
+| 风险                       | 正确做法                                                          |
+| -------------------------- | ----------------------------------------------------------------- |
+| 信任前端价格               | 使用 `zib_shop_get_confirm_data()` 服务端重算                     |
+| 信任前端库存               | 提交订单前重新检查规格库存和总库存                                |
+| 混合积分和现金商品         | 用 `is_mix` 阻止同单支付                                          |
+| 未登录用户绕过限制         | 检查每个商品的 `guest_buy`                                        |
+| 快递地址只前端校验         | `shop_submit_order` 里检查 `address_data`                         |
+| 买家地址和商家退货地址混用 | 买家写 `shop_addresses`，商家退货地址写 `author_addresses`        |
+| 自动发货邮箱只前端校验     | 服务端检查必填和邮箱格式                                          |
+| 必填项只弹窗校验           | 创建订单前遍历 `user_required`                                    |
+| 前端重算优惠               | 只展示 `discount_data`、`discount_hit`、`total_data` 的服务端结果 |
+| 提前移除购物车             | 订单创建成功后再 `zib_shop_cart_remove_multi()`                   |
+| 直接写订单 meta 改状态     | 使用 Zibpay 创建、关闭、支付成功、退款 Hook                       |
+| 缓存购物车或确认页         | 用户态、支付态页面不要全页静态缓存                                |
+
+商城下单链路的核心原则是：前端负责选择和交互，服务端负责裁决和落库。扩展时只要保住这个边界，购物车、订单、支付和售后就不会互相打架。

@@ -1,0 +1,53 @@
+---
+title: MCP 服务器
+description: 在 Codex、Claude Code、Cursor 和 VS Code 中通过本地 stdio 接入本站文档。
+icon: ServerCog
+---
+
+MCP（Model Context Protocol）让 AI 客户端按需读取外部资料和工具。本站采用本地 `stdio` 方案：网站是纯静态 Fumadocs 文档站，MCP 服务器作为独立 npm 包运行，不需要网站端口、数据库、Redis、登录或环境变量。
+
+## 什么时候使用 MCP
+
+- 你希望 AI 按本站文档回答，而不是凭通用知识猜测。
+- 你正在写子主题、插件、Codestar 配置或主题接口。
+- 你想搜索 Zibpay、Ajax、Hook、Meta、商城、论坛或主题扩展资料。
+- 你希望在本地编辑器里持续使用文档上下文，同时让网站承受大量静态访问。
+
+## 快速接入
+
+<MCPInstallTabs />
+
+## 服务器能力
+
+独立 MCP 包提供八个只读工具：
+
+- `list_docs`：列出全部公开文档。
+- `read_doc`：按 slug 读取单篇文档，例如 `codestar-framework`、`api/functions`、`community/github-community`。
+- `search_docs`：搜索标题、描述和 Markdown 正文。
+- `read_docs_bundle`：按关键词读取少量相关页面。
+- `doc_outline`：查看页面标题大纲。
+- `find_code_examples`：查找文档中的代码块、命令和配置示例。
+- `list_source_files`：列出用户通过 `--source-dir` 主动挂载的本地源码文件。
+- `read_source_file`：读取挂载目录内的单个源码文件，并阻止目录穿越、敏感文件和超大文件。
+
+同时提供 `zibll-docs://docs/{slug}` 只读资源 URI。文档首页使用 `zibll-docs://docs/index`。
+
+## 文档和源码的边界
+
+MCP 默认只读取随包发布的本站文档。需要参考你自己的子比主题、子主题或插件时，可以把目录交给 Codex 作为工作区，或显式挂载给 MCP：
+
+```bash
+npx -y zibll-docs-mcp --source-dir /path/to/主题插件子主题
+```
+
+只有显式挂载后，`list_source_files` 和 `read_source_file` 才可用。插件和 MCP 不会编辑、上传或持久化这些文件，也不能读取挂载目录之外的路径。
+
+## 更新方式
+
+文档更新后发布新的 `zibll-docs-mcp` 版本，或在仓库源码目录重新运行本地包。MCP 进程由客户端按需拉起，未使用时不会在网站服务器上常驻。
+
+## 相关入口
+
+- [Codex 插件](/docs/ai/codex-plugin)：安装 Skill 与 MCP 配置。
+- [Skill 文档](/docs/skills)：了解任务规则和推荐阅读顺序。
+- [LLM 文本](/docs/llms)：给不支持 MCP 的工具使用纯文本索引和单页 Markdown。

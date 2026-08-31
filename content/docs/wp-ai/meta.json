@@ -1,0 +1,26 @@
+{
+  "title": "WP AI",
+  "description": "WordPress AI Client、Abilities API、Provider 与自动化能力开发",
+  "icon": "Bot",
+  "root": true,
+  "pages": [
+    "index",
+    "---先读这个---",
+    "quick-start",
+    "theme-source-only",
+    "concepts",
+    "---Abilities API---",
+    "abilities-api",
+    "rest-and-permissions",
+    "---AI Client---",
+    "ai-client",
+    "ability-calling",
+    "---Provider 与插件---",
+    "providers-connectors",
+    "ai-plugin",
+    "---实战与安全---",
+    "examples",
+    "automation-safety",
+    "troubleshooting"
+  ]
+}

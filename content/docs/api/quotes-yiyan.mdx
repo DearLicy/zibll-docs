@@ -1,0 +1,286 @@
+---
+title: 精彩一言与短句刷新
+description: 梳理子比主题一言短句文件、前端刷新协议、文章页显示位置、小工具、用户签名替换和二次扩展边界。
+---
+
+子比主题的一言功能不是 WordPress Ajax，而是一个独立的轻量 PHP 文本接口配合前端 `.yiyan` 元素刷新。它可以出现在文章正文头部、正文尾部、文章页下方独立模块、小工具和用户签名位置。
+
+二次开发时要把“一言内容源”和“一言显示容器”分开理解：内容源由 `yiyan/qv-yiyan.php` 读取文本文件，显示容器只要输出 `.yiyan`，前端脚本就会负责填充和定时刷新。
+
+## 源码入口
+
+| 文件                            | 作用                                    |
+| ------------------------------- | --------------------------------------- |
+| `yiyan/qv-yiyan.php`            | 读取一言文本文件，随机返回一组双语短句  |
+| `yiyan/qv-yiyan.txt`            | 主题内置默认短句文件                    |
+| `js/main.js`                    | 初始化 `.yiyan`、每 30 秒刷新、点击刷新 |
+| `inc/functions/functions.php`   | `zib_yiyan()` 输出一言容器              |
+| `inc/functions/zib-single.php`  | 文章页头部、尾部、文章后独立一言模块    |
+| `inc/widgets/widget-more.php`   | `widget_ui_yiyan` 小工具                |
+| `inc/functions/zib-theme.php`   | `get_user_desc()` 可用一言替代用户签名  |
+| `inc/options/admin-options.php` | 一言显示位置和用户签名替换开关          |
+
+## 内容文件
+
+一言接口优先读取 `wp-content/yiyan.txt`。如果这个文件不存在，再读取主题内置的 `yiyan/qv-yiyan.txt`：
+
+```php
+$path = dirname(__FILE__, 4) . "/yiyan.txt";
+if (!file_exists($path)) {
+    $path = dirname(__FILE__) . "/qv-yiyan.txt";
+}
+```
+
+主题后台说明也建议把内置 `qv-yiyan.txt` 复制到 `wp-content/yiyan.txt` 后再改。这样主题更新时不会覆盖自定义短句。
+
+默认文件的第一行是说明文字，真实短句从第二行开始按两行一组保存：
+
+```txt
+双语一言-倾微科技
+Nothing is more terrible than ignorance in action.
+最可怕的事莫过于无知而行动
+The wise man is always a good listener.
+智慧比财富更宝贵
+```
+
+接口会随机取一个奇数下标，并返回这一行和下一行：
+
+```php
+$arr     = mt_rand(0, count($file) - 2);
+$arr     = ($arr % 2 === 0) ? $arr + 1 : $arr;
+$content = trim($file[$arr]) . '/&/' . trim($file[$arr + 1]);
+```
+
+所以自定义 `yiyan.txt` 时要保持这个结构：第一行可以作为说明，从第二行开始每两行一组。常见写法是一行英文、一行中文；如果要只做中文，也要两行成组，否则前端会拿不到第二段。
+
+## 接口返回
+
+`qv-yiyan.php` 返回纯文本，分隔符是 `/&/`：
+
+```txt
+Nothing is more terrible than ignorance in action./&/最可怕的事莫过于无知而行动
+```
+
+默认编码是 UTF-8。传入 `charset=gbk` 时，接口会把内容转为 GBK：
+
+```php
+if (isset($_GET['charset']) && !empty($_GET['charset'])) {
+    $charset = $_GET['charset'];
+    if (strcasecmp($charset, "gbk") == 0) {
+        $content = mb_convert_encoding($content, 'gbk', 'utf-8');
+    }
+} else {
+    $charset = 'utf-8';
+}
+```
+
+这个接口不加载 WordPress，也不做登录态、nonce 或权限判断。它只适合读取公开短句，不要把私密内容、用户数据或后台配置写进一言文件。
+
+## 前端刷新协议
+
+前端脚本在 `document.ready` 中定义 `yiyan_nr(n)`：
+
+```js
+function yiyan_nr(n) {
+  var yylink = _win.uri + '/yiyan/qv-yiyan.php',
+    y_nr;
+  $.ajax({
+    type: 'POST',
+    url: yylink,
+  }).done(function (i) {
+    var lines = i
+      .replace(/\r\n|\r/g, '/&/')
+      .trim()
+      .split('/&/');
+    if (lines) {
+      var type = n.attr('type');
+      if (type) {
+        y_nr = type === 'en' ? lines[0] : lines[1];
+      } else {
+        y_nr =
+          '<div class="cn">' +
+          lines[0] +
+          '</div><div class="en">' +
+          lines[1] +
+          '</div>';
+      }
+      n.html(y_nr);
+    }
+  });
+}
+```
+
+然后执行三件事：
+
+| 行为     | 说明                                 |
+| -------- | ------------------------------------ |
+| 页面初始 | 遍历当前所有 `.yiyan` 并请求短句     |
+| 定时刷新 | 每 30 秒重新刷新所有 `.yiyan`        |
+| 点击刷新 | 点击已有 `.yiyan` 时立即刷新当前元素 |
+
+`type` 属性控制显示语言：
+
+| HTML                                    | 显示                                      |
+| --------------------------------------- | ----------------------------------------- |
+| `<div class="yiyan"></div>`             | 同时输出中文和英文，结构为 `.cn` 与 `.en` |
+| `<span class="yiyan" type="en"></span>` | 只输出接口第一段                          |
+| `<span class="yiyan" type="cn"></span>` | 只输出接口第二段                          |
+
+点击事件不是事件委托，而是在页面 ready 时绑定到当时存在的 `.yiyan`。Ajax 后插入的新 `.yiyan` 会在下一次 30 秒定时刷新时被填充，但不会自动拥有立即点击刷新能力。动态插入内容时，如果需要马上显示，建议自己补一个小的加载函数。
+
+## 服务端容器
+
+主题封装了 `zib_yiyan()`：
+
+```php
+function zib_yiyan($class = 'zib-yiyan', $before = '', $after = '')
+{
+    $yiyan = '<div class="' . $class . '">' . $before . '<div data-toggle="tooltip" data-original-title="' . esc_attr__('点击切换一言', 'zib_language') . '" class="yiyan"></div>' . $after . '</div>';
+    echo $yiyan;
+}
+```
+
+这个函数只输出容器，不读取文本。真正内容仍由前端请求 `qv-yiyan.php` 后填充。
+
+在自定义位置输出一言：
+
+```php
+function zib_docs_single_before_yiyan()
+{
+    if (!is_single()) {
+        return;
+    }
+
+    zib_yiyan('article-yiyan theme-box text-center radius8 main-shadow yiyan-box');
+}
+add_action('zib_single_before', 'zib_docs_single_before_yiyan', 20);
+```
+
+如果只需要单语言，可以直接输出 `.yiyan`：
+
+```php
+function zib_docs_user_panel_quote()
+{
+    echo '<p class="muted-2-color em09"><span class="yiyan" type="cn"></span></p>';
+}
+add_action('zib_single_after', 'zib_docs_user_panel_quote', 30);
+```
+
+## 文章页位置
+
+文章页有三个一言开关：
+
+| 开关                          | 位置                       | 源码                               |
+| ----------------------------- | -------------------------- | ---------------------------------- |
+| `yiyan_single_content_header` | 正文内容头部               | `zib_single_content_header()`      |
+| `yiyan_single_content_footer` | 正文内容尾部，版权和标签前 | `zib_single_content_footer($post)` |
+| `yiyan_single_box`            | 文章主体下方独立模块       | `zib_single_after_box()`           |
+
+`yiyan_single_box` 挂在 `zib_single_after` 后续结构里，通常会出现在作者卡片、上一篇下一篇、相关文章这些文章后模块附近。扩展文章页时不要只看 `the_content()`，还要检查这些主题函数是否已经输出了一言。
+
+文档模板 `template/single-dosc.php` 不走普通文章完整结构，只保留 `zib_article_content_after` 等部分 Hook。如果某个文章类型没有显示一言，先确认它使用的是不是普通 `zib_single_content()` 流程。
+
+## 一言小工具
+
+`widget_ui_yiyan` 是传统 WordPress 小工具，注册在 `inc/widgets/widget-more.php`。它会先走通用显示规则：
+
+```php
+if (!zib_widget_is_show($instance)) {
+    return;
+}
+```
+
+然后输出：
+
+```php
+echo '<div class="yiyan-box main-bg text-center box-body radius8 main-shadow">';
+echo '<div class="yiyan"></div>';
+echo '</div>';
+```
+
+小工具支持标题、副标题、右侧按钮、侧栏随动和入场动画字段。它不提供单独的一言内容源配置，仍然使用全站统一的 `yiyan.txt` 或主题内置文件。
+
+## 用户签名替换
+
+用户签名读取函数是 `get_user_desc($user_id, $yiyan = true)`。当后台开启 `yiyan_avatar_desc` 时，它会直接返回一言占位：
+
+```php
+if ($yiyan && _pz('yiyan_avatar_desc')) {
+    return '<span class="yiyan" type="' . (_pz('yiyan_avatar_desc_type', 'cn')) . '"></span>';
+}
+```
+
+相关配置：
+
+| 字段                     | 用途                         |
+| ------------------------ | ---------------------------- |
+| `user_desc_std`          | 用户没有签名时的默认文案     |
+| `yiyan_avatar_desc`      | 是否用一言替代用户签名       |
+| `yiyan_avatar_desc_type` | 用户签名位置显示中文还是英文 |
+
+注意这里不是给“未填写签名的用户”兜底，而是开启后替代用户签名显示。用户自己写的 `description` 不会出现在这些调用位置。
+
+如果某个业务场景必须展示真实签名，可以显式关闭一言参数：
+
+```php
+$desc = get_user_desc($user_id, false);
+```
+
+## 动态内容立即刷新
+
+主题内置 `yiyan_nr()` 是局部函数，不能从外部直接调用。Ajax 插入新内容后，如果不想等 30 秒，可以在扩展脚本中按主题协议补一次刷新：
+
+```js
+function zibDocsLoadYiyan($box) {
+  var $targets = $box.find('.yiyan');
+  if (!$targets.length) {
+    return;
+  }
+
+  $.post(_win.uri + '/yiyan/qv-yiyan.php', function (res) {
+    var lines = res
+      .replace(/\r\n|\r/g, '/&/')
+      .trim()
+      .split('/&/');
+    $targets.each(function () {
+      var $this = $(this);
+      var type = $this.attr('type');
+      if (type) {
+        $this.text(type === 'en' ? lines[0] : lines[1]);
+      } else {
+        $this.html(
+          '<div class="cn">' +
+            lines[0] +
+            '</div><div class="en">' +
+            lines[1] +
+            '</div>',
+        );
+      }
+    });
+  });
+}
+```
+
+扩展脚本里单语言建议使用 `.text()`，避免把一言文件里的特殊字符当 HTML 执行。主题原始脚本使用 `.html()`，所以自定义 `yiyan.txt` 应当按可信纯文本维护，不要放用户可提交内容。
+
+## 排查清单
+
+| 问题                   | 检查点                                                           |
+| ---------------------- | ---------------------------------------------------------------- |
+| 页面一直空白           | 前台是否有 `.yiyan`，`_win.uri + '/yiyan/qv-yiyan.php'` 是否 200 |
+| 返回“内容为空”         | `wp-content/yiyan.txt` 或主题内置 `qv-yiyan.txt` 是否至少两行    |
+| 中文英文错位           | 自定义文件是否第一行说明、从第二行开始两行一组                   |
+| 点击不刷新             | 元素是否 Ajax 后插入，内置点击事件只绑定 ready 时已有元素        |
+| 用户签名都变成短句     | 是否开启了 `yiyan_avatar_desc`                                   |
+| CDN 后短句不变化       | `yiyan/qv-yiyan.php` 是否被缓存，必要时排除这个路径              |
+| 自定义文件更新后没生效 | 服务器是否实际读取 `wp-content/yiyan.txt`，缓存是否仍返回旧内容  |
+
+## 开发边界
+
+- 一言接口是公开文本接口，不要放隐私、动态用户资料或需要权限的数据。
+- 内容文件由前端直接注入页面，维护时按可信纯文本处理。
+- Ajax 动态插入的一言不会立刻拥有点击刷新能力，必要时补自己的刷新函数。
+- 用户签名替换会覆盖真实签名展示，业务页面需要真实签名时调用 `get_user_desc($user_id, false)`。
+- 文章页一言和文章后模块共享同一套文章渲染流程，扩展时优先使用 `zib_single_before`、`zib_article_content_after`、`zib_single_after` 等 Hook。
+
+本页根据 `yiyan/qv-yiyan.php`、`yiyan/qv-yiyan.txt`、`js/main.js`、`inc/functions/functions.php`、`inc/functions/zib-single.php`、`inc/widgets/widget-more.php`、`inc/functions/zib-theme.php`、`inc/options/admin-options.php` 蒸馏整理。

@@ -1,0 +1,116 @@
+---
+title: 排错清单
+description: Codestar Framework 字段不显示、保存失败、读取为空、Ajax 保存异常和样式脚本失效时的排查步骤。
+---
+
+## 字段不显示
+
+按顺序检查：
+
+1. `class_exists('CSF')` 是否为真。
+2. 注册代码是否在后台执行。
+3. prefix 是否和 `CSF::createOptions()` 或对应 create 方法一致。
+4. `CSF::createSection()` 是否真的执行。
+5. 字段是否写在 `fields` 数组里。
+6. `dependency` 是否隐藏了字段。
+7. 当前 post type、taxonomy、user profile、menu item 是否匹配。
+8. 功能模块是否关闭，例如商城或论坛 taxonomy 不存在。
+
+## 设置页不出现
+
+检查：
+
+- `menu_slug` 是否唯一。
+- `menu_type`、`menu_parent` 是否正确。
+- 当前用户是否有 `menu_capability`。
+- 是否设置了 `menu_hidden`。
+- 是否只在错误的页面条件下注册。
+- 是否和主题已有 slug 冲突。
+
+## 保存失败
+
+常见原因：
+
+| 现象             | 可能原因                                                       |
+| ---------------- | -------------------------------------------------------------- |
+| 点击保存没反应   | Ajax 被防火墙、WAF、CDN 或登录态拦截                           |
+| 保存后值丢失     | 字段 id 改了，或字段隐藏后提交为空                             |
+| HTML 被过滤      | 没有设置 `sanitize => false`，或前台输出再次过滤               |
+| 数组字段保存异常 | 保存逻辑没有递归处理 group/repeater                            |
+| Meta 保存失败    | nonce、权限、autosave、revision 判断不完整                     |
+| 用户字段保存失败 | 没有挂 `personal_options_update` 和 `edit_user_profile_update` |
+
+## 读取为空
+
+先确认数据位置：
+
+- options：`get_option($prefix)`
+- 主题 options：`_pz($key)`
+- post meta：`zib_get_post_meta()` 或 `get_post_meta()`
+- user meta：`zib_get_user_meta()` 或 `get_user_meta()`
+- term meta：`zib_get_term_meta()` 或 `get_term_meta()`
+- menu item：`zib_menu_pz()`
+- widget：`$instance`
+
+如果主题字段读不到，重点检查是否保存到了 `zib_other_data`。
+
+## 字段样式或脚本异常
+
+可能原因：
+
+- 自定义页面没有 enqueue CSF 资源。
+- 使用 `ZCSF::instance()` 的页面不在后台标准上下文。
+- 后台脚本被合并压缩或缓存策略影响。
+- 字段类型不存在或类没有加载。
+- 图标字段用了不兼容的 Font Awesome class。
+
+## dependency 不生效
+
+检查：
+
+1. 依赖字段 id 是否正确。
+2. 依赖字段和目标字段是否在同一个表单上下文。
+3. 比较符和值数量是否匹配。
+4. switcher 保存值到底是空、`1`、`true` 还是其它。
+5. group 内字段是否依赖了 group 外字段。
+6. 浏览器控制台是否有 JS 错误。
+
+## 上传字段异常
+
+检查：
+
+- 当前用户是否有上传权限。
+- WordPress 媒体库是否正常。
+- PHP 上传大小、文件类型、目录权限是否正常。
+- `library => 'image'` 是否限制了文件类型。
+- HTTPS 混合内容是否导致图片预览失败。
+
+## 后台变慢
+
+常见原因：
+
+- 每个后台页面都构建大量字段。
+- select 字段查询文章、用户、分类太多。
+- group/repeater 默认值太大。
+- 字段 options 动态查询没有缓存。
+- 远程 API 在字段构建时同步请求。
+
+优化建议：
+
+- 只在对应设置页构建复杂字段。
+- select 使用搜索能力，不要一次性加载全部数据。
+- 动态 options 做缓存。
+- 远程数据改成手动刷新或 Ajax 获取。
+
+## 上线前检查
+
+1. 设置页能打开、搜索、保存。
+2. 字段默认值正确。
+3. dependency 显隐正常。
+4. 保存后刷新页面值不丢失。
+5. 前台读取值正确。
+6. 多用户权限正确。
+7. HTML 输出安全。
+8. 非主题功能停用后前台不报错。
+9. 主题更新后字段仍可读取。
+10. 缓存/CDN 不影响后台 Ajax 保存。

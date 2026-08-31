@@ -1,0 +1,170 @@
+---
+title: AI 命令行安装器
+description: 使用开源安装器检测、安装和更新 Codex、Claude Code 与 cc-switch，并配置 npm 源策略。
+---
+
+AI 命令行安装器用于在服务器或本地开发机上快速准备常用 AI CLI 工具。它适合中文环境使用，会检测 Node.js、npm、工具版本和 npm 源可用性，并提供安装、更新、切换源和清理缓存入口。
+
+项目地址：[DearLicy/ai-cli-installer](https://github.com/DearLicy/ai-cli-installer)
+
+## 管理的工具
+
+| 工具        | npm 包                      | 命令        |
+| ----------- | --------------------------- | ----------- |
+| Codex       | `@openai/codex`             | `codex`     |
+| Claude Code | `@anthropic-ai/claude-code` | `claude`    |
+| cc-switch   | `@hobeeliu/cc-switch`       | `cc-switch` |
+
+这里的 cc-switch 指 npm 命令行版本。如果你安装的是桌面版，需要使用桌面版自己的安装方式。
+
+## 一键使用
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DearLicy/ai-cli-installer/main/install.sh -o ai-cli-installer.sh
+chmod +x ai-cli-installer.sh
+./ai-cli-installer.sh
+```
+
+中国大陆服务器可以直接使用镜像源：
+
+```bash
+SOURCE_MODE=china ./ai-cli-installer.sh
+```
+
+也可以先下载脚本，再进入菜单切换源策略。
+
+## 交互菜单
+
+脚本启动后会先显示当前状态，再进入菜单：
+
+| 菜单 | 作用                          |
+| ---- | ----------------------------- |
+| `1`  | 安装或更新 Codex              |
+| `2`  | 安装或更新 Claude Code        |
+| `3`  | 安装或更新 cc-switch          |
+| `4`  | 一键安装或更新全部工具        |
+| `5`  | 切换源策略                    |
+| `6`  | 安装或修复 Node.js 长期支持版 |
+| `7`  | 检查或清理 npm 缓存           |
+| `r`  | 刷新状态                      |
+| `q`  | 退出                          |
+
+状态页会展示：
+
+| 检测项           | 来源                              |
+| ---------------- | --------------------------------- |
+| Node.js 版本     | `node -v`                         |
+| npm 版本         | `npm -v`                          |
+| npm 全局安装目录 | `NPM_GLOBAL_PREFIX`               |
+| 工具本机版本     | 全局 npm 包版本或命令 `--version` |
+| 官方最新版本     | `NPM_REGISTRY_OFFICIAL`           |
+| 镜像最新版本     | `NPM_REGISTRY_CHINA`              |
+
+如果官方源和镜像源返回的最新版本不同，状态页会标出差异。需要追新时优先使用官方源；需要稳定访问时使用大陆镜像源。
+
+## 源策略
+
+| 策略       | 说明                                           |
+| ---------- | ---------------------------------------------- |
+| `auto`     | 官方源可访问时使用官方源，否则回退到大陆镜像源 |
+| `official` | 只使用官方 npm 源与 Node.js 源                 |
+| `china`    | 只使用 npmmirror 镜像源                        |
+
+可配置变量：
+
+```bash
+NODE_MAJOR_LTS=24
+NPM_REGISTRY_OFFICIAL=https://registry.npmjs.org
+NPM_REGISTRY_CHINA=https://registry.npmmirror.com
+NODE_MIRROR_OFFICIAL=https://nodejs.org/dist
+NODE_MIRROR_CHINA=https://npmmirror.com/mirrors/node
+NODE_INSTALL_DIR=$HOME/.local/nodejs
+NPM_GLOBAL_PREFIX=$HOME/.npm-global
+SOURCE_MODE=auto
+```
+
+## 安装位置
+
+脚本默认把 Node.js 安装到当前用户目录：
+
+```text
+~/.local/nodejs
+```
+
+npm 全局工具安装到：
+
+```text
+~/.npm-global
+```
+
+这样不需要 `sudo`，也不容易覆盖系统自带 Node.js。服务器上多人共用环境时，这种方式更容易回滚和排查。
+
+安装完成后，脚本会把路径写入当前用户 shell 配置：
+
+```bash
+export PATH="$HOME/.local/nodejs/current/bin:$PATH"
+export PATH="$HOME/.npm-global/bin:$PATH"
+```
+
+`bash` 通常写入 `~/.bashrc`，`zsh` 写入 `~/.zshrc`。如果是 `fish`，脚本会提示手动添加 PATH。
+
+## 和本站 AI 功能的关系
+
+本站的 AI 功能分三类：
+
+| 能力          | 用途                                    |
+| ------------- | --------------------------------------- |
+| Skill 文档    | 把任务约束、项目风格和执行步骤沉淀给 AI |
+| LLM 文本      | 提供可直接复制给模型的全文上下文        |
+| MCP 服务器    | 让 AI 客户端按需读取本站文档            |
+| AI CLI 安装器 | 准备本机可执行的 AI 命令行工具          |
+
+安装器不替代 MCP，也不替代 Skill。它解决的是“机器上有没有工具、版本对不对、npm 源能不能用”的问题。
+
+## 使用建议
+
+1. 先运行脚本检测 Node.js 和 npm。
+2. 国内服务器优先选择 `SOURCE_MODE=china`。
+3. 安装完成后分别执行 `codex --version`、`claude --version`、`cc-switch --version`。
+4. 如果 npm 安装失败，先在脚本菜单里清理 npm 缓存，再切换源重试。
+5. 部署文档站或 WordPress 环境时，把 AI CLI 当作开发辅助工具，不要作为前台业务依赖。
+
+## 运行环境
+
+脚本面向这些环境：
+
+| 环境                        | 说明                      |
+| --------------------------- | ------------------------- |
+| Linux x64 / arm64           | 服务器和本地 Linux        |
+| macOS Intel / Apple Silicon | 本地开发机                |
+| WSL                         | Windows 上的 Linux 子系统 |
+
+Node.js 下载包按 `uname -s` 和 `uname -m` 判断平台。当前脚本下载 `.tar.xz` 包，Linux 系统如果缺少解压支持，需要先安装 `xz-utils` 或发行版对应工具。
+
+## 失败日志
+
+安装 npm 包时脚本使用静默模式，失败后会把完整 npm 输出写到临时日志：
+
+```text
+/tmp/ai-cli-npm.xxxxxx.log
+```
+
+排查顺序：
+
+1. 查看日志里的 registry、权限、网络和包版本错误。
+2. 在菜单里执行 `7` 检查 npm 缓存。
+3. 必要时强制清理缓存。
+4. 切换 `SOURCE_MODE` 后重新安装。
+5. 确认 `NPM_GLOBAL_PREFIX/bin` 已经进入 `PATH`。
+
+## 排查
+
+| 问题             | 处理                                      |
+| ---------------- | ----------------------------------------- |
+| `node` 不存在    | 重新运行安装器，安装 LTS 版本             |
+| `npm` 访问超时   | 切换到 `china` 源策略                     |
+| 全局命令找不到   | 检查 `~/.npm-global/bin` 是否在 `PATH` 中 |
+| 版本不是最新     | 使用安装器更新对应工具                    |
+| 缓存导致安装异常 | 进入脚本菜单执行 npm 缓存检查和清理       |
+
+AI CLI 工具更新很快，建议把安装器作为运维工具保留，后续需要升级时直接重新运行。

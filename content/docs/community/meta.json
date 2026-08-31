@@ -1,0 +1,15 @@
+{
+  "title": "社区协作",
+  "description": "通过 GitHub Issue、Pull Request、交流渠道和友情链接参与文档维护",
+  "icon": "UsersRound",
+  "root": true,
+  "pages": [
+    "index",
+    "github-community",
+    "governance",
+    "feedback",
+    "contributing",
+    "community-rules",
+    "friend-links"
+  ]
+}

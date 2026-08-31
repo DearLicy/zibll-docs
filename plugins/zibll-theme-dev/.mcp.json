@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "zibll-theme-dev": {
+      "command": "npx",
+      "args": ["-y", "zibll-docs-mcp"]
+    }
+  }
+}

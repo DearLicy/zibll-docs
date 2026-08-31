@@ -1,0 +1,515 @@
+---
+title: 主题后台管理扩展
+description: 扩展子比主题 inc/functions/admin、后台提醒、分类图像、分类 SEO、链接管理、评论列表、菜单项、用户资料页和编辑器资源。
+---
+
+## 模块边界
+
+子比主题后台能力分成两类：
+
+| 类型                   | 主要位置                               | 用途                                                                 |
+| ---------------------- | -------------------------------------- | -------------------------------------------------------------------- |
+| 后台设置与 Meta 字段   | `inc/options/*`、`inc/csf-framework/*` | 主题设置页、文章 Meta、分类 Meta、用户资料字段、菜单项配置           |
+| WordPress 后台界面增强 | `inc/functions/admin/*`                | 后台提醒、分类列表、链接管理、评论列表、编辑器、用户资料页、后台资源 |
+
+这页讲第二类：基于 WordPress 后台 Hook 的管理端扩展。新增主题设置字段时先看 Codestar Framework 文档；新增后台列表列、后台提示、分类编辑表单、菜单编辑表单、用户资料页样式或编辑器资源时，再看这里。
+
+## 文件入口
+
+| 文件                                        | 作用                                                                     |
+| ------------------------------------------- | ------------------------------------------------------------------------ |
+| `inc/functions/admin/admin-main.php`        | 环境提醒、仪表盘清理、分类图像、评论列表、古腾堡扩展、分类 SEO、后台资源 |
+| `inc/functions/admin/admin-set.php`         | 链接管理增强、菜单项标题输入、用户资料页隐藏字段                         |
+| `inc/functions/admin/vela-theme.php`        | 主题附加后台能力，按具体版本和开关检查                                   |
+| `inc/functions/shop/admin/admin.php`        | 商城待发货、待处理售后和收货地址修改的后台提醒                           |
+| `inc/functions/shop/admin/actions/ajax.php` | 商城后台发货、批量发货、售后审核和退货退款处理                           |
+
+常见 Hook：
+
+| Hook                                      | 用途                       |
+| ----------------------------------------- | -------------------------- |
+| `admin_notices`                           | 后台顶部提醒               |
+| `do_meta_boxes`                           | 调整仪表盘或编辑页 metabox |
+| `admin_head` / `admin_footer`             | 输出后台样式或脚本         |
+| `{taxonomy}_add_form_fields`              | 新增分类表单字段           |
+| `{taxonomy}_edit_form_fields`             | 编辑分类表单字段           |
+| `edit_term` / `create_term`               | 保存分类字段               |
+| `manage_edit-{taxonomy}_columns`          | 分类列表列                 |
+| `manage_{taxonomy}_custom_column`         | 分类列表列内容             |
+| `quick_edit_custom_box`                   | 快速编辑字段               |
+| `restrict_manage_comments`                | 评论列表筛选器             |
+| `wp_nav_menu_item_custom_fields`          | 菜单项编辑字段             |
+| `show_user_profile` / `edit_user_profile` | 用户资料页                 |
+| `admin_enqueue_scripts`                   | 后台资源加载               |
+
+## 后台环境提醒
+
+主题使用 `admin_notices` 检查基础环境：
+
+```php
+add_action('admin_notices', 'zib_admin_environmental_dependence_reminders');
+```
+
+检查项包括：
+
+- `mbstring` 扩展。
+- `curl` 扩展。
+- `zib_fun_throttle()` 文件夹权限或核心函数异常。
+
+新增环境提醒时，应只在后台输出，并避免每次后台请求都执行昂贵检查：
+
+```php
+function zib_docs_admin_notice_check()
+{
+    if (!current_user_can('manage_options')) {
+        return;
+    }
+
+    $error = '';
+    if (!function_exists('imagewebp')) {
+        $error .= '<p>' . esc_html__('当前 PHP 未启用 WebP 支持，图片转换能力不可用。', 'zib_language') . '</p>';
+    }
+
+    if ($error) {
+        echo '<div class="notice notice-warning is-dismissible">';
+        echo '<h3>' . esc_html__('环境提醒', 'zib_language') . '</h3>';
+        echo $error;
+        echo '</div>';
+    }
+}
+add_action('admin_notices', 'zib_docs_admin_notice_check');
+```
+
+后台提醒不要输出服务器绝对路径、密钥、数据库连接串或完整异常栈。需要排查时写入日志或仅对管理员展示有限信息。
+
+## 仪表盘清理
+
+主题根据 `_pz('remove_dashboard_widgets', true)` 清理 WordPress 默认仪表盘组件：
+
+```php
+if (_pz('remove_dashboard_widgets', true)) {
+    add_action('do_meta_boxes', 'zib_remove_dashboard_widgets', 10, 3);
+}
+```
+
+`zib_remove_dashboard_widgets()` 只在 `$screen_id === 'dashboard'` 且 `$context === 'normal'` 时执行，并移除默认 PHP 提示、站点健康和 WordPress 新闻等 metabox。
+
+扩展时也应限定 screen 和 context：
+
+```php
+function zib_docs_remove_dashboard_widget($screen_id, $context)
+{
+    if ('dashboard' !== $screen_id || 'normal' !== $context) {
+        return;
+    }
+
+    global $wp_meta_boxes;
+    unset($wp_meta_boxes['dashboard']['normal']['core']['dashboard_activity']);
+}
+add_action('do_meta_boxes', 'zib_docs_remove_dashboard_widget', 10, 2);
+```
+
+不要在所有后台页面全局 unset `$wp_meta_boxes`，否则可能影响文章、商品、论坛帖子等编辑页。
+
+## 分类封面图像
+
+主题会给多数 taxonomy 添加封面图像能力。入口：
+
+```php
+add_action('admin_head', 'zib_admin_add_term_img_init');
+```
+
+它遍历 `get_taxonomies()`，排除：
+
+```php
+array('link_category', 'shop_cat', 'shop_tag', 'shop_discount')
+```
+
+然后给每个 taxonomy 注册：
+
+```php
+add_filter($z_taxonomy . '_row_actions', 'zib_filter_row_actions', 1, 2);
+add_action($z_taxonomy . '_add_form_fields', 'zib_admin_add_term_img_form_field');
+add_action($z_taxonomy . '_edit_form_fields', 'zib_admin_add_term_img_form_field_edit');
+add_filter('manage_edit-' . $z_taxonomy . '_columns', 'zib_admin_add_term_img_edit_columns');
+add_filter('manage_' . $z_taxonomy . '_custom_column', 'zib_admin_add_term_img_custom_column', 10, 3);
+```
+
+保存入口：
+
+```php
+add_action('edit_term', 'zib_admin_save_term_img');
+add_action('create_term', 'zib_admin_save_term_img');
+```
+
+保存时写入：
+
+```php
+zib_update_term_meta($term_id, 'cover_image', $_POST['taxonomy_image']);
+```
+
+并清理分类图像缓存：
+
+```php
+wp_cache_delete($term_id, 'taxonomy_image_');
+wp_cache_delete($term_id, 'taxonomy_image_full');
+wp_cache_delete($term_id, 'taxonomy_image_thumbnail');
+wp_cache_delete($term_id, 'taxonomy_image_medium');
+wp_cache_delete($term_id, 'taxonomy_image_large');
+```
+
+新增 taxonomy 图像字段时优先复用 `cover_image`。前台读取时用主题已有函数，例如 `zib_get_taxonomy_img_url()`，不要重复发明 meta key。
+
+## 分类快速编辑
+
+主题通过 `quick_edit_custom_box` 给分类快速编辑加入图像字段：
+
+```php
+if (strpos($_SERVER['SCRIPT_NAME'], 'edit-tags.php')) {
+    add_action('quick_edit_custom_box', 'zib_admin_add_term_img_quick_edit_custom_box', 10, 3);
+    add_filter('attribute_escape', 'zib_admin_add_term_img_change_insert_button_text', 10, 2);
+}
+```
+
+快速编辑的关键点：
+
+- 列表列必须有可读的当前值。
+- 点击 `.editinline` 时把当前行图像同步到快速编辑表单。
+- 保存时仍走 `edit_term`。
+
+如果给 taxonomy 增加新字段，也要同时考虑新增表单、编辑表单、列表列、快速编辑和保存逻辑，否则后台体验会断裂。
+
+## 分类 SEO 字段
+
+当 `_pz('post_keywords_description_s')` 开启时，主题实例化：
+
+```php
+if (_pz('post_keywords_description_s')) {
+    $tax_cat = new zib_admin_add_term_seo();
+}
+```
+
+`zib_admin_add_term_seo` 会给这些 taxonomy 添加 SEO 字段：
+
+| Taxonomy                                | 条件            |
+| --------------------------------------- | --------------- |
+| `category`                              | 默认            |
+| `topics`                                | 默认            |
+| `post_tag`                              | 默认            |
+| `shop_cat`、`shop_discount`、`shop_tag` | `_pz('shop_s')` |
+| `plate_cat`、`forum_topic`、`forum_tag` | `_pz('bbs_s')`  |
+
+字段写入 `term_seo`：
+
+```php
+$term_meta['title']       = isset($_POST['term_meta']['title']) ? esc_sql($_POST['term_meta']['title']) : '';
+$term_meta['keywords']    = isset($_POST['term_meta']['keywords']) ? esc_sql($_POST['term_meta']['keywords']) : '';
+$term_meta['description'] = isset($_POST['term_meta']['description']) ? esc_sql($_POST['term_meta']['description']) : '';
+
+zib_update_term_meta($term_id, 'term_seo', $term_meta);
+```
+
+编辑页还会接入 AI SEO 按钮：
+
+```php
+$ai_seo_btn = zib_ai_seo_get_btn('term', $term_id);
+```
+
+扩展分类 SEO 时，不要另建平行的 meta key。优先读取或扩展 `term_seo`，并注意保存时需要清洗字段和清理相关缓存。
+
+## 链接管理增强
+
+`admin-set.php` 对 WordPress 链接管理做了增强：
+
+| Hook                          | 用途                                         |
+| ----------------------------- | -------------------------------------------- |
+| `admin_bar_menu`              | 后台工具栏显示待审核链接数量                 |
+| `manage_link-manager_columns` | 调整链接列表列                               |
+| `manage_link_custom_column`   | 输出链接简介和 LOGO 图像                     |
+| `add_meta_boxes_link`         | 移除默认高级 metabox，加入主题说明和高级字段 |
+
+待审核链接数量：
+
+```php
+function zib_get_visible_link_count()
+{
+    global $wpdb;
+    $db    = zibDB::table($wpdb->links)->where('link_visible', '!=', 'Y');
+    $count = $db->count();
+    return $count;
+}
+```
+
+高级字段通过 `ZCSF::instance('post_meta', $csf_args)` 渲染，不创建独立设置页。
+
+扩展链接管理时要记住 WordPress Links 使用的是 `$wpdb->links`，不是普通 `post`。不要用文章 meta API 保存链接字段。
+
+## 菜单项标题输入
+
+主题在菜单编辑项里把默认标题输入隐藏，改成 textarea，允许导航名称支持 HTML：
+
+```php
+add_action('wp_nav_menu_item_custom_fields', 'zib_get_menu_set', 10, 5);
+```
+
+这只是界面层增强。菜单项的高级配置仍然由 Codestar 菜单项配置负责，读取时使用 `zib_menu_pz()`。新增菜单项展示能力时，应优先扩展 `zib_menu_options`，不要只依赖菜单标题里塞 HTML。
+
+## 用户资料页精简
+
+当 `_pz('admin_user_del_fields', true)` 开启时，主题隐藏 WordPress 用户资料页的一批默认字段：
+
+```php
+if (_pz('admin_user_del_fields', true)) {
+    add_action('show_user_profile', 'zib_user_profile_css');
+    add_action('edit_user_profile', 'zib_user_profile_css');
+}
+```
+
+隐藏的包括姓名、前台工具栏、评论快捷键、语法高亮、富文本编辑、头像说明、语言等。
+
+如果你的扩展依赖这些原生字段，不要假设它们在 UI 上可见。需要用户编辑的字段，应使用主题的 `profile-options.php` 或前台用户中心资料表单。
+
+## 后台评论列表
+
+主题增强评论列表两处：
+
+1. 用 `restrict_manage_comments` 加文章类型筛选。
+2. 在 `manage_comments_nav` 中给 `comment_text` 添加过滤和样式。
+3. 在 `admin_footer` 给评论回复 textarea 增加 Ctrl+Enter 快捷提交。
+
+筛选器会读取支持评论的 post type：
+
+```php
+$post_type = get_post_types_by_support('comments');
+```
+
+评论内容会经过：
+
+```php
+zib_comment_filters($comment_text, '', false)
+```
+
+并显示评论 IP 地理位置 badge：
+
+```php
+$addr_data = zib_get_comment_meta($comment->comment_ID, 'comment_addr', true);
+$addr_html = zib_get_ip_geographical_position_badge($addr_data, 'city', '');
+```
+
+扩展后台评论列表时，不要把前台完整评论 HTML 直接搬到后台列表。后台列表宽度有限，图片、代码块、表情和地理位置都要做尺寸限制。
+
+### 评论回复快捷键
+
+后台评论回复快捷键不是 WordPress 原生逻辑，而是主题在后台页脚输出的一段小脚本：
+
+```php
+add_action('admin_footer', '_admin_comment_ctrlenter');
+function _admin_comment_ctrlenter()
+{
+    echo '<script type="text/javascript">
+        jQuery(document).ready(function($){
+            $("textarea").keypress(function(e){
+                if(e.ctrlKey&&e.which==13||e.which==10){
+                    $("#replybtn").click();
+                }
+            });
+        });
+    </script>';
+}
+```
+
+这段脚本面向后台评论回复弹层，核心动作是触发 `#replybtn`。如果扩展评论审核页、举报处理页或自定义回复弹窗，不要直接复用这个选择器假设；应限定当前页面和弹窗容器，避免其它后台 textarea 误触发提交。
+
+文章类型筛选也只是给评论列表追加 `post_type` 查询条件，不等同于业务审核权限。评论审核、驳回、删除、置顶仍应回到 `action/comment.php` 里的 Ajax 权限模型，使用 `zib_current_user_can('comment_audit', $comment)`、`zib_current_user_can('comment_delete', $comment)` 等能力判断。
+
+## 论坛后台增强
+
+论坛后台增强主要不在通用 `inc/functions/admin/*`，而在论坛模块自己的文件里：
+
+| 位置                                      | 后台能力                                                         |
+| ----------------------------------------- | ---------------------------------------------------------------- |
+| `inc/functions/bbs/inc/class.init.php`    | 注册 post type、后台版块筛选、后台主查询、回收站状态、用户列表列 |
+| `inc/functions/bbs/admin/meta-option.php` | 论坛帖子和版块的 meta box、封面字段、快速编辑、批量编辑          |
+
+后台帖子列表的版块筛选来自 `restrict_manage_posts`，查询过滤来自 `pre_get_posts`。快速编辑和批量编辑由 `zib_bbs_posts_bulk_edit` 输出和保存，字段包括 `plate_id`、`topping`、`bbs_type`、`essence`、`views`、`allow_view`。
+
+论坛模块还会给后台用户列表追加论坛统计列，显示用户创建的版块数和发布的帖子数。源码里也保留了论坛评论切换、版块列表列、帖子列表列和版块分类列函数，但是否显示要看当前版本是否挂到了对应 WordPress Hook。扩展后台列表前先确认挂载点，不要只按函数名判断界面已经启用。
+
+论坛批量维护有业务联动风险。比如后台批量改 `plate_id` 是直接写 meta，不等同于前台移动版块的 `zib_bbs_posts_plate_move()`；后者会触发新旧版块统计刷新和 `posts_plate_move`。需要批量迁移、删除、恢复论坛数据、扩展用户列表统计或调整论坛评论后台入口时，先看 [论坛模块](/docs/api/bbs) 的“后台列表与批量维护”和“版块统计与缓存”，不要只在后台列表 Hook 里改字段。
+
+## 商城后台增强
+
+商城后台增强主要在商城模块自己的 `admin` 目录，不在通用 `inc/functions/admin/*`：
+
+| 位置                                        | 后台能力                                                                                                                                                     |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `inc/functions/shop/admin/admin.php`        | 后台 notice：待发货订单、待处理售后、收货地址修改申请                                                                                                        |
+| `inc/functions/shop/admin/actions/ajax.php` | `admin_shipping_submit`、`admin_batch_shipping_submit`、`admin_after_sale_handle_submit`、`admin_after_sale_refund_return_handle`、`after_sale_express_data` |
+| `zibpay/functions/admin/admin-ajax.php`     | 后台订单列表、发货列表、售后列表和售后记录 HTML                                                                                                              |
+
+商城后台操作不是简单写订单 meta。后台发货会区分自动发货、手动发货、快递发货和无需物流；已发货订单修改物流会清掉旧物流缓存。后台售后会区分仅退款、退货退款、换货、保修、保价，并在退货退款场景中把“同意退货”和“收到退货后最终退款”拆成两个步骤。
+
+扩展商城后台按钮、批量操作或列表筛选时，先看 [商城后台与订单排查](/docs/api/shop-admin-diagnostics) 和 [商城发货、售后与优惠](/docs/api/shop-shipping-after-sale) 的“后台发货操作”“后台售后处理”。不要直接改 `shipping_status`、`after_sale_status` 或 `order_data.after_sale_data`，否则后台待办、用户中心、退款、销量、评价状态和消息通知会互相脱节。
+
+## 编辑器与区块扩展
+
+主题加载编辑器样式：
+
+```php
+add_editor_style(get_locale_stylesheet_uri() . '/css/editor-style.min.css', array(), THEME_VERSION, 'all');
+```
+
+为了避免 WordPress 编辑器加载默认 Google 字体，主题还通过翻译上下文拦截：
+
+```php
+add_filter('gettext_with_context', 'zib_remove_gutenberg_styles', 10, 4);
+function zib_remove_gutenberg_styles($translation, $text, $context, $domain)
+{
+    if ('Google Font Name and Variants' != $context || 'Noto Serif:400,400i,700,700i' != $text) {
+        return $translation;
+    }
+    return 'off';
+}
+```
+
+这类处理只适合拦截明确的 WordPress 编辑器资源，不适合拿来替换站点翻译文本。新增编辑器资源优化时，优先使用 enqueue/dequeue 和区块注册 API；只有 WordPress 没有提供直接开关时，才考虑这种窄范围过滤。
+
+古腾堡扩展入口：
+
+```php
+if (function_exists('register_block_type') && !_pz('close_gutenberg')) {
+    add_action('admin_init', 'zibll_block');
+}
+```
+
+`zibll_block()` 注册：
+
+| 资源                 | 说明                         |
+| -------------------- | ---------------------------- |
+| `zibll_block` script | `js/gutenberg-extend.min.js` |
+| `zibll_block` style  | `css/editor-style.min.css`   |
+| `font_awesome` style | `css/font-awesome.min.css`   |
+| `zibll/block`        | 主题区块入口                 |
+
+主题还按 WordPress 版本使用 `block_categories_all` 或 `block_categories` 增加 `Zibll主题模块` 分类。
+
+如果 `_pz('disabled_autoembed', true)` 开启，会在 `enqueue_block_editor_assets` 中注销 `core/embed`：
+
+```php
+wp.blocks.unregisterBlockType('core/embed');
+```
+
+新增编辑器能力时，要尊重 `close_gutenberg` 和 `disabled_autoembed` 这类后台开关，不要强制加载。
+
+区块分类兼容要看 WordPress 版本：新版使用 `block_categories_all`，旧版使用 `block_categories`。扩展区块分类时可以沿用主题的版本判断，不要同时给两个 Filter 都追加同一个分类，否则在部分版本里可能重复显示。
+
+## 后台底部与品牌文案
+
+后台底部文字由主题过滤 `admin_footer_text`：
+
+```php
+function zib_admin_footer_thank()
+{
+    return sprintf(__('感谢您使用%1$s和%2$s进行创作。', 'zib_language'), '<a href="' . esc_url('https://wordpress.org') . '">WordPress</a>', '<a href="' . esc_url('https://www.zibll.com') . '">' . __('子比主题', 'zib_language') . '</a>');
+}
+add_filter('admin_footer_text', 'zib_admin_footer_thank', 99999);
+```
+
+如果子主题或插件需要追加后台品牌信息，建议使用更低优先级或在已有文本后拼接，并保持后台文案克制。不要在所有后台页插入大块营销 HTML，也不要影响 WordPress 更新、插件提示和主题自身的环境提醒。
+
+## 后台资源加载
+
+主题统一加载后台资源：
+
+```php
+function zib_admin_enqueue_scripts_and_style()
+{
+    wp_enqueue_style('zib_admin_man', ZIB_TEMPLATE_DIRECTORY_URI . '/css/admin-main.min.css', array(), THEME_VERSION);
+    wp_enqueue_script('zib_admin_man', ZIB_TEMPLATE_DIRECTORY_URI . '/js/admin-main.min.js', array('jquery'), THEME_VERSION);
+
+    wp_localize_script('zib_admin_man', 'zib_admin_man_var', array(
+        'i18n' => zib_get_admin_js_i18n_strings(),
+    ));
+}
+add_action('admin_enqueue_scripts', 'zib_admin_enqueue_scripts_and_style', 1);
+```
+
+新增后台脚本时应限定页面：
+
+```php
+function zib_docs_admin_assets($hook)
+{
+    if ('edit-tags.php' !== $hook) {
+        return;
+    }
+
+    wp_enqueue_script('zib-docs-admin', get_stylesheet_directory_uri() . '/assets/admin.js', array('jquery'), '1.0.0', true);
+}
+add_action('admin_enqueue_scripts', 'zib_docs_admin_assets');
+```
+
+不要在所有后台页面加载大型脚本，也不要在 `admin_head` 里堆大量内联 JS。
+
+## 自定义 taxonomy 字段示例
+
+新增 taxonomy 字段时，按主题写法拆成新增表单、编辑表单、保存三段：
+
+```php
+function zib_docs_term_badge_add_field()
+{
+    echo '<div class="form-field">';
+    echo '<label for="docs_badge">' . esc_html__('角标文字', 'zib_language') . '</label>';
+    echo '<input type="text" name="docs_badge" id="docs_badge" value="">';
+    echo '</div>';
+}
+add_action('category_add_form_fields', 'zib_docs_term_badge_add_field');
+
+function zib_docs_term_badge_edit_field($term)
+{
+    $badge = zib_get_term_meta($term->term_id, 'docs_badge', true);
+
+    echo '<tr class="form-field">';
+    echo '<th scope="row"><label for="docs_badge">' . esc_html__('角标文字', 'zib_language') . '</label></th>';
+    echo '<td><input type="text" name="docs_badge" id="docs_badge" value="' . esc_attr($badge) . '"></td>';
+    echo '</tr>';
+}
+add_action('category_edit_form_fields', 'zib_docs_term_badge_edit_field');
+
+function zib_docs_term_badge_save($term_id)
+{
+    if (!isset($_POST['docs_badge'])) {
+        return;
+    }
+
+    $badge = sanitize_text_field(wp_unslash($_POST['docs_badge']));
+    zib_update_term_meta($term_id, 'docs_badge', $badge);
+}
+add_action('create_term', 'zib_docs_term_badge_save');
+add_action('edit_term', 'zib_docs_term_badge_save');
+```
+
+注意：`create_term` 和 `edit_term` 会被多个 taxonomy 触发。如果字段只属于某个 taxonomy，需要结合 `$_POST['taxonomy']` 或 Hook 到具体 taxonomy 的保存流程中做限制。
+
+## 扩展建议
+
+| 需求             | 推荐入口                                                                 |
+| ---------------- | ------------------------------------------------------------------------ |
+| 后台顶部提醒     | `admin_notices`                                                          |
+| 后台列表增加筛选 | `restrict_manage_*`                                                      |
+| 分类新增字段     | `{taxonomy}_add_form_fields`、`{taxonomy}_edit_form_fields`、`edit_term` |
+| 分类列表新增列   | `manage_edit-{taxonomy}_columns`、`manage_{taxonomy}_custom_column`      |
+| 快速编辑字段     | `quick_edit_custom_box`                                                  |
+| 菜单项字段       | `wp_nav_menu_item_custom_fields` 或 CSF 菜单项配置                       |
+| 用户资料字段     | `profile-options.php`、`show_user_profile`、`edit_user_profile`          |
+| 编辑器区块       | `admin_init`、`register_block_type`、`block_categories_all`              |
+| 后台资源         | `admin_enqueue_scripts`                                                  |
+
+## 风险清单
+
+- 不要把 CSF 设置页和 WordPress 后台列表 Hook 混为一谈。
+- 不要在所有后台页面加载只服务某一页的脚本。
+- 不要在 taxonomy 保存中直接信任 `$_POST`，要清洗并限制目标 taxonomy。
+- 不要把后台完整错误栈、服务器路径、SQL、密钥输出到 `admin_notices`。
+- 不要绕过主题已有 meta key：分类封面用 `cover_image`，分类 SEO 用 `term_seo`。
+- 不要让菜单标题 HTML 承载复杂业务数据，应使用菜单项配置字段。
+- 不要在评论列表输出过大的图片、视频或前台交互组件。

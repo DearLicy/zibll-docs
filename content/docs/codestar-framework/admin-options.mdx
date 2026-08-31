@@ -1,0 +1,352 @@
+---
+title: 后台设置菜单
+description: 按子比主题源码拆解 CSF 后台设置页、section 分层、字段保存、性能优化和读取方式。
+---
+
+## 入口文件
+
+子比主题的全站设置页由 `inc/options/admin-options.php` 注册，入口函数是：
+
+```php
+function zib_csf_admin_options()
+```
+
+它不会在 `functions.php` 里直接写字段。主题启动链路是：
+
+```txt
+functions.php
+inc/inc.php
+inc/options/options.php
+inc/options/admin-options.php
+```
+
+`inc/options/options.php` 只负责加载后台设置相关文件，并启用子比需要的图标版本：
+
+```php
+zib_require(array(
+    'inc/options/options-module',
+    'inc/options/upgrade',
+));
+
+if (is_admin()) {
+    zib_require(array(
+        'admin-options',
+        'metabox-options',
+        'profile-options',
+        'action',
+    ), false, 'inc/options/');
+}
+
+add_filter('csf_fa4', '__return_true');
+```
+
+因此读后台设置页时，不要只看一个 `CSF::createOptions()`。要把 `options.php`、`admin-options.php`、`options-module.php` 和 `dependent.php` 一起看。
+
+## Prefix 与菜单
+
+主题后台设置的唯一前缀是：
+
+```php
+$prefix = 'zibll_options';
+```
+
+设置页创建代码在 `zib_csf_admin_options()` 前半段：
+
+```php
+CSF::createOptions($prefix, array(
+    'menu_title'         => __('zibll主题设置', 'zib_language'),
+    'menu_slug'          => 'zibll_options',
+    'framework_title'    => __('子比主题', 'zib_language'),
+    'show_in_customizer' => false,
+    'save_defaults'      => !$no_create,
+    'footer_text'        => sprintf(__('更优雅的wordpress主题-Zibll主题 V%s', 'zib_language'), wp_get_theme()['Version']),
+    'footer_credit'      => '<i class="fa fa-fw fa-heart-o" aria-hidden="true"></i> ',
+    'theme'              => 'light',
+));
+```
+
+这里有三个必须记住的点：
+
+| 配置            | 子比写法        | 影响                                                |
+| --------------- | --------------- | --------------------------------------------------- |
+| `$prefix`       | `zibll_options` | 最终保存到 `wp_options.option_name = zibll_options` |
+| `menu_slug`     | `zibll_options` | 后台访问地址和 Ajax 保存都围绕这个 slug             |
+| `save_defaults` | `!$no_create`   | 非设置页不强行创建大量默认值                        |
+
+主题设置不要用 `get_option('zibll_options')` 到处散读，前台统一走 `_pz()`。
+
+## 一级分组
+
+子比主题先注册一级 section，让左侧菜单形成业务域：
+
+```php
+CSF::createSection($prefix, array(
+    'id'    => 'basic',
+    'title' => __('全局&功能', 'zib_language'),
+    'icon'  => 'fa fa-fw fa-bullseye',
+));
+
+CSF::createSection($prefix, array(
+    'id'    => 'page',
+    'title' => __('页面&显示', 'zib_language'),
+    'icon'  => 'fa fa-fw fa-calendar-check-o',
+));
+
+CSF::createSection($prefix, array(
+    'id'    => 'post',
+    'title' => __('文章&列表', 'zib_language'),
+    'icon'  => 'fa fa-fw fa-map-o',
+));
+
+CSF::createSection($prefix, array(
+    'id'    => 'user',
+    'title' => __('用户&互动', 'zib_language'),
+    'icon'  => 'fa fa-fw fa-user-o',
+));
+
+CSF::createSection($prefix, array(
+    'id'    => 'pay',
+    'title' => __('支付&付费', 'zib_language'),
+    'icon'  => 'fa fa-fw fa-jpy',
+));
+```
+
+源码里还包括 `cap`、`shop`、`forum`、`over` 等一级分组。一级 section 通常只做目录，不放字段。真正的配置放在带 `parent` 的子 section 中。
+
+## 子 Section
+
+子 section 用 `parent` 绑定到一级分组。比如 LOGO 图像属于 `basic`：
+
+```php
+CSF::createSection($prefix, array(
+    'parent'      => 'basic',
+    'title'       => __('LOGO图像', 'zib_language'),
+    'icon'        => 'fa fa-fw fa-image',
+    'description' => '',
+    'fields'      => array(
+        array(
+            'id'      => 'logo',
+            'type'    => 'upload',
+            'title'   => __('LOGO', 'zib_language'),
+            'library' => 'image',
+            'preview' => true,
+        ),
+    ),
+));
+```
+
+子比设置页的组织习惯是：
+
+| 一级分组 | 典型子 section                                                                   |
+| -------- | -------------------------------------------------------------------------------- |
+| `basic`  | LOGO 图像、SEO 优化、常用功能、显示布局、搜索功能、Email 邮件、自定义代码        |
+| `page`   | 顶部导航栏、顶部多功能组件、底部页脚、首页配置、分类页面、标签页面、用户主页     |
+| `post`   | 文章列表、列表缩略图、文章页面、高级筛选、文章功能、评论设置、前台投稿           |
+| `user`   | 注册登录、第三方登录、消息通知、禁封举报、身份认证、用户徽章、用户等级、签到奖励 |
+| `pay`    | 知识付费、余额充值、VIP 会员、创作分成、推广返佣、收款接口                       |
+| `forum`  | 社区论坛相关开关、版块、话题、权限和展示配置                                     |
+| `over`   | 系统工具、网站安全、IP 归属地、API 内容审核、文档模式                            |
+
+这个分层就是文档分类和后台配置设计的参考：先按业务域分，再按页面或功能切分。
+
+## 字段结构
+
+字段统一写在 `fields` 数组里。子比保留 Codestar 的字段格式，同时大量使用 `CFS_Module` 生成复合字段：
+
+```php
+array(
+    'id'      => 'theme_mode',
+    'type'    => 'radio',
+    'title'   => __('主题模式', 'zib_language'),
+    'inline'  => true,
+    'default' => 'white',
+    'options' => array(
+        'white' => __('亮色模式', 'zib_language'),
+        'dark'  => __('深色模式', 'zib_language'),
+    ),
+)
+```
+
+常见字段属性：
+
+| 属性         | 用途                                                 |
+| ------------ | ---------------------------------------------------- |
+| `id`         | 保存到 `zibll_options` 的键名                        |
+| `type`       | 字段类型，例如 `switcher`、`text`、`upload`、`group` |
+| `title`      | 后台字段标题                                         |
+| `subtitle`   | 标题下方补充说明                                     |
+| `desc`       | 字段底部说明                                         |
+| `default`    | 默认值                                               |
+| `options`    | 选择项、调色板、分组子字段等                         |
+| `dependency` | 控制字段显示隐藏                                     |
+| `sanitize`   | 是否让 CSF 清洗字段值                                |
+
+子比源码里字段数量很大，不建议复制整段。读法是先找 section 标题，再看字段 `id`，最后用 `_pz('字段id')` 搜索前台读取位置。
+
+## 读取设置
+
+`_pz()` 在 `inc/dependent.php` 中定义：
+
+```php
+function _pz($name, $default = false, $subname = '')
+{
+    static $options = null;
+    if ($options === null) {
+        $options = get_option('zibll_options');
+    }
+
+    if (isset($options[$name])) {
+        if ($subname) {
+            return isset($options[$name][$subname]) ? $options[$name][$subname] : $default;
+        } else {
+            return $options[$name];
+        }
+    }
+    return $default;
+}
+```
+
+读取普通字段：
+
+```php
+$post_article_s = _pz('post_article_s');
+$ajax_trigger   = _pz('ajax_trigger', __('加载更多', 'zib_language'));
+```
+
+读取数组子字段：
+
+```php
+$class = _pz('checkin_header_user_option', 'c-yellow', 'class');
+$text  = _pz('checkin_header_user_option', __('签到领取今日奖励', 'zib_language'), 'text');
+```
+
+读取列表字段：
+
+```php
+$buttons = _pz('translate_buttons', array());
+foreach ($buttons as $button) {
+    $language = !empty($button['language']) ? $button['language'] : '';
+}
+```
+
+## 写入设置
+
+主题提供 `_spz()` 单独更新某个设置键：
+
+```php
+function _spz($name, $value)
+{
+    $get_option        = get_option('zibll_options');
+    $get_option        = is_array($get_option) ? $get_option : array();
+    $get_option[$name] = $value;
+    return update_option('zibll_options', $get_option);
+}
+```
+
+后台设置页里的大部分字段由 CSF 保存。业务代码需要主动修改主题设置时再用 `_spz()`，不要整包覆盖 `zibll_options`，否则容易丢掉其他字段。
+
+## `$no_create` 性能判断
+
+`admin-options.php` 体量很大，所以主题用 `$no_create` 判断当前请求是否真的需要完整创建字段。核心思路是：
+
+```php
+$no_create = (
+    (wp_doing_ajax() && (empty($_POST['action']) || !strstr($_POST['action'], 'csf_' . $prefix)))
+    ||
+    (!wp_doing_ajax() && (empty($_GET['page']) || $_GET['page'] !== $prefix))
+);
+```
+
+作用：
+
+- 非 `zibll_options` 设置页，不创建全部默认值。
+- 非当前 CSF Ajax 保存请求，不执行大量字段保存逻辑。
+- 后台其它页面加载更轻。
+
+如果你在主题内新增大量设置，也要沿用这个思路。小字段可以直接写，大型字段组要避免每个后台页面都初始化。
+
+## 字段分组与性能边界
+
+子比设置页不是按源码书写顺序直接渲染。`inc/csf-framework/classes/admin-options.class.php` 构造时会先预处理三组结构：
+
+```php
+$this->pre_tabs     = $this->pre_tabs($this->sections);
+$this->pre_fields   = $this->pre_fields($this->sections);
+$this->pre_sections = $this->pre_sections($this->sections);
+```
+
+这三组结构对应不同用途：
+
+| 结构           | 来源                                          | 影响                               |
+| -------------- | --------------------------------------------- | ---------------------------------- |
+| `pre_tabs`     | 一级 section 加子 section，按 `priority` 排序 | 左侧菜单、后台子菜单、`#tab=` 锚点 |
+| `pre_fields`   | 所有 section 里的 `fields` 平铺收集           | 保存、导入、重置全部、字段校验     |
+| `pre_sections` | 带 `ptitle` 的子 section 展开                 | 重置当前分区、表单区块渲染         |
+
+因此新增字段时要先选对业务域，再放进正确的子 section。字段放错位置不只是后台菜单不好看，还可能导致搜索字段、重置分区、子菜单锚点和保存字段集错位。
+
+实践上可以按这个规则判断：
+
+1. 一级 section 只做业务域，例如 `basic`、`page`、`post`、`user`、`pay`、`shop`、`forum`、`over`。
+2. 子 section 才放具体 `fields`，标题要能对应后台页面和用户配置路径。
+3. 影响链接结构、搜索筛选、徽章、用户中心 Tab、支付、商城或论坛权限的字段，保存后还要检查是否需要挂 `csf_zibll_options_saved`、`csf_zibll_options_save_after` 或升级迁移任务。
+4. 大型字段组不要绕过 `$no_create` 性能保护；字段注册阶段不要执行远程请求、全表扫描或昂贵统计。
+
+如果只是新增一个前台展示开关，通常只需要字段 + `_pz()` 读取；如果字段会改变 rewrite、缓存索引、订单状态、用户资产、内容审核或历史数据结构，就要把保存 Hook、缓存清理和升级脚本一起设计。
+
+## 保存 Hook
+
+子比改写过 `inc/csf-framework/classes/admin-options.class.php`，保存流程里有可用 Hook：
+
+```php
+do_action("csf_{$unique}_save_before", $request, $this);
+do_action("csf_{$unique}_save_after", $request, $this);
+```
+
+对 `zibll_options` 来说就是：
+
+```php
+add_action('csf_zibll_options_save_before', 'zib_before_save_options', 10, 2);
+add_action('csf_zibll_options_save_after', 'zib_after_save_options', 10, 2);
+```
+
+适合处理缓存刷新、衍生数据更新、外部资源同步。不要在这里输出 HTML，Ajax 保存会直接受到影响。
+
+## HTML 保存
+
+子比对原版 CSF 的保存行为做过调整，部分字段允许保存 HTML。结果是更灵活，但也要求读取和输出时自己判断上下文：
+
+```php
+$html = _pz('footer_html');
+echo wp_kses_post($html);
+```
+
+普通文本：
+
+```php
+echo esc_html(_pz('custom_text'));
+```
+
+URL：
+
+```php
+echo esc_url(_pz('custom_url'));
+```
+
+属性：
+
+```php
+echo esc_attr(_pz('custom_class'));
+```
+
+## 排查路径
+
+后台设置相关问题按这个顺序查：
+
+1. `inc/options/options.php` 是否在后台加载了 `admin-options.php`。
+2. `class_exists('CSF')` 是否为 true。
+3. `$prefix`、`menu_slug`、访问地址是否都是 `zibll_options`。
+4. 字段是否在正确子 section 的 `fields` 数组中，`id` 是否唯一。
+5. 保存后 `wp_options.zibll_options` 中是否有对应键。
+6. 前台是否用 `_pz()` 读取，而不是读错 option。
+7. 如果是 Ajax 保存失败，看 `admin-ajax.php` 返回值和 PHP 错误日志。

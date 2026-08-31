@@ -1,0 +1,68 @@
+---
+title: 开发地图
+description: 按需求类型选择子主题、插件、Hook、Ajax、模板覆盖或业务模块扩展。
+---
+
+## 先确认需求属于哪一类
+
+子比主题的功能面很宽：文章展示、用户中心、论坛、商城、支付、社交登录、消息通知、后台配置、小工具和 AI 能力都在同一个主题体系里。开始写代码前，先把需求放到正确的扩展层级，后续维护会轻很多。
+
+| 你要做什么                     | 推荐入口           | 典型文件或文档                                                           |
+| ------------------------------ | ------------------ | ------------------------------------------------------------------------ |
+| 修改页面结构或局部展示         | 子主题模板覆盖     | `/template/*`、`/inc/functions/*/page/*`                                 |
+| 修改已有流程的结果             | Filter             | `apply_filters(...)` 所在调用点                                          |
+| 在流程节点追加动作             | Action             | `do_action(...)` 所在调用点                                              |
+| 新增前端按钮、弹窗、分页、上传 | Ajax 动作          | `/action/*`、`/inc/functions/*/action/*`                                 |
+| 新增后台配置项或 Meta          | Codestar Framework | `/inc/options/*`、`/inc/codestar-framework/*`                            |
+| 新增独立业务模块               | 插件               | 插件入口、后台设置、Hook 注册、Ajax                                      |
+| 改登录注册、绑定邮箱、用户中心 | 用户系统扩展       | `/action/sign_register.php`、`/action/user.php`、`/inc/functions/user/*` |
+| 改论坛版块、帖子、话题、标签   | 论坛模块扩展       | `/inc/functions/bbs/*`                                                   |
+| 改商城商品、购物车、售后、物流 | 商城模块扩展       | `/inc/functions/shop/*`                                                  |
+| 改支付、订单、下载、余额、积分 | Zibpay 扩展        | `/zibpay/functions/*`                                                    |
+
+## 子主题还是插件
+
+只影响当前站点外观、结构和少量展示逻辑时，用子主题。比如改文章页结构、增加一个展示片段、覆盖评论模板、调整用户中心某个区块。
+
+功能需要长期维护、复用、开关控制、后台配置、独立数据表、定时任务、第三方接口、订单同步或资产变动时，用插件。比如新增支付渠道、同步 CRM、发放站内权益、增加投稿审核流程、扩展用户认证。
+
+## Hook 还是模板覆盖
+
+优先找 Hook。Hook 的升级成本低，能在不复制整份模板的情况下追加内容或改变结果。只有页面结构需要大幅改变，或者主题没有提供合适的 Hook 时，再考虑模板覆盖。
+
+模板覆盖前要做三件事：
+
+1. 找到原模板和调用链，确认它是不是当前页面真实使用的模板。
+2. 记录原模板版本和主题版本，方便后续升级对比。
+3. 保留原模板中的权限、分页、懒加载、转义、nonce 和状态判断。
+
+## Ajax 还是 REST
+
+子比主题大量交互走 WordPress Ajax，也就是 `admin-ajax.php`。例如登录注册、资料修改、上传、评论、关注、收藏、支付检查、论坛操作、商城购物车等。主题里的 REST 相关内容很少，主要是补充 WordPress 官方搜索 REST 的查询参数，不应把它当成一套开放接口平台。
+
+新增站内交互时，优先沿用 WordPress Ajax 模式；需要给第三方系统稳定调用时，再单独设计 REST 或 webhook，并把签名、权限、频率限制和日志一起设计进去。
+
+## 业务模块的扩展顺序
+
+复杂需求不要直接改最深层函数。建议按这个顺序排查：
+
+1. 看后台设置里是否已有开关或配置。
+2. 看 Codestar Meta 里是否已有字段。
+3. 搜索相关页面模板和渲染函数。
+4. 搜索 `apply_filters` 和 `do_action`。
+5. 搜索 Ajax 动作名和前端触发点。
+6. 阅读业务模块入口文件，确认功能是否启用。
+7. 仍无法扩展时，再考虑插件封装或模板覆盖。
+
+## 常用搜索命令
+
+```powershell
+rg -n "apply_filters\\(|do_action\\(" C:\Users\Administrator\Desktop\zibll -g "*.php" -g "!vendor/**"
+rg -n "wp_ajax_|wp_ajax_nopriv_" C:\Users\Administrator\Desktop\zibll -g "*.php" -g "!vendor/**"
+rg -n "add_shortcode|register_post_type|register_taxonomy" C:\Users\Administrator\Desktop\zibll -g "*.php" -g "!vendor/**"
+rg -n "zib_require\\(" C:\Users\Administrator\Desktop\zibll -g "*.php"
+```
+
+## 判断扩展是否合格
+
+一个合格的扩展通常满足这些条件：能随主题升级继续工作；出错时可以单独禁用；不暴露敏感信息；不绕过主题权限链路；关键写入有日志；涉及订单和资产的逻辑具备幂等性；前端交互失败时有明确提示。

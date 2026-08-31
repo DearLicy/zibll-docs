@@ -1,0 +1,268 @@
+---
+title: SEO 与百度资源提交
+description: 梳理子比主题 SEO 配置、百度自动推送、普通收录、快速收录、提交结果缓存、熊掌号 JSON-LD 和二次扩展边界。
+---
+
+子比主题的 SEO 能力不只是输出 `keywords` 和 `description`。与百度相关的链路分成三类：前台页脚加载百度自动推送脚本、保存文章或分类时主动调用百度资源提交接口、移动端旧熊掌号关注组件和 JSON-LD 数据。
+
+二次开发时要先分清这三件事。自动推送 JS 负责当前访问 URL；主动提交负责后台保存后的指定 URL；熊掌号是旧百度能力，主题源码仍保留，但后台也提示不再推荐作为新项目核心依赖。
+
+## 源码入口
+
+| 文件                              | 作用                                                                  |
+| --------------------------------- | --------------------------------------------------------------------- |
+| `inc/options/admin-options.php`   | 注册 SEO、百度自动推送、普通收录、快速收录、Token、搜索结果图片等设置 |
+| `inc/functions/zib-footer.php`    | 根据 `zib_baidu_push_js` 在 `wp_footer` 输出百度自动推送脚本          |
+| `inc/functions/zib-theme.php`     | 保存文章、页面、论坛帖子、商品和分类时调用百度资源提交接口            |
+| `inc/options/metabox-options.php` | 在内容和分类编辑页显示百度资源提交结果与“重新提交”勾选项              |
+| `inc/functions/zib-baidu.php`     | 输出熊掌号脚本、关注栏和 JSON-LD 数据                                 |
+| `inc/dependent.php`               | 把 `xzh_tui_back` 列入主题可识别的 post meta / term meta              |
+
+## 配置项
+
+SEO 设置在主题后台的 SEO 优化分组中，关键字段如下：
+
+| 字段                  | 用途                                            |
+| --------------------- | ----------------------------------------------- |
+| `keywords`            | 站点默认 SEO 关键字                             |
+| `description`         | 站点默认 SEO 描述                               |
+| `zib_baidu_push_js`   | 是否在前台加载百度自动推送脚本                  |
+| `xzh_post_on`         | 是否开启百度普通收录主动提交                    |
+| `xzh_post_daily_push` | 是否开启百度快速收录主动提交                    |
+| `xzh_post_token`      | 百度搜索资源平台的提交 Token，只填写 Token 本身 |
+| `seo_list_img_s`      | 是否优化搜索引擎结果图片                        |
+| `seo_list_img`        | 没有页面图像时的默认搜索结果图片                |
+
+文章、页面和分类还可以有独立 SEO meta。百度资源提交结果不保存在普通 SEO 字段里，而是保存到 `xzh_tui_back`。
+
+## 全站自动推送 JS
+
+开启 `zib_baidu_push_js` 后，主题在页脚挂载：
+
+```php
+if (_pz('zib_baidu_push_js')) {
+    add_action('wp_footer', 'zib_baidu_push_js', 98);
+}
+```
+
+`zib_baidu_push_js()` 根据当前协议选择百度脚本：
+
+| 当前协议 | 脚本                                         |
+| -------- | -------------------------------------------- |
+| HTTPS    | `https://zz.bdstatic.com/linksubmit/push.js` |
+| HTTP     | `http://push.zhanzhang.baidu.com/push.js`    |
+
+这个功能不需要 Token，也不会把提交结果写回主题数据库。排查时看前台 HTML 中是否有 `<!--baidu_push_js-->`，再看浏览器 Network 是否加载百度脚本。
+
+## 保存内容后的主动提交
+
+当满足下面条件时，主题会注册保存 Hook：
+
+```php
+if ((_pz('xzh_post_on') || _pz('xzh_post_daily_push')) && _pz('xzh_post_token')) {
+    add_action('save_post', 'zib_post_baidu_resource_submission');
+    add_action('saved_term', 'zib_term_baidu_resource_submission');
+}
+```
+
+内容保存流程：
+
+1. `zib_post_baidu_resource_submission($post_id)` 只处理已发布内容。
+2. 勾选 `xzh_post_resubmit` 时，先把 `xzh_tui_back` 清空。
+3. 如果历史结果里 `normal_push` 已成功，直接跳过。
+4. 使用 `get_permalink($post_id)` 得到 URL。
+5. 调用 `zib_baidu_resource_submission($plink)`。
+6. 把结果写入 `zib_update_post_meta($post_id, 'xzh_tui_back', $baidu)`。
+
+分类保存流程类似，但写入 `zib_update_term_meta($term_id, 'xzh_tui_back', $baidu)`。分类 Hook 使用 `saved_term`，所以分类、标签、话题、版块分类、商城分类和优惠活动等 taxonomy 都可能触发结果面板。
+
+## 接口调用结构
+
+主动提交核心函数是 `zib_baidu_resource_submission($url)`。它允许传单个 URL，也允许传 URL 数组：
+
+```php
+function zib_baidu_resource_submission($url)
+{
+    if (!is_array($url)) {
+        $urls   = array();
+        $urls[] = $url;
+    } else {
+        $urls = $url;
+    }
+
+    if (!_pz('xzh_post_on') || !_pz('xzh_post_token') || !$urls) {
+        return;
+    }
+}
+```
+
+这里有一个重要边界：虽然保存 Hook 在“普通收录或快速收录任一开启”时注册，但提交函数内部仍要求 `xzh_post_on` 为真。因此实际使用时不要只开启快速收录，普通收录开关也要开启，否则函数会提前返回。
+
+普通收录请求：
+
+```php
+$api = 'http://data.zz.baidu.com/urls?site=' . home_url() . '&token=' . _pz('xzh_post_token');
+$response = $http->timeout(5000)->post($api, implode("\n", $urls));
+```
+
+快速收录请求在普通收录接口后追加 `type=daily`：
+
+```php
+if (_pz('xzh_post_daily_push')) {
+    $api .= '&type=daily';
+    $response = $http->timeout($timeout)->post($api, implode("\n", $urls));
+}
+```
+
+结果结构会写入：
+
+| 键              | 含义             |
+| --------------- | ---------------- |
+| `normal_push`   | 普通收录是否成功 |
+| `normal_result` | 普通收录接口返回 |
+| `daily_push`    | 快速收录是否成功 |
+| `daily_result`  | 快速收录接口返回 |
+| `update_time`   | 本次提交时间     |
+
+## 结果面板
+
+编辑文章、页面、版块帖子、商城商品和分类时，主题会显示“百度资源提交”侧栏面板。这个面板由 CSF 注册：
+
+```php
+CSF::createMetabox('baidu_resource_submission', array(
+    'title'     => __('百度资源提交', 'zib_language'),
+    'post_type' => array('post', 'page', 'plate', 'forum_post', 'shop_product'),
+    'context'   => 'side',
+    'data_type' => 'unserialize',
+));
+```
+
+分类侧的 taxonomy 面板包含：
+
+```php
+CSF::createTaxonomyOptions('term_baidu_resource_submission', array(
+    'title'     => __('百度资源提交', 'zib_language'),
+    'taxonomy'  => array('category', 'post_tag', 'topics', 'plate_cat', 'forum_topic', 'forum_tag', 'shop_cat', 'shop_tag', 'shop_discount'),
+    'data_type' => 'unserialize',
+));
+```
+
+面板只展示结果和“重新提交”勾选项，不负责提交按钮。真正提交发生在保存文章或保存分类时。
+
+## 重试边界
+
+`xzh_tui_back` 是主动提交的缓存结果。源码会在 `normal_push` 成功后跳过后续提交：
+
+```php
+$ok = zib_get_post_meta($post_id, 'xzh_tui_back', true);
+
+if (!empty($ok['normal_push'])) {
+    return;
+}
+```
+
+这意味着：
+
+| 场景                       | 结果                                   |
+| -------------------------- | -------------------------------------- |
+| 普通收录成功、快速收录失败 | 后续保存不会自动重试快速收录           |
+| 普通收录失败               | 后续保存会继续尝试                     |
+| 勾选重新提交               | 清空 `xzh_tui_back` 后重新提交         |
+| 只开快速收录、不开普通收录 | 保存 Hook 会注册，但提交函数会提前返回 |
+
+如果要做更细的重试策略，建议另写扩展逻辑读取 `xzh_tui_back`，不要直接改主题函数。
+
+## 提交触发与缓存矩阵
+
+百度资源提交只发生在保存节点，不是所有前台访问都会主动提交。排查“为什么没提交”时，先按对象类型和缓存状态定位：
+
+| 对象或页面                                     | 触发点                       | URL 来源                              | 结果保存                 | 常见误区                                          |
+| ---------------------------------------------- | ---------------------------- | ------------------------------------- | ------------------------ | ------------------------------------------------- |
+| 已发布文章、页面、版块、论坛帖、商品           | `save_post`                  | `get_permalink($post_id)`             | post meta `xzh_tui_back` | 草稿、待审、自动保存不会提交                      |
+| 分类、标签、话题、版块分类、商城分类、优惠活动 | `saved_term`                 | `get_term_link($term_id)`             | term meta `xzh_tui_back` | taxonomy 面板有结果展示，但提交仍发生在保存分类时 |
+| 普通收录成功的内容                             | 下次保存前先读 `normal_push` | 不再重新请求                          | 继续沿用旧结果           | 快速收录失败不会因为再次保存自动重试              |
+| 勾选“重新提交”                                 | 保存前清空 `xzh_tui_back`    | 重新计算 URL                          | 覆盖旧结果               | 只勾选不保存不会触发                              |
+| 搜索页、用户中心、购物车、登录页、投稿页       | 无主动提交 Hook              | 当前访问 URL 只可能被自动推送 JS 处理 | 不写 `xzh_tui_back`      | 动态页不应塞进保存 Hook 批量提交                  |
+| 自动推送 JS                                    | `wp_footer` 前台访问         | 浏览器当前 URL                        | 不保存结果               | 它不需要 Token，也不会显示在后台结果面板          |
+
+源码里保存 Hook 的注册条件是“普通收录或快速收录开启，并填写 Token”，但 `zib_baidu_resource_submission()` 内部仍要求 `xzh_post_on` 为真。所以实际启用快速收录时，普通收录开关也要一起打开；否则保存 Hook 可能存在，提交函数却提前返回。
+
+## 熊掌号旧能力
+
+`inc/functions/zib-baidu.php` 保留了熊掌号相关函数：
+
+| 函数                    | 用途                                 |
+| ----------------------- | ------------------------------------ |
+| `tb_xzh_on()`           | 判断熊掌号是否启用，且仅移动端返回真 |
+| `tb_xzh_head_var()`     | 输出百度移动端 SDK                   |
+| `tb_xzh_render_head()`  | 输出吸顶关注栏                       |
+| `tb_xzh_render_body()`  | 输出文章段落间关注栏                 |
+| `tb_xzh_render_tail()`  | 输出底部关注栏                       |
+| `tb_xzh_jsonld()`       | 在 `wp_head` 输出 JSON-LD            |
+| `tb_xzh_post_excerpt()` | 从摘要或正文提取描述                 |
+| `tb_xzh_post_imgs()`    | 从正文取前几张图片                   |
+
+JSON-LD 挂在 `wp_head`：
+
+```php
+add_action('wp_head', 'tb_xzh_jsonld', 20, 1);
+```
+
+只有开启 `xzh_on`、配置 `xzh_appid`，并且当前是文章或页面且对应 JSON-LD 开关开启时才输出。图片来自正文 `<img>`，不是特色图兜底；正文没有图片时 `images` 可能为空。
+
+## 扩展外部索引提交
+
+主题没有给百度提交函数提供 Filter。如果要把同样的保存节点同步到其他搜索服务，推荐新增独立 meta，避免污染 `xzh_tui_back`。
+
+```php
+function zib_docs_submit_extra_search_index($post_id)
+{
+    $post = get_post($post_id);
+    if (empty($post->ID) || 'publish' !== $post->post_status) {
+        return;
+    }
+
+    $old = zib_get_post_meta($post_id, 'docs_extra_index_back', true);
+    if (!empty($old['success'])) {
+        return;
+    }
+
+    $url = get_permalink($post_id);
+    if (!$url) {
+        return;
+    }
+
+    $result = array(
+        'success'     => true,
+        'url'         => $url,
+        'update_time' => current_time('Y-m-d H:i:s'),
+    );
+
+    zib_update_post_meta($post_id, 'docs_extra_index_back', $result);
+}
+add_action('save_post', 'zib_docs_submit_extra_search_index', 30);
+```
+
+如果要支持分类，单独挂 `saved_term`，并使用 `zib_get_term_meta()` / `zib_update_term_meta()` 保存独立结果。不要把第三方索引结果塞进 `xzh_tui_back`，否则后台“百度资源提交”面板会误判。
+
+## 排查清单
+
+| 问题                                               | 检查点                                                                        |
+| -------------------------------------------------- | ----------------------------------------------------------------------------- |
+| 前台没有自动推送脚本                               | `zib_baidu_push_js` 是否开启、页面是否执行 `wp_footer()`、缓存是否输出旧 HTML |
+| 保存后没有结果面板                                 | `xzh_post_on` 或 `xzh_post_daily_push` 是否开启、`xzh_post_token` 是否填写    |
+| 面板一直显示“发布、更新后刷新页面后可查看提交结果” | 内容是否已发布、是否保存过、`xzh_tui_back` 是否写入                           |
+| 快速收录没提交                                     | 是否同时开启普通收录，源码内部要求 `xzh_post_on` 为真                         |
+| 普通收录成功后快速收录不再重试                     | 勾选“重新提交”后再次保存                                                      |
+| 百度返回站点不匹配                                 | 搜索资源平台站点是否等于 `home_url()`                                         |
+| 批量保存很慢                                       | 主动提交是保存时同步 HTTP 请求，超时为 5 秒，批量操作前要评估外部接口耗时     |
+
+## 开发边界
+
+- 自动推送 JS、主动提交接口和熊掌号 JSON-LD 是三套能力，不要混为一个开关。
+- `xzh_tui_back` 是百度提交结果缓存，不适合写入其他搜索引擎结果。
+- 快速收录依赖普通收录开关，这是当前源码行为，扩展时要按实际判断。
+- 保存 Hook 没有 nonce 专门校验，它依赖 WordPress 后台保存流程。新增前台提交入口时必须自己校验登录态、权限和 nonce。
+- 熊掌号能力是历史兼容功能，新项目优先保证标准 SEO、结构化数据、站点地图和搜索平台提交。
+
+本页根据 `inc/options/admin-options.php`、`inc/options/metabox-options.php`、`inc/functions/zib-footer.php`、`inc/functions/zib-theme.php`、`inc/functions/zib-baidu.php`、`inc/dependent.php` 蒸馏整理。

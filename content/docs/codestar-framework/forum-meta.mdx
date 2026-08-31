@@ -1,0 +1,269 @@
+---
+title: 论坛和分类 Meta
+description: 按子比论坛源码说明 forum_post、plate、forum_extend、forum_allow_view、plate_extend 和论坛 taxonomy 配置。
+---
+
+## 文件位置
+
+论坛后台字段主要在：
+
+```txt
+inc/functions/bbs/admin/meta-option.php
+inc/functions/bbs/admin/option.php
+inc/functions/bbs/widgets/
+```
+
+`meta-option.php` 在主题加载后注册：
+
+```php
+add_action('after_setup_theme', 'zib_bbs_admin_extend_metabox_csf');
+```
+
+函数内部先拿论坛对象：
+
+```php
+$zib_bbs = zib_bbs();
+```
+
+很多标题会使用 `$zib_bbs->posts_name`、`$zib_bbs->plate_name`，所以文档里不要把这些对象写死成固定中文。主题允许通过配置改变显示名称。
+
+## 论坛对象
+
+论坛模块涉及两类 post type：
+
+| Post Type    | 含义     | 典型配置                                 |
+| ------------ | -------- | ---------------------------------------- |
+| `forum_post` | 论坛帖子 | 所属板块、置顶、精华、帖子类型、阅读权限 |
+| `plate`      | 论坛板块 | 板块属性、权限、统计、展示配置           |
+
+涉及 taxonomy：
+
+| Taxonomy      | 含义     |
+| ------------- | -------- |
+| `plate_cat`   | 板块分类 |
+| `forum_topic` | 话题     |
+| `forum_tag`   | 标签     |
+
+## `forum_extend`
+
+论坛帖子侧栏配置使用：
+
+```php
+CSF::createMetabox('forum_extend', array(
+    'title'     => sprintf(__('%s选项', 'zib_language'), $zib_bbs->posts_name),
+    'post_type' => array('forum_post'),
+    'context'   => 'side',
+    'priority'  => 'high',
+    'data_type' => 'unserialize',
+));
+```
+
+字段包括：
+
+| 字段       | 用途                                    |
+| ---------- | --------------------------------------- |
+| `plate_id` | 选择所属板块，查询 `post_type => plate` |
+| `topping`  | 内容置顶级别                            |
+| `essence`  | 是否精华                                |
+| `bbs_type` | 帖子类型                                |
+| `views`    | 阅读量                                  |
+
+读取：
+
+```php
+$forum_extend = get_post_meta($post_id, 'forum_extend', true);
+$forum_extend = is_array($forum_extend) ? $forum_extend : array();
+
+$plate_id = !empty($forum_extend['plate_id']) ? (int) $forum_extend['plate_id'] : 0;
+$essence  = !empty($forum_extend['essence']);
+```
+
+如果字段也被其它业务函数封装读取，优先使用论坛模块已有函数。不要重复写查询逻辑。
+
+## `forum_allow_view`
+
+论坛帖子阅读权限使用独立 metabox：
+
+```php
+CSF::createMetabox('forum_allow_view', array(
+    'title'     => __('阅读权限', 'zib_language'),
+    'post_type' => array('forum_post'),
+    'context'   => 'side',
+    'priority'  => 'high',
+    'data_type' => 'unserialize',
+));
+```
+
+字段由模块函数生成：
+
+```php
+CSF::createSection('forum_allow_view', array(
+    'fields' => array(
+        zib_bbs_admin_allow_view_csf(false),
+        zib_bbs_admin_allow_view_csf(true),
+        array(
+            'dependency' => array('allow_view', 'any', 'pay,points'),
+            'title'      => __('支付参数', 'zib_language'),
+            'id'         => 'posts_zibpay',
+            'type'       => 'fieldset',
+            'fields'     => array(
+                // 价格、积分、会员价、优惠码、内容摘要等
+            ),
+        ),
+    ),
+));
+```
+
+关键字段：
+
+| 字段                         | 用途               |
+| ---------------------------- | ------------------ |
+| `allow_view`                 | 阅读权限类型       |
+| `posts_zibpay`               | 付费或积分阅读参数 |
+| `pay_hide_part`              | 是否只隐藏部分内容 |
+| `points_price`               | 积分售价           |
+| `pay_price`                  | 金钱售价           |
+| `vip_1_price`、`vip_2_price` | 会员价             |
+| `coupon_s`                   | 是否允许优惠码     |
+
+读取时先读整个 prefix：
+
+```php
+$allow_view = get_post_meta($post_id, 'forum_allow_view', true);
+$allow_view = is_array($allow_view) ? $allow_view : array();
+
+$type = !empty($allow_view['allow_view']) ? $allow_view['allow_view'] : '';
+$pay  = !empty($allow_view['posts_zibpay']) && is_array($allow_view['posts_zibpay']) ? $allow_view['posts_zibpay'] : array();
+```
+
+涉及付费阅读时，不要只读 meta 判断是否可看。应走论坛和 Zibpay 的权限、订单、会员、积分逻辑。
+
+## `plate_extend`
+
+论坛板块配置：
+
+```php
+CSF::createMetabox('plate_extend', array(
+    'title'     => sprintf(__('%s选项', 'zib_language'), $zib_bbs->plate_name),
+    'post_type' => array('plate'),
+    'context'   => 'side',
+    'priority'  => 'high',
+    'data_type' => 'unserialize',
+));
+```
+
+源码里会提示：
+
+```php
+sprintf(__('%s的创建、修改都推荐在前台进行！以避免逻辑错误', 'zib_language'), $zib_bbs->plate_name)
+```
+
+这是很重要的边界：板块不只是一个 post，它还可能牵涉版主、关注、发帖权限、统计和前台流程。后台字段用于维护和修正，不建议绕过前台业务流程大量改板块数据。
+
+读取：
+
+```php
+$plate_extend = get_post_meta($plate_id, 'plate_extend', true);
+$plate_extend = is_array($plate_extend) ? $plate_extend : array();
+```
+
+板块业务字段优先搜索 `zib_bbs_get_plate_*`、`zib_bbs_current_user_can()` 等论坛函数，不要只靠 metabox 数组推断权限。
+
+## 前台发帖字段
+
+论坛帖子在前台发布和编辑时还会写入一批 post meta，例如：
+
+| 字段              | 说明         |
+| ----------------- | ------------ |
+| `follow_pay_args` | 关注付费参数 |
+| `score_detail`    | 评分明细     |
+| `pay_hide_part`   | 付费隐藏部分 |
+| `vote_option`     | 投票选项     |
+| `vote_data`       | 投票数据     |
+| `cover_image`     | 封面         |
+| `thumbnail_url`   | 缩略图       |
+
+这些字段很多在 `zib_get_option_meta_keys('post_meta')` 中，会进入 `zib_other_data`。读取时用：
+
+```php
+$score_detail = zib_get_post_meta($post_id, 'score_detail', true);
+$cover_image  = zib_get_post_meta($post_id, 'cover_image', true);
+```
+
+## 版块分类 `plate_cat`
+
+`plate_cat` 是 taxonomy，不是 post type。配置方式应参考 taxonomy options：
+
+```php
+if (!taxonomy_exists('plate_cat')) {
+    return;
+}
+```
+
+读取分类封面或 SEO 这类聚合字段：
+
+```php
+$cover = zib_get_term_meta($term_id, 'cover_image', true);
+$seo   = zib_get_term_meta($term_id, 'term_seo', true);
+```
+
+如果字段来自某个 `CSF::createTaxonomyOptions($prefix)`，则先读 prefix 数组：
+
+```php
+$options = get_term_meta($term_id, $prefix, true);
+$options = is_array($options) ? $options : array();
+```
+
+## 话题和标签
+
+论坛话题和标签：
+
+```txt
+forum_topic
+forum_tag
+```
+
+主题前台会用它们做帖子归类、话题页、列表筛选、面包屑和 SEO。扩展字段前先确认：
+
+```php
+if (!taxonomy_exists('forum_topic')) {
+    return;
+}
+```
+
+不要把 `forum_topic` 和文章专题 `topics` 混淆。
+
+## 和文章 Meta 的区别
+
+| 对象               | 保存模型                                      |
+| ------------------ | --------------------------------------------- |
+| 文章核心字段       | `ZCSF::instance()` + `zib_update_post_meta()` |
+| 论坛帖子侧栏配置   | `CSF::createMetabox('forum_extend')`          |
+| 论坛阅读权限       | `CSF::createMetabox('forum_allow_view')`      |
+| 板块侧栏配置       | `CSF::createMetabox('plate_extend')`          |
+| 板块分类/话题/标签 | `CSF::createTaxonomyOptions()` 或 term meta   |
+
+论坛模块不是普通文章配置的简单复制。它有自己的权限、付费、板块、版主、关注和统计逻辑。
+
+## 排查清单
+
+论坛字段不显示：
+
+1. 论坛模块文件是否加载。
+2. 当前 post type 是否是 `forum_post` 或 `plate`。
+3. `after_setup_theme` 挂载是否执行。
+4. `CSF` 类是否已加载。
+5. 当前后台页面是否是 `post.php` 或 `post-new.php`。
+
+读取为空：
+
+1. 是 `forum_extend`、`forum_allow_view`、`plate_extend` 这类 prefix 数组，还是单独 post meta。
+2. 字段是否进入 `zib_other_data`。
+3. 是否使用了 `zib_get_post_meta()`。
+4. 是否读错了 post id，把板块 ID 和帖子 ID 混用。
+
+权限异常：
+
+1. 不要只看 metabox 字段，要查论坛权限函数。
+2. 付费和积分阅读要查 Zibpay 订单、会员、积分逻辑。
+3. 板块编辑优先使用前台流程，避免绕开版主和统计逻辑。

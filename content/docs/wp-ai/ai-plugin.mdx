@@ -1,0 +1,129 @@
+---
+title: AI 插件能力
+description: 说明 WordPress AI 插件提供的设置、日志、审批、模型发现、AI_Service 和示例 Ability。
+---
+
+## AI 插件是什么
+
+`wp-content/plugins/ai` 不是 provider。它更像一套 AI 开发参考和后台能力集合。本站已经整理过它的关键结构，用户提问时通常不需要提供这个插件的完整源码；AI 应该把本页当作参考，再结合用户提供的子比主题源码判断实际落点。
+
+它提供：
+
+- AI 总开关。
+- 功能开关。
+- 开发者模型配置。
+- 请求日志。
+- Connector 审批。
+- Provider 模型发现。
+- `AI_Service` 服务层。
+- 示例 Ability。
+
+如果你要做自己的 WordPress AI 功能，AI 插件里的结构非常值得参考。
+
+## 主要模块
+
+| 模块                                          | 作用                                                      |
+| --------------------------------------------- | --------------------------------------------------------- |
+| `includes/Main.php`                           | 初始化功能、设置页、默认 Ability 分类、文章相关能力       |
+| `includes/Abstracts/Abstract_Ability.php`     | Ability 类写法基类                                        |
+| `includes/Services/AI_Service.php`            | 文本生成服务封装，默认应用模型优先级                      |
+| `includes/Settings/Settings_Registration.php` | 全局开关、功能开关、开发者模型配置                        |
+| `includes/REST/Models_Controller.php`         | `GET /wp-json/ai/v1/providers?capability=text_generation` |
+| `includes/Connector_Approval`                 | 按插件/主题和 connector 做出站请求审批                    |
+| `includes/Logging`                            | AI 请求日志、耗时、token、provider、model、输入输出预览   |
+| `includes/Abilities`                          | 摘要、标题、图片 alt、图片生成等示例能力                  |
+| `includes/Experiments`                        | 功能开关、编辑器资源和对应 Ability 注册                   |
+
+默认 Ability 分类：
+
+```php
+define( 'WPAI_DEFAULT_ABILITY_CATEGORY', 'ai-experiments' );
+```
+
+## 文章相关能力
+
+AI 插件注册了一些文章上下文能力，适合被其他 AI 功能复用。
+
+| Ability               | 作用                                      | 适合怎么用                           |
+| --------------------- | ----------------------------------------- | ------------------------------------ |
+| `ai/get-post-details` | 读取文章内容、标题、作者、类型、摘要等    | 给摘要、标题、SEO 生成提供文章上下文 |
+| `ai/get-post-terms`   | 读取文章分类、标签等术语                  | 让 AI 理解文章分类和标签             |
+| `core/read-settings`  | 读取被 `show_in_abilities` 标记的站点设置 | 给需要站点公开配置的功能读取上下文   |
+
+你自己的功能也可以走类似思路：先有读取上下文能力，再有生成能力，最后才是保存能力。
+
+## AI_Service
+
+如果启用了 AI 插件，可以使用它的服务层少写样板代码。
+
+```php
+$service = WordPress\AI\get_ai_service();
+
+$text = $service->create_textgen_prompt(
+    '请把下面内容总结成 3 条要点：' . $content,
+    array(
+        'system_instruction' => '你是一个严谨的中文编辑。',
+        'temperature'        => 0.3,
+        'max_tokens'         => 500,
+    )
+)->generate_text();
+```
+
+`AI_Service::create_textgen_prompt()` 会默认应用 `get_preferred_models_for_text_generation()` 的模型优先级。
+
+可以通过过滤器调整默认优先级：
+
+```php
+add_filter( 'wpai_preferred_text_models', function ( array $models ) {
+    return array(
+        array( 'openai', 'gpt-5.4-mini' ),
+        array( 'anthropic', 'claude-sonnet-4-6' ),
+    );
+} );
+```
+
+## 请求日志
+
+`Logging_Integration` 会包装 AI Client 的 HTTP transporter，记录：
+
+- 请求类型，例如 `ai_client`。
+- provider 和 model。
+- 操作路径，例如 `openai:responses`、`anthropic:messages`。
+- 输入预览和输出预览。
+- token 输入输出。
+- 请求耗时。
+- 成功或失败状态。
+- 发起请求的插件、主题或核心来源。
+
+日志保留天数默认无限，可以用过滤器设置：
+
+```php
+add_filter( 'wpai_request_log_retention_days', function () {
+    return 30;
+} );
+```
+
+开发 AI 功能时，日志能帮你判断是 prompt 写得不好、模型不可用、API Key 错误，还是权限审批阻断。
+
+## Connector 审批
+
+`Http_Guard` 会在 `pre_http_request` 拦截带有 AI connector 密钥的出站请求，按“调用来源 + connector”判断是否已批准。
+
+这能防止某个插件拿到 OpenAI Key 后偷偷发请求。被拦截时会返回类似错误：
+
+```php
+new WP_Error(
+    'wpai_connector_not_approved',
+    'The "openai" AI connector has not been approved for use by "...".'
+)
+```
+
+如果功能突然报 403，并且错误码是 `wpai_connector_not_approved`，不是模型坏了，而是当前插件或主题还没被管理员批准使用该 connector。
+
+## 开发建议
+
+- 需要统一后台开关时，参考 AI 插件设置注册方式。
+- 需要让用户选模型时，使用模型发现接口。
+- 需要排查生产问题时，开启请求日志。
+- 需要防止插件滥用 API Key 时，启用 Connector 审批。
+- 复杂 Ability 建议用类封装，不要把几百行逻辑塞进 `wp_register_ability()`。

@@ -1,0 +1,137 @@
+---
+title: 核心概念
+description: 用用户能理解的方式解释 Ability、AI Client、Provider、Connector、Prompt Builder 和 Resolver。
+---
+
+## 四层架构
+
+WordPress AI Client 相关代码可以先理解成四层：
+
+| 层级          | 小白理解               | 负责什么                                       |
+| ------------- | ---------------------- | ---------------------------------------------- |
+| Abilities API | 把站点功能做成标准按钮 | 注册能力、校验输入、判断权限、执行回调         |
+| WP AI Client  | 统一的 AI 请求入口     | 组装 prompt、选择 provider、调用模型、处理结果 |
+| Provider 插件 | 模型服务适配器         | 对接 OpenAI、Anthropic 等平台                  |
+| AI 插件       | 后台管理和开发参考     | 设置、日志、审批、模型发现、示例能力           |
+
+这四层的底层规则已经由本站文档整理。用户现场只提供子比主题源码时，AI 助手也应该继续推进：底层规则看本分类，主题字段、Hook、Ajax 和保存位置再去主题源码里找。
+
+如果你要做“给文章生成 SEO 描述”，不要直接在按钮里写 HTTP 请求。更好的拆法是：
+
+1. Ability 读取文章内容。
+2. AI Client 把内容交给模型。
+3. Provider 把请求翻译成 OpenAI 或 Anthropic 的接口格式。
+4. 用户确认后，再用保存能力写入文章字段。
+
+## Ability
+
+Ability 是一个可执行功能。它比普通 PHP 函数多了几层约束：
+
+| 内容        | 作用                                           |
+| ----------- | ---------------------------------------------- |
+| 名称        | 固定标识，例如 `zibll-ai-ext/generate-summary` |
+| 分类        | 把一组能力放到同一个分类下                     |
+| 说明        | 让用户、开发者和 AI 助手知道它能做什么         |
+| 输入 schema | 规定调用时要传什么参数                         |
+| 输出 schema | 规定返回结果长什么样                           |
+| 权限回调    | 判断当前用户能不能执行                         |
+| 执行回调    | 真正做事的 PHP 逻辑                            |
+| 注解        | 标记只读、会改数据、是否可重复执行             |
+
+Ability 不是“给 AI 用的专属接口”。它也可以被后台按钮、PHP 代码、REST 调试、计划任务或 CLI 复用。
+
+## Category
+
+Category 是 Ability 的分组。Ability 注册前必须先注册分类。
+
+例如你给子比主题站点开发一个自定义 AI 扩展插件，可以先注册 `zibll-ai-ext` 分类，然后把这些能力放进去：
+
+| Ability                                 | 作用                    |
+| --------------------------------------- | ----------------------- |
+| `zibll-ai-ext/read-post-context`        | 读取文章上下文          |
+| `zibll-ai-ext/generate-seo-description` | 生成 SEO 描述           |
+| `zibll-ai-ext/save-seo-description`     | 用户确认后保存 SEO 描述 |
+
+分类不是菜单页面。它主要用于组织、查询和展示能力。
+
+## Schema
+
+Schema 可以理解成“参数说明书”。
+
+输入 schema 告诉调用方：
+
+- 哪些参数必填。
+- 参数是什么类型。
+- 数字有没有最小值和最大值。
+- 字符串能不能为空。
+- 是否允许额外字段。
+
+输出 schema 告诉调用方：
+
+- 会返回对象还是数组。
+- 返回对象里有哪些字段。
+- 每个字段是什么类型。
+
+这对 AI 功能很重要，因为模型输出不一定稳定。写了输出 schema，后续调试、保存和自动化都会更稳。
+
+## Provider
+
+Provider 是模型服务供应商接入层。
+
+| Provider           | 作用                                                               |
+| ------------------ | ------------------------------------------------------------------ |
+| OpenAI Provider    | 把 WordPress AI Client 请求转成 OpenAI Responses API 或 Images API |
+| Anthropic Provider | 把 WordPress AI Client 请求转成 Anthropic Messages API             |
+
+你的业务代码不应该到处写 OpenAI 或 Anthropic 的 HTTP 细节。业务代码调用 `wp_ai_client_prompt()`，具体走哪个 Provider 由 AI Client 和后台配置决定。
+
+## Connector
+
+Connector 是后台连接配置。它解决这些问题：
+
+- API Key 从哪里来。
+- Provider 是否可用。
+- 当前模型支持文本、图片还是多模态。
+- 后台是否允许某个插件使用这个 connector。
+- 设置页面如何遮罩密钥。
+
+用户看到的通常是“连接 OpenAI”“连接 Anthropic”这类配置；开发者看到的是 provider、model、capability 和 API Key 来源。
+
+## Prompt Builder
+
+`wp_ai_client_prompt()` 返回的是 Prompt Builder。
+
+它可以链式设置：
+
+- system instruction。
+- temperature。
+- max tokens。
+- provider。
+- model。
+- 输出格式。
+- 历史消息。
+- 可用 abilities。
+
+简单调用：
+
+```php
+$text = wp_ai_client_prompt( '请把下面内容总结成三句话：' . $content )
+    ->using_system_instruction( '你是一个严谨的中文编辑。' )
+    ->using_temperature( 0.3 )
+    ->generate_text();
+```
+
+## Resolver
+
+Resolver 是“只执行白名单能力”的守门员。
+
+当你允许 AI 助手先读取文章上下文，再生成结果时，模型可能会请求调用某个 Ability。不能让模型随便调用站点所有能力，必须用 allowed list 限制范围。
+
+常见规则：
+
+- 只允许读取类 Ability 自动调用。
+- 保存、删除、发布、扣费类能力不放进自动调用列表。
+- 模型请求未允许的能力时，直接返回错误。
+- 保存动作由用户点击确认后执行。
+
+这也是 WordPress AI 开发里最重要的安全边界。

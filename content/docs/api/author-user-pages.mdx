@@ -1,0 +1,592 @@
+---
+title: 作者主页与用户中心
+description: 扩展子比主题作者主页、收藏列表、关注粉丝、用户中心 Tab、侧栏服务、账户安全和当前用户 Ajax 数据。
+---
+
+## 两套页面先分清
+
+子比主题里容易混淆的用户相关页面有两套：
+
+| 页面     | 面向对象     | 典型 URL         | 主要用途                                                 |
+| -------- | ------------ | ---------------- | -------------------------------------------------------- |
+| 作者主页 | 任意公开用户 | `author.php`     | 展示作者资料、文章、收藏、评论、粉丝和公开交互           |
+| 用户中心 | 当前登录用户 | 用户中心重写路由 | 管理个人资料、账号安全、等级、认证、收款、消息和站内服务 |
+
+作者主页可以被游客访问，扩展时必须把它当作公开页面处理。用户中心只服务当前登录用户，里面的资料修改、账号绑定、密码修改、收款设置都属于敏感操作，不能使用前端传入的任意 `user_id` 直接写入数据。
+
+## 作者主页结构
+
+作者页模板在 `author.php`，核心输出由两个函数组成：
+
+```php
+zib_author_header();
+zib_author_content();
+```
+
+`zib_author_header()` 输出封面、头像、昵称、简介、身份标识和操作按钮；`zib_author_content()` 输出作者主页主内容 Tab。作者页上下还保留了两个动态侧边栏：
+
+```php
+dynamic_sidebar('author_top_fluid');
+dynamic_sidebar('author_bottom_fluid');
+```
+
+如果只是给作者页增加全局展示模块，可以优先使用动态侧边栏或 `zib_author_main_content`。如果要增加作者页主内容分类，则应扩展作者页 Tab。
+
+## 作者头部扩展
+
+作者头部常用入口：
+
+| Hook / Filter                            | 参数                 | 用途                                                     |
+| ---------------------------------------- | -------------------- | -------------------------------------------------------- |
+| `author_header_more_btn`                 | `$html, $author_id`  | 给封面右下角增加按钮                                     |
+| `author_header_identity`                 | `$html, $author_id`  | 在昵称下方增加身份、标签、认证标识                       |
+| `author_header_drop_lists`               | `$lists, $author_id` | 给作者头部更多菜单增加项目                               |
+| `zib_get_author_header_btns($author_id)` | `$author_id`         | 根据当前用户和作者关系输出用户中心、关注、私信或打赏按钮 |
+
+给作者增加一个公开标识时，推荐使用 `author_header_identity`：
+
+```php
+function zib_docs_author_identity($html, $author_id)
+{
+    if (!$author_id) {
+        return $html;
+    }
+
+    $verified = zib_get_user_meta($author_id, 'docs_verified', true);
+    if (!$verified) {
+        return $html;
+    }
+
+    $html .= '<span class="badg c-blue ml6">' . esc_html__('认证作者', 'zib_language') . '</span>';
+
+    return $html;
+}
+add_filter('author_header_identity', 'zib_docs_author_identity', 10, 2);
+```
+
+这里展示的是公开信息，输出前仍然要转义。不要在作者头部输出邮箱、手机号、订单状态、余额、真实姓名等只应当前用户可见的数据。
+
+## 作者主页 Tab
+
+作者主页 Tab 来自 `zib_get_author_main_tab_args($author_id)`。主题会读取后台配置 `_pz('author_main_tab_opt')`，再按配置生成 Tab。
+
+默认能力包括：
+
+| Tab key    | 内容 Filter                        | 说明                                         |
+| ---------- | ---------------------------------- | -------------------------------------------- |
+| `post`     | `main_author_tab_content_post`     | 作者文章，作者本人或管理员可看到待审核、草稿 |
+| `favorite` | `main_author_tab_content_favorite` | 作者收藏内容                                 |
+| `comment`  | `main_author_tab_content_comment`  | 作者评论                                     |
+| `follow`   | `main_author_tab_content_follow`   | 作者粉丝和关注列表                           |
+
+自定义 key 会触发：
+
+```php
+apply_filters('author_main_tab_' . $opt_k, array(), $author_id);
+```
+
+最终 Tab 数组还会经过：
+
+```php
+apply_filters('author_main_tabs_array', $tabs_args, $author_id);
+```
+
+如果新增的 Tab 需要受主题后台“作者主页 Tab 配置”控制，可以使用 `author_main_tab_{key}`。如果是固定追加，可以使用 `author_main_tabs_array`。
+
+## 新增作者主页 Tab
+
+最小示例：
+
+```php
+function zib_docs_author_main_tabs($tabs_args, $author_id)
+{
+    if (!$author_id) {
+        return $tabs_args;
+    }
+
+    $tabs_args['resources'] = array(
+        'title'         => __('资源', 'zib_language'),
+        'content_class' => '',
+        'route'         => true,
+        'loader'        => zib_get_author_tab_loader('post'),
+    );
+
+    return $tabs_args;
+}
+add_filter('author_main_tabs_array', 'zib_docs_author_main_tabs', 20, 2);
+
+function zib_docs_author_tab_content_resources($content)
+{
+    $author = get_queried_object();
+    if (empty($author->ID)) {
+        return '';
+    }
+
+    $author_id = (int) $author->ID;
+
+    $html  = '<div class="ajaxpager">';
+    $html .= '<div class="ajax-item">';
+    $html .= '<div class="zib-widget box-body">';
+    $html .= esc_html(sprintf(__('这里展示用户 %s 的公开资源。', 'zib_language'), $author_id));
+    $html .= '</div>';
+    $html .= '</div>';
+    $html .= '</div>';
+
+    return $html;
+}
+add_filter('main_author_tab_content_resources', 'zib_docs_author_tab_content_resources');
+```
+
+注意两点：
+
+- 作者主页拿到的是被访问作者，不是当前登录用户。
+- 如果 Tab 内含分页，外层结构应使用 `.ajaxpager`、`.ajax-item` 和 `.ajax-pag`，保持主题的 Ajax 分页协议。
+
+## 作者主页 Ajax 分页
+
+作者页已有 Ajax 动作位于 `action/author.php`：
+
+| Ajax action             | 函数                                   | 用途               |
+| ----------------------- | -------------------------------------- | ------------------ |
+| `author_comment`        | `zib_ajax_tab_author_comment()`        | 加载更多作者评论   |
+| `author_follow`         | `zib_ajax_tab_author_follow()`         | 加载更多关注或粉丝 |
+| `author_favorite_posts` | `zib_ajax_tab_author_favorite_posts()` | 加载更多收藏文章   |
+
+这些动作最后会调用：
+
+```php
+zib_ajax_send_ajaxpager($lists);
+```
+
+因此自定义作者页列表也建议返回同样的 Ajax 分页结构：
+
+```php
+function zib_docs_author_resources_ajax()
+{
+    $author_id = !empty($_REQUEST['user_id']) ? (int) $_REQUEST['user_id'] : 0;
+    $paged     = !empty($_REQUEST['paged']) ? (int) $_REQUEST['paged'] : 1;
+
+    if (!$author_id) {
+        zib_ajax_send_ajaxpager(zib_get_ajax_null(__('暂无内容', 'zib_language')));
+    }
+
+    $lists = zib_docs_get_author_resources($author_id, $paged);
+
+    zib_ajax_send_ajaxpager($lists);
+}
+add_action('wp_ajax_docs_author_resources', 'zib_docs_author_resources_ajax');
+add_action('wp_ajax_nopriv_docs_author_resources', 'zib_docs_author_resources_ajax');
+```
+
+公开作者页可以注册 `nopriv` 动作，但服务端仍然要确认展示内容确实允许游客访问。
+
+## 扩展收藏类型
+
+作者收藏页默认只处理文章收藏，过滤器是两层：
+
+```php
+$favorite_args = apply_filters('author_favorite_types', $favorite_args, $author_id);
+$lists = apply_filters('author_favorite_lists_' . $type, '', $author_id);
+```
+
+新增收藏类型时，需要同时增加类型和列表渲染：
+
+```php
+function zib_docs_author_favorite_types($types, $author_id)
+{
+    $types['resource'] = array(
+        'name'    => __('资源', 'zib_language'),
+        'count'   => zib_docs_get_user_resource_favorite_count($author_id),
+        'orderby' => array(
+            'date'  => __('最新发布', 'zib_language'),
+            'views' => __('最多查看', 'zib_language'),
+        ),
+    );
+
+    return $types;
+}
+add_filter('author_favorite_types', 'zib_docs_author_favorite_types', 10, 2);
+
+function zib_docs_author_favorite_resource_lists($content, $author_id)
+{
+    $paged   = !empty($_GET['favorite_paged']) ? (int) $_GET['favorite_paged'] : 1;
+    $orderby = !empty($_REQUEST['orderby']) ? sanitize_key($_REQUEST['orderby']) : 'date';
+
+    return zib_docs_get_favorite_resource_lists($author_id, $paged, $orderby);
+}
+add_filter('author_favorite_lists_resource', 'zib_docs_author_favorite_resource_lists', 10, 2);
+```
+
+`author_favorite_types` 只负责筛选条和排序项；`author_favorite_lists_{type}` 才负责实际列表、空状态和分页。不要在类型 Filter 里直接输出列表 HTML。
+
+## 商城商家主页
+
+商城没有单独做一套“店铺”页面。商家主页复用用户公开主页，并把商品列表挂到 `tab=product`：
+
+```php
+function zib_shop_get_author_url($author_id)
+{
+    return zib_get_user_home_url($author_id, array('tab' => 'product'));
+}
+```
+
+商品详情页、用户中心订单卡片和订单详情里的商家链接都会走这个入口。判断一个用户是否是商家也不是读取独立角色，而是看他是否有已发布商品：
+
+```php
+function zib_shop_is_shop_author($author_id)
+{
+    return zib_shop_get_author_product_count($author_id, 'publish', false) > 0;
+}
+```
+
+商家商品 Tab 通过动态作者 Tab 扩展：
+
+```php
+add_filter('author_main_tab_product', 'zib_shop_author_main_tab_product', 10, 2);
+add_action('main_author_tab_content_product', 'zib_shop_author_tab_content_product', 10);
+```
+
+如果用户没有已发布商品，`zib_shop_author_main_tab_product()` 返回空数组，不显示商品 Tab。显示时会输出标题、商品数量、商品列表容器类、路由和占位骨架：
+
+| 字段            | 来源                                                                          |
+| --------------- | ----------------------------------------------------------------------------- |
+| `title`         | `商品` + `zib_shop_get_author_product_count($author_id)`                      |
+| `content_class` | `product-lists-row`                                                           |
+| `route`         | `true`，支持地址栏同步                                                        |
+| `loader`        | `zib_shop_get_lists_card_placeholder(_pz('shop_list_opt', [], 'list_style'))` |
+
+商品 Tab 内容读取请求参数：
+
+| 参数      | 默认值    | 说明         |
+| --------- | --------- | ------------ |
+| `orderby` | `date`    | 商品排序字段 |
+| `order`   | `DESC`    | 排序方向     |
+| `status`  | `publish` | 商品状态     |
+
+然后输出排序条和商品列表：
+
+```php
+$orderby_lists = zib_shop_get_orderby_lists($orderby, $order);
+$html = $orderby_lists . zib_shop_get_user_shop_product_lists($author_id, 1, $orderby, $status);
+```
+
+收藏页也会补商品类型：
+
+```php
+add_filter('author_favorite_types', 'zib_shop_author_favorite_types_filter', 10, 2);
+add_filter('author_favorite_lists_shop_product', 'zib_shop_favorite_lists_shop_product', 10, 2);
+add_filter('author_tab_favorite_count', 'zib_shop_author_tab_favorite_count', 10, 2);
+```
+
+商品收藏类型支持这些排序：`modified`、`views`、`score`、`favorite_count`、`sales_volume`。所以扩展商家主页时，优先复用作者主页 Tab 和商品列表函数，不要另建一套店铺路由。另建路由会丢失作者主页已有的关注、收藏、资料、路由同步和 Ajax 分页协议。
+
+商家商品列表真正的查询入口是 `zib_shop_get_user_shop_product_lists()`。它既服务商家主页的 `tab=product`，也服务收藏页里的商品收藏列表：
+
+```php
+function zib_shop_get_user_shop_product_lists($user_id = 0, $paged = 1, $orderby = 'date', $post_status = 'publish')
+{
+    $order = !empty($_REQUEST['order']) ? $_REQUEST['order'] : 'DESC';
+    $order = $order === 'ASC' ? 'ASC' : 'DESC';
+
+    $ajax_url = add_query_arg(array(
+        'user_id' => $user_id,
+        'action'  => 'author_shop_product',
+        'order'   => $order,
+        'orderby' => $orderby,
+        'status'  => $post_status,
+    ), admin_url('admin-ajax.php'));
+}
+```
+
+Ajax 翻页动作注册在商城前台 action 文件里，并允许游客访问：
+
+```php
+function zib_shop_ajax_user_shop_product()
+{
+    $orderby = !empty($_REQUEST['orderby']) ? $_REQUEST['orderby'] : '';
+    $user_id = !empty($_REQUEST['user_id']) ? $_REQUEST['user_id'] : '';
+    $paged   = !empty($_REQUEST['paged']) ? $_REQUEST['paged'] : 1;
+    $status  = !empty($_REQUEST['status']) ? $_REQUEST['status'] : '';
+
+    $lists = zib_shop_get_user_shop_product_lists($user_id, $paged, $orderby, $status);
+    zib_ajax_send_ajaxpager($lists);
+}
+add_action('wp_ajax_author_shop_product', 'zib_shop_ajax_user_shop_product');
+add_action('wp_ajax_nopriv_author_shop_product', 'zib_shop_ajax_user_shop_product');
+```
+
+这里没有 nonce，是因为它只读公开列表；真正的权限边界放在查询函数里。非作者本人、非超级管理员访问时，即使请求里传了 `status=draft` 或其它状态，也会被强制改成 `publish`：
+
+```php
+if (!$current_user_id || ($current_user_id != $user_id && !is_super_admin())) {
+    $args['post_status'] = 'publish';
+}
+```
+
+作者本人或超级管理员查看时，才允许读取请求里的 `status`。如果二开要给商家本人增加“待审核”“草稿”“下架”筛选，不要新写一个公开 Ajax；应该在现有 `author_shop_product` 链路里扩展筛选项，并继续保留这个状态保护。
+
+列表查询会读取商城全局列表配置：
+
+| 配置                                              | 用途             |
+| ------------------------------------------------- | ---------------- |
+| `_pz('shop_list_opt.count')`                      | 每页商品数量     |
+| `_pz('shop_list_opt.list_style')`                 | 商品卡片样式     |
+| `zib_query_orderby_filter($orderby, $args)`       | 排序字段转换     |
+| `zib_shop_get_product_list_card($list_card_args)` | 商品卡片渲染     |
+| `zib_get_ajax_next_paginate()`                    | 下一页 Ajax 分页 |
+
+所以商家主页商品卡片和商城分类页、优惠活动页使用同一套卡片能力：封面、销量角标、标题、摘要、优惠标签、价格和小卡片样式都来自商城列表函数。自定义商家主页商品展示时，优先通过商城列表样式配置或 `zib_shop_get_product_list_card()` 参数调整，不要在作者页里复制商品卡片 HTML。
+
+排序条由 `zib_shop_get_orderby_lists()` 输出，包含 `date`、`views`、`favorite_count`、`score`、`sales_volume` 和可切换升降序的 `zibpay_price`。链接会带 `ajax-replace="true"` 和 `ajax-next`：
+
+```php
+$href = add_query_arg(array('orderby' => $key), $current_url);
+$lists .= '<a rel="nofollow" ajax-replace="true" class="ajax-next" href="' . esc_url($href) . '">' . $value . '</a>';
+```
+
+这意味着排序切换依赖主题前端局部替换协议。不要把排序按钮改成普通跳转，也不要在下拉菜单里手动 `location.href`，否则作者页 Tab 的路由、加载状态和分页会不一致。
+
+收藏页的商品列表不是按作者发布商品查询，而是读取用户的 `favorite_product` meta：
+
+```php
+if ('favorite' === $post_status) {
+    $args['post_status'] = 'publish';
+    unset($args['author']);
+    $follow = (array) zib_get_user_meta($user_id, 'favorite_product', true);
+    if ($follow) {
+        $args['post__in'] = array_reverse($follow);
+    } else {
+        return zib_get_ajax_null('暂无收藏内容');
+    }
+}
+```
+
+商品收藏数量有单独缓存 `user_favorite_product_count`。收藏动作完成后会触发 `shop_favorite_product`，主题用它清理并重算缓存：
+
+```php
+function zib_shop_favorite_product_cache_delete($posts_id, $user_id)
+{
+    wp_cache_delete($user_id, 'user_favorite_product_count');
+    zib_shop_get_user_favorite_product_count($user_id);
+}
+add_action('shop_favorite_product', 'zib_shop_favorite_product_cache_delete', 10, 2);
+```
+
+如果新增商品类收藏维度，要同步处理数量缓存、收藏类型筛选、列表输出和 Ajax 分页。只在按钮上切换状态而不刷新 `author_tab_favorite_count`，作者主页收藏 Tab 数量会长期不准。
+
+## 用户中心结构
+
+用户中心页面入口在 `inc/functions/user/user.php`，通过重写规则和模板加载实现：
+
+```php
+add_action('generate_rewrite_rules', 'zib_user_center_rewrite_rules');
+add_filter('query_vars', 'zib_add_user_center_query_vars');
+add_action('template_redirect', 'zib_user_center_load_template', 5);
+```
+
+页面内容由 `inc/functions/user/page.php` 负责。主入口是：
+
+```php
+add_action('user_center_page_content', 'zib_user_page_header', 8);
+add_action('user_center_page_content', 'zib_user_page_content');
+```
+
+`zib_user_page_content()` 会生成用户中心侧栏和右侧抽屉式内容区：
+
+```php
+$tabs_array = apply_filters('user_ctnter_main_tabs_array', array());
+$tab_nav = zib_get_main_tab_nav('nav', $tabs_array, 'user', false, 'user_center');
+$tab_content = zib_get_main_tab_nav('content', $tabs_array, 'user', false, 'user_center');
+```
+
+注意源码里的 Filter 名称是 `user_ctnter_main_tabs_array`，`ctnter` 是主题保留拼写，扩展时必须按源码名称写。
+
+## 用户中心 Tab
+
+用户中心默认 Tab 由 `zib_user_ctnter_main_tabs_array_filter_main()` 注入：
+
+| Tab key   | 内容 Filter                     | 说明           |
+| --------- | ------------------------------- | -------------- |
+| `level`   | 相关等级模块                    | 我的等级       |
+| `auth`    | 相关认证模块                    | 官方认证       |
+| `rewards` | `main_user_tab_content_rewards` | 打赏收款       |
+| `data`    | `main_user_tab_content_data`    | 个人资料       |
+| `account` | `main_user_tab_content_account` | 账户绑定及安全 |
+
+新增 Tab：
+
+```php
+function zib_docs_user_center_tabs($tabs_array)
+{
+    $tabs_array['resources'] = array(
+        'title'         => __('我的资源', 'zib_language'),
+        'nav_attr'      => 'drawer-title="' . esc_attr__('我的资源', 'zib_language') . '"',
+        'content_class' => 'author-user-con',
+        'loader'        => '<div class="zib-widget"><div class="placeholder k1 mb10"></div><div class="placeholder t1"></div></div>',
+    );
+
+    return $tabs_array;
+}
+add_filter('user_ctnter_main_tabs_array', 'zib_docs_user_center_tabs');
+
+function zib_docs_main_user_tab_content_resources()
+{
+    $user_id = get_current_user_id();
+    if (!$user_id) {
+        return '';
+    }
+
+    $html  = '<div class="zib-widget">';
+    $html .= '<div class="box-body">';
+    $html .= esc_html__('这里展示当前登录用户可管理的资源。', 'zib_language');
+    $html .= '</div>';
+    $html .= '</div>';
+
+    return zib_get_ajax_ajaxpager_one_centent($html);
+}
+add_filter('main_user_tab_content_resources', 'zib_docs_main_user_tab_content_resources');
+```
+
+用户中心 Tab 里的数据应始终以 `get_current_user_id()` 为准。除非是管理员能力页，否则不要让前端传 `user_id` 决定读取或写入对象。
+
+## 用户中心侧栏
+
+用户中心侧栏由 `user_center_page_sidebar` 统一拼接。主题默认有三类内容：
+
+| Filter                                       | 优先级     | 用途                         |
+| -------------------------------------------- | ---------- | ---------------------------- |
+| `user_center_page_sidebar`                   | `5`        | 统计卡片                     |
+| `zib_user_center_page_sidebar_button_1_args` | 按钮组参数 | “我的服务”按钮               |
+| `zib_user_center_page_sidebar_button_2_args` | 按钮组参数 | “功能设置”按钮               |
+| `user_sidebar_statistics_args`               | 统计参数   | 文章、评论、收藏、粉丝等统计 |
+
+增加一个侧栏统计项：
+
+```php
+function zib_docs_user_sidebar_statistics($args, $user_id)
+{
+    $args[] = array(
+        'name'  => __('资源', 'zib_language'),
+        'count' => zib_docs_get_user_resource_count($user_id),
+        'link'  => zib_get_user_center_url('resources'),
+    );
+
+    return $args;
+}
+add_filter('user_sidebar_statistics_args', 'zib_docs_user_sidebar_statistics', 10, 2);
+```
+
+增加一个侧栏按钮并跳转到自定义 Tab：
+
+```php
+function zib_docs_user_center_sidebar_buttons($buttons)
+{
+    $buttons[] = array(
+        'html' => '',
+        'icon' => zib_get_svg('book-color'),
+        'name' => __('我的资源', 'zib_language'),
+        'tab'  => 'resources',
+    );
+
+    return $buttons;
+}
+add_filter('zib_user_center_page_sidebar_button_2_args', 'zib_docs_user_center_sidebar_buttons');
+```
+
+主题会把按钮渲染为带 `data-onclick` 的项目，用于触发右侧抽屉式 Tab。只要 `tab` 与 `user_ctnter_main_tabs_array` 里的 key 一致，就不需要额外写前端切换脚本。
+
+## 账户安全区块
+
+账户安全页的主内容由 `main_user_tab_content_account` 输出，然后经过：
+
+```php
+apply_filters('user_center_account_setup', $html, $user_id, $user);
+```
+
+主题已经通过这个 Filter 加入了邮箱绑定、手机号绑定、第三方账号绑定和密码修改。新增安全项时，应继续追加到账户安全区块，而不是另建一套独立安全页面：
+
+```php
+function zib_docs_user_account_security($html, $user_id, $user)
+{
+    if (!$user_id) {
+        return $html;
+    }
+
+    $enabled = zib_get_user_meta($user_id, 'docs_security_notice', true);
+    $status  = $enabled ? __('已开启', 'zib_language') : __('未开启', 'zib_language');
+
+    $row  = '<div class="box-body">';
+    $row .= '<div class="title-h-left"><b>' . esc_html__('安全提醒', 'zib_language') . '</b></div>';
+    $row .= '<div class="muted-2-color mb20">' . esc_html__('用于接收重要的账号安全变更提醒。', 'zib_language') . '</div>';
+    $row .= '<div class="oauth-bind-box"><div class="muted-box flex ac jsb">';
+    $row .= '<div class="flex ac type-logo"><span class="b-blue circular mr6 em14"><i class="fa fa-shield"></i></span><span>' . esc_html__('登录提醒', 'zib_language') . '</span></div>';
+    $row .= '<div class="muted-2-color">' . esc_html($status) . '</div>';
+    $row .= '<div><a href="javascript:;" class="but c-blue hollow wp-ajax-submit" form-action="docs_user_security_notice">' . esc_html__('设置', 'zib_language') . '</a></div>';
+    $row .= '</div></div>';
+    $row .= '</div>';
+
+    return $html . $row;
+}
+add_filter('user_center_account_setup', 'zib_docs_user_account_security', 10, 3);
+```
+
+涉及邮箱更换、手机号更换、密码修改、第三方账号解绑时，要复用主题已有弹窗和验证码流程。不要只靠前端确认框完成敏感操作。
+
+## 当前用户 Ajax 数据
+
+主题提供了当前用户 Ajax 动作：
+
+```php
+add_action('wp_ajax_get_current_user', 'zib_ajax_get_current_user');
+add_action('wp_ajax_nopriv_get_current_user', 'zib_ajax_get_current_user');
+```
+
+回调里会触发两个扩展点：
+
+```php
+do_action('ajax_get_current_user', $data['id'], $data);
+$data = apply_filters('ajax_get_current_user_data', $data);
+```
+
+如果前端需要知道一个轻量状态，例如是否有未读业务提醒，可以追加到当前用户数据：
+
+```php
+function zib_docs_current_user_data($data)
+{
+    $user_id = !empty($data['id']) ? (int) $data['id'] : 0;
+    if (!$user_id) {
+        return $data;
+    }
+
+    $data['docs_notice_count'] = zib_docs_get_user_notice_count($user_id);
+
+    return $data;
+}
+add_filter('ajax_get_current_user_data', 'zib_docs_current_user_data');
+```
+
+这里只适合放轻量、低敏、前端确实需要的字段。不要把邮箱验证码、手机号、订单明细、余额流水、权限明细或服务端密钥放进当前用户 Ajax 响应。
+
+## 扩展时的判断顺序
+
+| 需求                 | 首选入口                                                         | 不建议                   |
+| -------------------- | ---------------------------------------------------------------- | ------------------------ |
+| 作者公开信息展示     | `author_header_identity`、`author_header_more_btn`               | 改 `author.php`          |
+| 作者主页新增内容分类 | `author_main_tabs_array` 和 `main_author_tab_content_{key}`      | 复制整套作者页模板       |
+| 商家主页商品列表     | `author_main_tab_product` 和 `main_author_tab_content_product`   | 新建独立店铺页面         |
+| 作者收藏新增类型     | `author_favorite_types` 和 `author_favorite_lists_{type}`        | 只改筛选按钮不处理列表   |
+| 作者列表加载更多     | Ajax action + `zib_ajax_send_ajaxpager()`                        | 自写一套分页协议         |
+| 用户中心新增功能页   | `user_ctnter_main_tabs_array` 和 `main_user_tab_content_{id}`    | 新建独立用户中心         |
+| 用户中心侧栏服务入口 | `zib_user_center_page_sidebar_button_1_args` 或 `_button_2_args` | 写死 HTML 到模板         |
+| 账户安全新增项       | `user_center_account_setup`                                      | 绕过验证码和主题安全弹窗 |
+| 当前用户轻量状态     | `ajax_get_current_user_data`                                     | 在每个页面重复内联脚本   |
+
+## 风险清单
+
+- 作者主页是公开页面，默认不要展示当前用户私密数据。
+- 用户中心必须使用当前登录用户，不要信任前端传入的 `user_id`。
+- Ajax 写入动作必须校验 nonce、登录态、权限和字段长度。
+- 新增 Tab 后要同时处理空状态、加载状态、分页结构和移动端抽屉标题。
+- 动态插入的内容应复用主题的 `.ajaxpager`、`.ajax-next`、`wp-ajax-submit`、`RefreshModal` 协议。
+- 页面缓存不要覆盖用户中心、作者页带状态筛选的列表、支付或账号安全弹窗。
+- 对外公开的列表要检查文章状态、私密内容、付费内容、审核状态和当前用户权限。

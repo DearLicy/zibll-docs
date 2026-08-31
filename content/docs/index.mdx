@@ -1,0 +1,112 @@
+---
+title: 使用指南
+description: 面向子比主题用户与开发者的二次开发文档入口。
+---
+
+## 项目介绍
+
+子比主题开发文档面向正在使用子比主题搭建网站、做二次开发、扩展业务功能的用户。这里整理主题常用开发入口、后台配置结构、Meta 数据、Ajax 动作、模板函数、支付模块、MCP 与本地开发工具，帮助你在不直接改动主题核心文件的前提下完成定制开发。
+
+这不是主题后台操作手册，也不是文档站维护说明。文档内容默认围绕实际开发场景展开：如何找到能力、如何调用函数、如何扩展配置、如何读取数据、如何把功能放进更合适的位置。
+
+## 适合谁阅读
+
+- 正在使用子比主题，并希望做样式、模板或功能定制的站长。
+- 需要基于子比主题开发插件、子主题或业务模块的开发者。
+- 需要对接登录、支付、用户中心、论坛、投稿、内容展示等能力的项目维护者。
+- 希望先理解主题结构，再决定改模板、写 Hook 还是写插件的用户。
+
+## 快速开始
+
+如果你刚开始阅读，可以先按 [学习路线](/docs/guide/learning-path) 从源码认知、配置、内容、用户、商城、论坛到二次开发逐步推进。也可以按这个简版顺序进入：
+
+1. 阅读源码结构，先了解主题目录、加载顺序和各功能模块的位置。
+2. 配置站点功能时，先阅读主题常用设置、账户与验证码、图片灯箱与媒体。
+3. 遇到报错、404、邮件、支付、缓存等问题时，先阅读常见问题。
+4. 阅读 Codestar Framework，理解后台菜单、Meta 配置、小工具和子比自定义字段。
+5. 阅读主题扩展，查找函数、Hook、Ajax 动作、模板覆盖和支付扩展边界。
+
+## 文档模块
+
+<Cards>
+  <Card
+    title="学习路线"
+    description="按源码认知、配置、内容、用户、商城、论坛、优化和二次开发顺序阅读文档。"
+    href="/docs/guide/learning-path"
+  />
+  <Card
+    title="源码结构"
+    description="理解主题目录、入口加载链、配置菜单和功能模块分布。"
+    href="/docs/source-structure"
+  />
+  <Card
+    title="主题常用设置"
+    description="按子比主题配置域梳理常用功能、依赖关系和排查顺序。"
+    href="/docs/guide/site-settings"
+  />
+  <Card
+    title="账户与验证码"
+    description="配置 SMTP、登录注册、找回密码、绑定邮箱手机和腾讯验证码。"
+    href="/docs/guide/account-verification"
+  />
+  <Card
+    title="图片灯箱与媒体"
+    description="整理图片灯箱、懒加载、媒体输出和 CDN 图片异常排查。"
+    href="/docs/guide/media-lightbox"
+  />
+  <Card
+    title="子比官网知识库地图"
+    description="把官网公开教程映射到本站开发文档和后续蒸馏计划。"
+    href="/docs/guide/official-knowledge-base"
+  />
+  <Card
+    title="插件制作指南"
+    description="制作可独立安装、停用和复用的子比主题扩展插件。"
+    href="/docs/guide/plugin-making"
+  />
+  <Card
+    title="子主题制作指南"
+    description="制作承载站点样式、模板覆盖和主题级配置的子主题。"
+    href="/docs/guide/subtheme-making"
+  />
+  <Card
+    title="常见问题"
+    description="排查 404、500、邮件、支付、缓存、更新、权限和插件冲突。"
+    href="/docs/faq"
+  />
+  <Card
+    title="Codestar Framework"
+    description="整理后台设置、导航菜单、Meta 配置、小工具和子比自定义字段。"
+    href="/docs/codestar-framework"
+  />
+  <Card
+    title="主题扩展"
+    description="查询主题函数、Hook、Ajax 动作、模板覆盖和支付扩展边界。"
+    href="/docs/api"
+  />
+  <Card
+    title="WordPress AI 开发"
+    description="理解 AI Client、Abilities API、Provider 和 AI 自动化能力的二次开发方式。"
+    href="/docs/wp-ai"
+  />
+  <Card
+    title="AI 命令行安装器"
+    description="检测、安装和更新 Codex、Claude Code 与 cc-switch。"
+    href="/docs/ai/cli-installer"
+  />
+  <Card
+    title="赞助打赏"
+    description="支持本站继续购买 token，蒸馏更多子比主题知识库数据。"
+    href="/docs/sponsor"
+  />
+</Cards>
+
+## 开发原则
+
+优先从子比主题源码里提炼现有写法：WordPress Hook、主题函数、主题设置项、Meta 封装、Ajax 动作、模板定位和业务模块入口。文档里的代码示例应尽量保持子比主题自身的函数命名、数组写法、权限校验和事件挂载方式。
+
+不要把一次性修改直接堆进主题核心文件。主题更新会覆盖核心文件，后续排查问题也会变得困难。更稳妥的路径是先确认数据来源，再选择 Hook、短代码、模板覆盖或主题已有封装能力。
+
+## 内容范围
+
+这套文档围绕实际开发场景组织内容，包括源码结构、常用函数、Hook 使用方式、Ajax 动作、模板覆盖、支付扩展、用户系统、静态发布、MCP 接入和故障排查。

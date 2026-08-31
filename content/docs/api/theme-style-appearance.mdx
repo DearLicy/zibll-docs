@@ -1,0 +1,492 @@
+---
+title: 主题样式、背景与模式切换
+description: 梳理子比主题全局主题色、背景图、页面背景、布局宽度、导航页脚颜色、日夜间模式和前台样式扩展边界。
+---
+
+## 模块边界
+
+子比主题的全局视觉配置不是一组散落 CSS，而是“后台配置字段 + `wp_head` 动态 CSS + body 模式 class + 前端切换脚本”的组合。开发时要先判断需求属于哪一层：
+
+| 层级          | 负责内容                                                          | 典型入口                          |
+| ------------- | ----------------------------------------------------------------- | --------------------------------- |
+| 主题后台配置  | 全局主题色、背景图、布局宽度、圆角、导航页脚颜色、日夜间模式      | `inc/options/admin-options.php`   |
+| 页面独立配置  | 页面最大宽度、页面背景、页面内容样式                              | `inc/options/metabox-options.php` |
+| 动态 CSS 输出 | CSS 变量、全局背景、页面背景、暗黑模式变量、导航页脚变量          | `inc/functions/zib-head.php`      |
+| 模式判断      | 读取默认模式、用户 Cookie、时间自动切换、body class               | `inc/functions/zib-theme.php`     |
+| 前端切换      | 点击 `.toggle-theme`，切换 body class、Cookie、图片和代码高亮主题 | `js/main.js`                      |
+
+因此不要把“改主题色”理解为只改一个 CSS 文件。主题色、背景、暗黑模式、图片资源、代码高亮和编辑器预览都会被这套链路影响。
+
+## 核心文件
+
+| 文件                              | 作用                                                                   |
+| --------------------------------- | ---------------------------------------------------------------------- |
+| `inc/options/admin-options.php`   | 注册全局布局、主题模式、背景、主题色、圆角、导航颜色、页脚颜色         |
+| `inc/options/metabox-options.php` | 注册页面独立宽度和页面背景                                             |
+| `inc/functions/zib-head.php`      | 输出 `meta theme-color`、CSS 变量、页面背景和全局背景                  |
+| `inc/functions/zib-theme.php`     | 判断当前模式、输出 body class、按模式筛选图片、给 TinyMCE 加模式 class |
+| `inc/functions/zib-header.php`    | 在 PC 导航和移动菜单输出主题切换按钮                                   |
+| `inc/functions/zib-footer.php`    | 右侧浮动按钮可输出主题切换入口，并按模式选择代码高亮主题               |
+| `js/main.js`                      | 处理 `.toggle-theme` 点击、View Transition 动画、Cookie 和资源切换     |
+
+## 后台配置字段
+
+常见全局视觉字段如下：
+
+| 配置项                                       | 作用                                                        |
+| -------------------------------------------- | ----------------------------------------------------------- |
+| `layout_max_width`                           | 默认页面布局最大宽度，后台最小值 1200                       |
+| `theme_mode`                                 | 默认主题风格，支持 `white-theme`、`dark-theme`、`time-auto` |
+| `theme_mode_button`                          | 主题切换按钮显示位置，默认 PC 顶部导航和移动菜单            |
+| `theme_img_bg`                               | 全局日间背景图和背景色                                      |
+| `dark_theme_img_bg`                          | 全局夜间背景图和背景色                                      |
+| `theme_skin_custom`                          | 自定义全局主题高亮色                                        |
+| `theme_skin`                                 | 预置主题高亮色，只有自定义色为空时生效                      |
+| `dark_theme_skin_custom`                     | 夜间模式单独主题高亮色                                      |
+| `close_backdrop`                             | 全局关闭背景高斯模糊                                        |
+| `theme_main_radius`                          | 页面卡片圆角尺寸                                            |
+| `header_theme_custom`                        | 是否启用自定义导航栏颜色                                    |
+| `header_theme_bg_custom` / `header_theme_bg` | 导航栏自定义背景色或预置背景                                |
+| `header_theme_color_custom`                  | 导航栏文字颜色                                              |
+| `footer_theme_custom`                        | 是否启用自定义页脚颜色                                      |
+| `footer_theme_bg_custom` / `footer_theme_bg` | 页脚自定义背景色或预置背景                                  |
+| `footer_theme_color_custom`                  | 页脚文字颜色                                                |
+
+页面独立配置由 `inc/options/metabox-options.php` 注册：
+
+| 页面 Meta             | 作用                               |
+| --------------------- | ---------------------------------- |
+| `layout_max_width`    | 当前页面最大宽度，`0` 表示跟随全局 |
+| `layout_bg.img_white` | 当前页面日间背景                   |
+| `layout_bg.img_dark`  | 当前页面夜间背景                   |
+
+页面背景优先级高于全局背景。只要页面配置里有背景相关值，`zib_head_css_layout_bg()` 会先输出页面背景并直接返回，不再继续输出全局背景。
+
+## CSS 变量输出
+
+`zib_head_css()` 会把主题设置转成 CSS 变量写到页面 head：
+
+```php
+function zib_head_css()
+{
+    $styles = '';
+
+    $color = '';
+    if (_pz('theme_skin')) {
+        $color = _pz('theme_skin');
+    }
+
+    if (_pz('theme_skin_custom')) {
+        $color = substr(_pz('theme_skin_custom'), 1);
+    }
+
+    $var   = '';
+    $color = $color ?: 'f04494';
+    $var .= '--theme-color:#' . $color . ';';
+    $var .= '--focus-shadow-color:' . hex_to_rgba('#' . $color, '.4') . ';';
+    $var .= '--focus-color-opacity1:' . hex_to_rgba('#' . $color, '.1') . ';';
+    $var .= '--focus-color-opacity05:' . hex_to_rgba('#' . $color, '.05') . ';';
+    $var .= '--focus-color-opacity3:' . hex_to_rgba('#' . $color, '.3') . ';';
+    $var .= '--focus-color-opacity6:' . hex_to_rgba('#' . $color, '.6') . ';';
+
+    $styles .= 'body{' . $var . '}';
+
+    if ($styles) {
+        echo '<style>' . $styles . '</style>';
+    }
+}
+```
+
+常用变量：
+
+| 变量                                        | 用途                                      |
+| ------------------------------------------- | ----------------------------------------- |
+| `--theme-color`                             | 主题高亮色                                |
+| `--focus-shadow-color`                      | 聚焦阴影颜色                              |
+| `--focus-color-opacity05` / `1` / `3` / `6` | 主题色不同透明度                          |
+| `--main-radius`                             | 全局圆角                                  |
+| `--posts-card-scale`                        | 卡片列表缩略图比例                        |
+| `--posts-list-scale`                        | 列表模式缩略图比例                        |
+| `--single-cover-scale`                      | 文章封面比例                              |
+| `--mian-max-width`                          | 页面最大宽度，主题源码里变量名就是 `mian` |
+| `--header-bg` / `--header-color`            | 导航栏背景和文字                          |
+| `--footer-bg` / `--footer-color`            | 页脚背景和文字                            |
+
+扩展样式时优先使用这些变量。不要把按钮、卡片、弹窗、导航和用户中心写死成固定颜色，否则日间、夜间和用户自定义主题色会断开。
+
+## 主题色优先级
+
+全局主题色的读取顺序：
+
+1. `theme_skin` 预置色。
+2. `theme_skin_custom` 自定义色覆盖预置色。
+3. 都为空时使用默认 `f04494`。
+
+夜间模式如果配置了 `dark_theme_skin_custom`，会额外输出：
+
+```php
+body.dark-theme{
+    --theme-color:#...;
+    --focus-shadow-color:...;
+    --focus-color-opacity1:...;
+}
+```
+
+这意味着扩展组件应该写成：
+
+```css
+.docs-action {
+  color: var(--focus-color);
+  background: var(--focus-color-opacity1);
+  box-shadow: 0 0 0 3px var(--focus-shadow-color);
+}
+```
+
+不要写成：
+
+```css
+.docs-action {
+  color: #f04494;
+}
+```
+
+固定色只适合品牌 Logo、支付平台图标、状态色等确实不应跟随主题色变化的元素。
+
+## 布局宽度
+
+全局宽度来自 `_pz('layout_max_width', 1200)`，页面可以通过 Meta 覆盖：
+
+```php
+function zib_get_page_max_width()
+{
+    $max_width = _pz('layout_max_width', 1200);
+    if (is_page()) {
+        global $post;
+        $post_id     = $post->ID ?? 0;
+        $p_max_width = (int) zib_get_post_meta($post_id, 'layout_max_width', 0);
+        if ($p_max_width && $p_max_width > 1200) {
+            $max_width = $p_max_width;
+        }
+    }
+
+    if ($max_width < 1200) {
+        $max_width = 1200;
+    }
+
+    return apply_filters('page_max_width', $max_width . 'px');
+}
+```
+
+自定义页面需要更宽时，用过滤器处理明确页面，不要全局覆盖容器：
+
+```php
+function zib_docs_custom_dashboard_width($width)
+{
+    if (!is_page_template('pages/custom-dashboard.php')) {
+        return $width;
+    }
+
+    return '1480px';
+}
+add_filter('page_max_width', 'zib_docs_custom_dashboard_width');
+```
+
+主题会把结果输出到 `--mian-max-width`。扩展 CSS 时要使用主题现有容器和变量，而不是重新写一个全站 `.container { max-width: ... }`。
+
+## 全局背景与页面背景
+
+全局背景来自：
+
+```php
+_pz('theme_img_bg');
+_pz('dark_theme_img_bg');
+```
+
+页面背景来自：
+
+```php
+zib_get_post_meta($post_id, 'layout_bg', true);
+```
+
+`zib_head_css_layout_bg()` 的顺序是：
+
+1. 如果当前是页面，先读取页面 `layout_bg`。
+2. 页面有日间或夜间背景时，输出页面背景。
+3. 页面背景存在时直接返回，不继续读全局背景。
+4. 页面没有背景时，才输出全局 `theme_img_bg` 和 `dark_theme_img_bg`。
+
+字段结构保留 Codestar `background` 字段格式：
+
+```php
+array(
+    'background-color'      => '',
+    'background-image'      => '',
+    'background-position'   => 'center top',
+    'background-repeat'     => 'no-repeat',
+    'background-attachment' => 'fixed',
+    'background-size'       => '100%',
+    'background-origin'     => '',
+)
+```
+
+扩展页面背景时不要另起一个自定义字段再单独输出 CSS。优先复用 `layout_bg`，这样日间、夜间、页面配置和全局回退能保持一致。
+
+## 日夜间模式
+
+当前模式由 `zib_get_theme_mode()` 判断：
+
+```php
+function zib_get_theme_mode()
+{
+    $theme_mode = _pz('theme_mode');
+    if (_pz('theme_mode_button', true) && isset($_COOKIE['theme_mode'])) {
+        $theme_mode = $_COOKIE['theme_mode'];
+    } else {
+        $time = current_time('G');
+        if ('time-auto' == $theme_mode) {
+            if ($time >= 20 || $time < 8) {
+                $theme_mode = 'dark-theme';
+            } else {
+                $theme_mode = 'white-theme';
+            }
+        }
+    }
+    return apply_filters('zib_theme_mode', $theme_mode);
+}
+```
+
+关键点：
+
+| 规则       | 说明                                                           |
+| ---------- | -------------------------------------------------------------- |
+| 后台默认值 | `theme_mode` 可以是日间、夜间、早晚 8 点自动                   |
+| 用户优先   | 只要启用切换按钮并存在 `theme_mode` Cookie，就优先使用用户选择 |
+| body class | `_bodyclass()` 会把当前模式追加到 body class                   |
+| 编辑器     | TinyMCE 的 body class 也会追加当前模式                         |
+| 可过滤     | `zib_theme_mode` 可以覆盖最终模式                              |
+
+如果某个页面必须固定夜间模式，可以用过滤器处理：
+
+```php
+function zib_docs_force_dark_theme($theme_mode)
+{
+    if (!is_page_template('pages/custom-showcase.php')) {
+        return $theme_mode;
+    }
+
+    return 'dark-theme';
+}
+add_filter('zib_theme_mode', 'zib_docs_force_dark_theme');
+```
+
+这会影响 body class、`meta theme-color`、自适应图片和编辑器预览，比只给 body 写一个额外 class 更完整。
+
+## 切换按钮与前端动画
+
+按钮位置来自：
+
+```php
+function zib_get_theme_mode_button_positions()
+{
+    return (array) apply_filters('zib_theme_mode_button_positions', (array) _pz('theme_mode_button', array('pc_nav', 'm_menu')));
+}
+```
+
+PC 顶部导航和移动菜单会输出：
+
+```html
+<a href="javascript:;" class="toggle-theme toggle-radius"
+  ><i class="fa fa-toggle-theme"></i
+></a>
+```
+
+`js/main.js` 监听 `.toggle-theme`。浏览器支持 View Transition API 时，主题会用点击位置做圆形扩散动画；不支持时直接切换。切换时会同步处理：
+
+| 内容             | 前端行为                                            |
+| ---------------- | --------------------------------------------------- |
+| body class       | 增减 `dark-theme`                                   |
+| HTML class       | 增减 `document.documentElement.classList` 的 `dark` |
+| Cookie           | 写入 `theme_mode=dark-theme` 或 `white-theme`       |
+| meta theme-color | 切换为 `#2F3135` 或 `#FDFCFE`                       |
+| 自适应图片       | 替换 `white-src` / `dark-src`                       |
+| 旧式切换图片     | 替换 `switch-src`                                   |
+| 代码高亮         | 切换 Enlighter 亮色/暗色主题 class                  |
+| TinyMCE          | 给编辑器 body 增减 `dark-theme`                     |
+
+新增主题切换入口时不要重新写 JS，输出 `.toggle-theme` 即可：
+
+```php
+function zib_docs_append_theme_toggle($html, $user_id)
+{
+    $html .= '<a href="javascript:;" class="toggle-theme toggle-radius ml10"><i class="fa fa-toggle-theme"></i></a>';
+
+    return $html;
+}
+add_filter('zib_nav_radius_button', 'zib_docs_append_theme_toggle', 30, 2);
+```
+
+如果只是调整按钮显示位置，优先过滤 `zib_theme_mode_button_positions`：
+
+```php
+function zib_docs_theme_button_positions($positions)
+{
+    if (is_page_template('pages/custom-fullscreen.php')) {
+        return array();
+    }
+
+    return $positions;
+}
+add_filter('zib_theme_mode_button_positions', 'zib_docs_theme_button_positions');
+```
+
+## 自适应图片
+
+日夜间不同图片用 `zib_get_adaptive_theme_img()`：
+
+```php
+function zib_get_adaptive_theme_img($white_src = '', $dark_src = '', $alt = '', $more = '', $lazy = 'auto')
+{
+    if (!$dark_src) {
+        $dark_src = $white_src;
+    }
+
+    if (!$white_src) {
+        $white_src = $dark_src;
+    }
+
+    $this_src = zib_get_theme_mode() == 'dark-theme' ? $dark_src : $white_src;
+    $img      = '<img src="' . $this_src . '" white-src="' . $white_src . '" dark-src="' . $dark_src . '" alt="' . $alt . '" ' . $more . '>';
+
+    return $img;
+}
+```
+
+它会输出 `white-src` 和 `dark-src`，前端切换主题时会自动换图。适合 Logo、登录页图片、图标插画、强调背景等需要适配亮暗主题的资源。
+
+示例：
+
+```php
+function zib_docs_get_adaptive_logo()
+{
+    $white_src = _pz('logo_src');
+    $dark_src  = _pz('logo_src_dark');
+
+    return zib_get_adaptive_theme_img($white_src, $dark_src, get_bloginfo('name'), 'class="docs-logo"');
+}
+```
+
+不要只在 CSS 里用 `display:none` 切两张图片。主题已有的切换脚本会处理 `white-src` / `dark-src`，复用它能减少闪烁和重复逻辑。
+
+## 导航栏与页脚颜色
+
+导航颜色开启 `header_theme_custom` 后，会输出：
+
+```php
+$styles .= '.header{--header-bg:' . $h_bg . ';--header-color:' . $h_c . ';}';
+```
+
+页脚颜色开启 `footer_theme_custom` 后，会输出：
+
+```php
+$styles .= 'body,body.dark-theme{--footer-bg:' . $h_bg . ';--footer-color:' . $h_c . ';}';
+```
+
+主题对导航和页脚使用变量控制，因此扩展导航按钮、下拉菜单、页脚组件时应继承这些变量：
+
+```css
+.docs-footer-link {
+  color: var(--footer-color);
+}
+
+.docs-header-action {
+  color: var(--header-color);
+  background: var(--header-bg);
+}
+```
+
+如果在导航里新增按钮，仍然优先走 `zib_nav_radius_button`、`zib_menu_button()` 或菜单 Walker，而不是在模板里手写一套固定颜色的导航块。
+
+## 自定义 CSS 的边界
+
+主题后台有 `csscode`，`zib_head_css()` 会直接追加到 head：
+
+```php
+if (_pz('csscode')) {
+    $styles .= _pz('csscode');
+}
+```
+
+开发时尽量不要把复杂业务样式都塞进 `csscode`。更稳妥的方式是：
+
+| 场景           | 推荐做法                        |
+| -------------- | ------------------------------- |
+| 少量运营样式   | 后台 `csscode`                  |
+| 可复用模块样式 | 插件或子主题 enqueue 独立 CSS   |
+| 只影响一个页面 | 页面模板或页面条件下 enqueue    |
+| 需要跟随主题色 | 使用 CSS 变量                   |
+| 需要暗黑模式   | 写 `body.dark-theme` 或依赖变量 |
+
+页面级样式示例：
+
+```php
+function zib_docs_enqueue_showcase_style()
+{
+    if (!is_page_template('pages/custom-showcase.php')) {
+        return;
+    }
+
+    wp_enqueue_style(
+        'zib_docs_showcase',
+        get_stylesheet_directory_uri() . '/assets/showcase.css',
+        array(),
+        '1.0.0'
+    );
+}
+add_action('wp_enqueue_scripts', 'zib_docs_enqueue_showcase_style');
+```
+
+CSS 示例：
+
+```css
+.docs-showcase {
+  border-radius: var(--main-radius);
+  background: var(--main-bg-color);
+  color: var(--main-color);
+  border: 1px solid var(--main-border-color);
+}
+
+.docs-showcase .docs-primary {
+  color: var(--focus-color);
+  background: var(--focus-color-opacity1);
+}
+```
+
+## 常见风险
+
+| 风险                   | 说明                                                   |
+| ---------------------- | ------------------------------------------------------ |
+| 写死颜色               | 会破坏主题色、夜间模式和用户自定义配色                 |
+| 覆盖全站容器           | 容易影响首页、文章页、商城、论坛、用户中心和移动端布局 |
+| 绕过 `layout_bg`       | 页面背景、全局背景和夜间背景回退会不一致               |
+| 只切 body class        | 图片、代码高亮、meta theme-color、TinyMCE 可能不同步   |
+| 背景图过大             | 固定背景和大图会增加移动端滚动负担                     |
+| 导航背景和文字对比不足 | 主题已给前景色字段，扩展时也要检查可读性               |
+| 滥用 `csscode`         | 配置迁移和版本维护困难，也不利于按页面加载             |
+| 忽略 Cookie 优先级     | 用户主动切换主题后，会覆盖后台默认模式                 |
+
+## 调试入口
+
+| 现象               | 优先检查                                                                   |
+| ------------------ | -------------------------------------------------------------------------- |
+| 主题色不生效       | `theme_skin_custom` 是否覆盖 `theme_skin`，页面是否缓存旧 head             |
+| 夜间主题色不变     | `dark_theme_skin_custom` 是否为空，body 是否有 `dark-theme`                |
+| 背景图不显示       | 页面 `layout_bg` 是否覆盖全局，图片 URL 是否有效，CSS 是否被缓存           |
+| 页面宽度不变       | 页面 Meta `layout_max_width`、`page_max_width` 过滤器、`--mian-max-width`  |
+| 切换按钮不显示     | `theme_mode_button`、`zib_theme_mode_button_positions`、导航或移动菜单位置 |
+| 点击切换无效       | `.toggle-theme` 是否保留，`main.js` 是否加载，Cookie 是否被浏览器限制      |
+| 图片未跟随切换     | 是否使用 `white-src` / `dark-src`，或 `switch-src` 是否正确                |
+| 代码高亮主题不切换 | `highlight_kg`、`highlight_white_zt`、`highlight_dark_zt`、Enlighter class |
+
+## 参考源码
+
+本页根据 `inc/options/admin-options.php`、`inc/options/metabox-options.php`、`inc/functions/zib-head.php`、`inc/functions/zib-theme.php`、`inc/functions/zib-header.php`、`inc/functions/zib-footer.php`、`js/main.js`，以及子比主题官网公开的全局背景图和主题颜色教程蒸馏整理。

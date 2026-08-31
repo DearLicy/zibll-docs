@@ -1,0 +1,516 @@
+---
+title: 搜索体系
+description: 梳理子比主题站内搜索页、搜索弹窗、类型 Tab、筛选、排序、关键词、搜索历史、模块接入与 Meilisearch。
+---
+
+## 它不是一个独立搜索接口
+
+子比主题的搜索体系主要围绕 WordPress 搜索页、主题搜索弹窗、Ajax 加载、Tab 切换、筛选、排序和模块接入构建。它不是一套开放搜索 API，也不是只靠 REST 搜索工作的独立服务。
+
+二次开发搜索时，先判断目标是“改变搜索页展示”“增加搜索类型”“增加筛选条件”“改变查询字段”“接入外部搜索引擎”，再选择对应入口。
+
+## 核心文件
+
+```txt
+search.php
+inc/functions/zib-search.php
+action/main.php
+action/function.php
+inc/functions/rest-api/function.php
+inc/class/ms-class.php
+```
+
+| 文件                                  | 作用                                          |
+| ------------------------------------- | --------------------------------------------- |
+| `search.php`                          | 搜索结果页模板                                |
+| `inc/functions/zib-search.php`        | 搜索页内容、Tab、筛选、排序、关键词、查询改写 |
+| `action/main.php`                     | 搜索弹窗内容 Ajax                             |
+| `action/function.php`                 | 菜单搜索 Ajax                                 |
+| `inc/functions/rest-api/function.php` | 补充 WordPress REST 搜索范围                  |
+| `inc/class/ms-class.php`              | Meilisearch 客户端封装                        |
+
+## 搜索入口
+
+| 入口       | 函数或动作              | 用途                                     |
+| ---------- | ----------------------- | ---------------------------------------- |
+| 搜索结果页 | `zib_search_content()`  | 输出搜索页主内容                         |
+| 主搜索框   | `zib_get_main_search()` | 读取主题配置并输出搜索卡片               |
+| 搜索卡片   | `zib_get_search_box()`  | 输出表单、热门关键词、历史搜索、热门文章 |
+| 搜索按钮   | `zib_get_search_link()` | 生成可唤起搜索弹窗的按钮                 |
+| 搜索弹窗   | `search_box`            | Ajax 加载完整搜索框                      |
+| 菜单搜索   | `menu_search`           | 菜单或导航里的搜索交互                   |
+
+搜索表单一般提交到站点首页，通过 `s`、`type`、`trem`、`user`、`orderby` 等参数控制搜索范围和展示。
+
+## 搜索类型
+
+默认搜索类型：
+
+```php
+function zib_get_search_types()
+{
+    $types = array(
+        'post' => __('文章', 'zib_language'),
+        'user' => __('用户', 'zib_language'),
+    );
+    return apply_filters('search_types', $types);
+}
+```
+
+论坛模块会加入：
+
+| type    | 含义 |
+| ------- | ---- |
+| `plate` | 版块 |
+| `forum` | 帖子 |
+
+商城模块会加入：
+
+| type      | 含义 |
+| --------- | ---- |
+| `product` | 商品 |
+
+新增搜索类型时至少要同时处理：
+
+1. `search_types`，让搜索框知道新类型。
+2. `search_main_tabs_array`，让搜索页 Tab 出现新类型。
+3. `main_search_tab_content_{type}`，输出该类型结果。
+4. 查询逻辑或自定义查询函数，保证结果来源正确。
+5. 筛选、排序和分页参数，保证 Ajax 路由切换可用。
+
+示例结构：
+
+```php
+add_filter('search_types', 'zib_docs_search_types');
+
+function zib_docs_search_types($types)
+{
+    $types['custom'] = '自定义内容';
+    return $types;
+}
+
+add_filter('search_main_tabs_array', 'zib_docs_search_tabs');
+
+function zib_docs_search_tabs($tabs)
+{
+    $tabs['custom'] = array(
+        'title'         => '自定义内容',
+        'content_class' => 'posts-row',
+        'route'         => true,
+        'loader'        => zib_get_author_tab_loader('post'),
+    );
+
+    return $tabs;
+}
+
+add_filter('main_search_tab_content_custom', 'zib_docs_search_custom_content');
+
+function zib_docs_search_custom_content($html = '')
+{
+    return '<div class="zib-widget">搜索结果内容</div>';
+}
+```
+
+示例只展示挂载位置。实际落地时，要用自己的查询结果、分页和安全输出替换静态 HTML。
+
+## 搜索页 Tab
+
+搜索页主函数会先构造 `post` 和 `user` 两个 Tab，再通过 Filter 交给模块扩展：
+
+```php
+$tabs_args = apply_filters('search_main_tabs_array', $tabs_args);
+$tab_content = apply_filters('main_search_tab_content_' . $type, '');
+```
+
+Tab 链接会带 `ajax-replace="true"` 和 `route="1"`，用于前端 Ajax 切换和路由标题更新。新增 Tab 时，尽量保持主题的 `route`、`loader`、`content_class` 结构，不要把 Tab 写成完全独立页面。
+
+## 筛选项
+
+搜索页筛选由 `zib_get_search_tab_nav_filter()` 输出，筛选数据来自：
+
+```php
+zib_get_search_facets_datas()
+```
+
+默认支持的筛选维度：
+
+| type      | 筛选                                    |
+| --------- | --------------------------------------- |
+| `post`    | `category`、`topics`、`post_tag`        |
+| `forum`   | `plate_id`、`forum_topic`、`forum_tag`  |
+| `product` | `shop_cat`、`shop_tag`、`shop_discount` |
+| `plate`   | `plate_cat`                             |
+
+筛选数据会缓存到：
+
+```txt
+search_facets_datas / zib_cache_group
+```
+
+主题配置保存后会清理缓存：
+
+```php
+add_action('csf_zibll_options_saved', 'zib_search_facets_datas_cache_delete');
+```
+
+如果扩展筛选数据，可以使用：
+
+```php
+add_filter('search_facets_datas', 'zib_docs_search_facets');
+
+function zib_docs_search_facets($data)
+{
+    $data['category'][] = array(
+        'id'   => 1,
+        'name' => '示例分类',
+    );
+
+    return $data;
+}
+```
+
+新增筛选不只是加链接，还要在查询阶段处理对应参数。
+
+## 排序项
+
+排序由 `zib_get_search_orderby_lists()` 输出，核心 Filter 是：
+
+```php
+search_orderby_array
+```
+
+默认排序包含：
+
+| type      | 排序                               |
+| --------- | ---------------------------------- |
+| `post`    | 最新、热门、点赞、评论、收藏、销量 |
+| `forum`   | 最新、热门、评论、收藏、评分、销量 |
+| `product` | 最新、热门、销量、评分、收藏       |
+| `plate`   | 最新、热门、关注、帖子数、最新回帖 |
+| `user`    | 昵称、注册时间                     |
+
+新增排序时要同时确认查询层能识别 `orderby`。只把排序链接显示出来，但不修改查询，会让用户看到可点击项却得不到正确结果。
+
+## 查询改写
+
+搜索页主要查询改写点：
+
+| Hook                    | 函数                                 | 作用                                       |
+| ----------------------- | ------------------------------------ | ------------------------------------------ |
+| `parse_query`           | `zib_main_search_query_search_types` | 解析并保存当前搜索类型                     |
+| `pre_get_posts`         | `zib_main_search_query`              | 设置文章类型、排除分类、分类筛选、作者筛选 |
+| `posts_clauses_request` | `zib_posts_clauses_request`          | 搜索用户时阻止主文章查询                   |
+| `posts_search`          | `zib_search_custom_key`              | 按自定义字段范围改写搜索 SQL               |
+
+主题自定义搜索字段来自：
+
+```php
+zib_get_search_custom_key()
+```
+
+常见字段包括标题、内容、摘要、分类法、评论内容、作者昵称等。开启更多字段会增加 SQL JOIN 和 LIKE 条件，站点内容量大时要评估性能。
+
+## 热门关键词与搜索历史
+
+热门关键词：
+
+```php
+zib_update_search_keywords($s);
+zib_get_search_keywords();
+```
+
+保存位置：
+
+```txt
+option: search_keywords
+```
+
+搜索历史：
+
+```php
+zib_save_history_search($s);
+zib_get_search_history_keywords();
+```
+
+保存位置：
+
+```txt
+cookie: history_search
+```
+
+热门关键词适合反映站点整体搜索趋势，搜索历史只适合当前浏览器用户。不要把搜索历史当作服务端用户行为记录使用。
+
+管理员可以通过：
+
+| Action                       | 用途                   |
+| ---------------------------- | ---------------------- |
+| `search_keywords_edit_modal` | 打开热门关键词编辑弹窗 |
+| `search_keywords_edit`       | 保存热门关键词         |
+
+这两个动作只适合站点管理场景，二次开发时不要暴露给普通用户。
+
+## 模块接入方式
+
+论坛和商城不是复制搜索页，而是接入同一套类型、Tab 和内容 Filter。
+
+论坛接入：
+
+```php
+add_filter('search_types', 'zib_bbs_search_types_filter');
+add_filter('search_main_tabs_array', 'zib_bbs_search_main_tabs_array_filter');
+```
+
+论坛实际还会接入内容渲染：
+
+```php
+add_filter('main_search_tab_content_forum', 'zib_bbs_get_search_posts', 10);
+add_filter('main_search_tab_content_plate', 'zib_bbs_get_search_plate', 10);
+```
+
+商城接入：
+
+```php
+add_filter('search_types', 'zib_shop_search_types_filter');
+add_filter('search_main_tabs_array', 'zib_shop_search_main_tabs_array_filter');
+```
+
+这也是扩展搜索的推荐方式：让新模块进入主题搜索框、搜索页 Tab、Ajax 路由和筛选体系，而不是另做一个体验割裂的搜索页。
+
+## 论坛搜索联动
+
+论坛搜索不是单独页面。论坛模块开启后，`inc/functions/bbs/bbs.php` 会通过 `search_types` 注册两个搜索类型：
+
+| type    | 查询对象          | 内容 Filter                     | 输出函数                     |
+| ------- | ----------------- | ------------------------------- | ---------------------------- |
+| `plate` | `plate` 版块      | `main_search_tab_content_plate` | `zib_bbs_get_search_plate()` |
+| `forum` | `forum_post` 帖子 | `main_search_tab_content_forum` | `zib_bbs_get_search_posts()` |
+
+`plate` 搜索会把主查询结果交给 `zib_bbs_get_main_plate()` 渲染，并包在 `.plate-lists.ajax-item` 内。`forum` 搜索会复用 `zib_bbs_get_posts_list(array('class' => 'alone ajax-item'))`。因此扩展论坛搜索展示时，不要重新写一套列表样式，优先过滤这些输出函数前后的 Hook，或在 `main_search_tab_content_plate` / `main_search_tab_content_forum` 后追加内容。
+
+论坛筛选在 `zib_get_search_tab_nav_filter()` 里有特殊处理：
+
+| type    | 筛选参数      | 数据来源                    | URL 值                  |
+| ------- | ------------- | --------------------------- | ----------------------- |
+| `forum` | `plate_id`    | 后台搜索筛选配置里的版块 ID | `trem=plate_{plate_id}` |
+| `forum` | `forum_topic` | 话题 term ID                | `trem={term_id}`        |
+| `forum` | `forum_tag`   | 标签 term ID                | `trem={term_id}`        |
+| `plate` | `plate_cat`   | 版块分类 term ID            | `trem={term_id}`        |
+
+`plate_id` 不是 taxonomy，所以主题会把它编码为 `plate_123`。搜索说明文字和搜索框分类下拉都会识别这个格式，再通过 `get_post()` 读取版块标题和链接。扩展版块筛选时要保留这个协议，不能把版块 ID 当成普通 term ID。
+
+示例：给论坛搜索追加一个版块筛选项，保持 `plate_{$id}` 协议：
+
+```php
+add_filter('search_facets_datas', 'zib_docs_search_facets_plate');
+
+function zib_docs_search_facets_plate($data)
+{
+    $plate_id = 123;
+    $plate    = get_post($plate_id);
+
+    if (!empty($plate->ID) && 'plate' === $plate->post_type) {
+        $data['plate_id'][] = array(
+            'id'   => $plate->ID,
+            'name' => zib_str_cut($plate->post_title, 0, 15, '...'),
+        );
+    }
+
+    return $data;
+}
+```
+
+如果需要在搜索框里默认限定某个版块，传入的 `in_cat` 也要使用同样格式：
+
+```php
+zib_get_search_box(array(
+    'show_input_cat' => true,
+    'show_type'      => true,
+    'in_type'        => 'forum',
+    'in_cat'         => 'plate_' . $plate_id,
+    'placeholder'    => __('搜索当前版块内容', 'zib_language'),
+), true);
+```
+
+## 论坛搜索查询边界
+
+搜索页的主查询由 `parse_query` 和 `pre_get_posts` 处理。`zib_main_search_query_search_types()` 只负责解析当前 `type`，并把结果保存到全局 `$search_type`；`zib_main_search_query()` 负责处理 `trem` 和 `user`。
+
+普通 term 筛选会被转成 `tax_query`：
+
+```php
+$tax_query = array(array(
+    'taxonomy' => $get_term->taxonomy,
+    'field'    => 'id',
+    'terms'    => $get_term->term_id,
+));
+$query->set('tax_query', $tax_query);
+```
+
+但 `plate_123` 不是 term ID，不能直接走这段逻辑。论坛模块在 `inc/functions/bbs/inc/class.init.php` 的 `main_post_query()` 里补了这层处理：`type=forum` 时设置 `post_type=forum_post`，`type=plate` 时设置 `post_type=plate`，遇到 `trem=plate_123` 时追加 `plate_id` 的 `meta_query`。
+
+```php
+if ('forum' === $type) {
+    $query->set('post_type', 'forum_post');
+}
+
+if ('plate' === $type) {
+    $query->set('post_type', 'plate');
+}
+
+if ($cat && stristr($cat, 'plate_')) {
+    $plate_meta_query = array(
+        'key'   => 'plate_id',
+        'value' => str_replace('plate_', '', $cat),
+    );
+    $meta_query   = $query->get('meta_query');
+    $meta_query   = is_array($meta_query) ? $meta_query : array();
+    $meta_query[] = $plate_meta_query;
+
+    $query->set('meta_query', $meta_query);
+}
+```
+
+如果你新增的是类似版块这种“不是 taxonomy 的筛选对象”，可以照这个模式处理。不要把 `plate_123` 强转成 `(int)` 后交给 `get_term()`，那样会把版块筛选静默丢掉。
+
+示例：给自定义搜索类型识别一个非 taxonomy 筛选：
+
+```php
+add_action('pre_get_posts', 'zib_docs_search_custom_object_query', 20);
+
+function zib_docs_search_custom_object_query($query)
+{
+    if (!$query->is_search() || !$query->is_main_query() || $query->is_admin) {
+        return;
+    }
+
+    if (empty($_REQUEST['type']) || 'custom' !== $_REQUEST['type']) {
+        return;
+    }
+
+    $trem = !empty($_REQUEST['trem']) ? trim(strip_tags($_REQUEST['trem'])) : '';
+    if (!$trem || strpos($trem, 'custom_') !== 0) {
+        return;
+    }
+
+    $object_id = (int) str_replace('custom_', '', $trem);
+    if (!$object_id) {
+        return;
+    }
+
+    $query->set('meta_query', array(
+        array(
+            'key'   => 'custom_object_id',
+            'value' => $object_id,
+        ),
+    ));
+}
+```
+
+搜索自定义字段只对 `post`、`forum_post`、`shop_product` 生效。`zib_search_custom_key()` 会检查主查询的 `post_type`，只有包含这些类型时才改写 `posts_search`。如果要让论坛搜索匹配话题、标签、评论或作者昵称，需要在后台搜索字段里启用对应项；大站要评估 `comments`、`users`、`terms` JOIN 带来的慢查询风险。
+
+## 搜索缓存排查
+
+搜索体系里常见的缓存点有三类：
+
+| 缓存 / 存储 | 位置                                      | 清理时机                         | 排查方向                                   |
+| ----------- | ----------------------------------------- | -------------------------------- | ------------------------------------------ |
+| 筛选项数据  | `search_facets_datas` / `zib_cache_group` | `csf_zibll_options_saved`        | 后台新增筛选版块、话题或标签后前台不显示   |
+| 热门关键词  | option `search_keywords`                  | 管理员弹窗保存或搜索命中自动更新 | 热门词排序、`&type=forum` 后缀、置顶关键词 |
+| 搜索历史    | cookie `history_search`                   | 浏览器端更新                     | 单个访客看到的历史不一致                   |
+
+如果搜索页筛选项不更新，先确认后台搜索筛选配置是否保存成功，再清理 `search_facets_datas`。如果只是版块名、话题名改了但筛选仍显示旧名称，多数是对象缓存仍在返回旧筛选数据。
+
+示例：保存版块或话题后主动清理搜索筛选缓存：
+
+```php
+add_action('save_post_plate', 'zib_docs_search_facets_cache_delete');
+add_action('edited_forum_topic', 'zib_docs_search_facets_cache_delete');
+add_action('edited_forum_tag', 'zib_docs_search_facets_cache_delete');
+
+function zib_docs_search_facets_cache_delete()
+{
+    wp_cache_delete('search_facets_datas', 'zib_cache_group');
+}
+```
+
+不要把整张搜索页静态缓存给所有用户。搜索页会根据 `s`、`type`、`trem`、`user`、`orderby`、分页和登录态输出不同结果，缓存插件至少要把这些查询参数纳入缓存 key；如果做不到，就排除搜索结果页和搜索弹窗。
+
+## REST 搜索的边界
+
+`inc/functions/rest-api/function.php` 主要补充 WordPress 官方 REST 搜索范围，例如在论坛启用时让搜索包含 `plate`、`forum_post`。
+
+REST 搜索与主题前台搜索不是同一个体系：
+
+| 能力           | 前台搜索体系 | REST 搜索补充      |
+| -------------- | ------------ | ------------------ |
+| 搜索页 Tab     | 是           | 否                 |
+| 搜索弹窗       | 是           | 否                 |
+| 热门关键词     | 是           | 否                 |
+| 搜索历史       | 是           | 否                 |
+| 论坛、商城展示 | 是           | 仅补充查询范围     |
+| 开放接口能力   | 否           | 也不是完整开放接口 |
+
+如果要提供第三方系统搜索接口，应单独设计 REST 路由、权限、频率限制、字段白名单和响应结构。
+
+## Meilisearch
+
+主题支持通过配置启用 Meilisearch：
+
+```php
+_pz('search_ms_s')
+zib_get_search_ms_opt()
+new zib_ms($search_ms_opt)
+```
+
+后台相关 Ajax：
+
+| Action                    | 用途         |
+| ------------------------- | ------------ |
+| `search_ms_rebuild`       | 重建索引     |
+| `search_ms_stats`         | 查看索引状态 |
+| `search_ms_sync_synonyms` | 同步同义词   |
+
+启用外部搜索后，要关注：
+
+- 索引字段是否覆盖文章、论坛、商城需要搜索的内容。
+- 新增、编辑、删除内容后是否同步索引。
+- 同义词、停用词、分词效果是否符合站点内容。
+- 外部搜索异常时是否能降级到 WordPress 搜索。
+- 后台重建索引是否有权限校验和执行时间控制。
+
+## 搜索、SEO 与多语言联动
+
+搜索页同时受 SEO head、Ajax 路由、搜索历史、热门关键词和前台翻译影响。做搜索扩展时要把这几条链路一起检查：
+
+| 联动点                  | 主题行为                                                | 二开边界                                                                   |
+| ----------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------- |
+| SEO title / description | 搜索页会用搜索词生成 keywords 和 description            | 新增 `type` 后不要只改 Tab，也要确认路由标题和页面描述是否仍能表达当前结果 |
+| URL 参数                | 搜索页依赖 `s`、`type`、`trem`、`user`、`orderby`、分页 | 缓存插件必须把这些参数纳入 key，或者排除搜索页                             |
+| Ajax 路由               | Tab、筛选、关键词按钮带 `ajax-replace`、`route`         | 自定义搜索按钮要保留 route 属性，否则前进后退、标题和当前状态会丢          |
+| 热门关键词              | 会保存原始关键词，也可能带 `&type=forum` 后缀           | 展示文本用 `zib_get_search_keywords_text()` 清理，不要直接把原值当纯关键词 |
+| 搜索历史                | 保存在浏览器 cookie `history_search`                    | 它是当前浏览器状态，不是站点级行为日志                                     |
+| 前台翻译                | `translate.listener.start()` 可能处理 Ajax 追加结果     | 搜索词、代码、订单号、提取码等用户输入值需要按场景加 `translate-ignore`    |
+| 内容审核                | 搜索不负责审核用户内容                                  | 不要把搜索历史、热门词编辑或第三方搜索接口当作内容审核入口                 |
+| Meilisearch             | 启用后自定义 SQL 搜索字段会停止接管 `posts_search`      | 后台搜索字段、索引字段和前台筛选要同步核对                                 |
+
+如果搜索结果页翻译后布局抖动，优先检查按钮、Tab、筛选项和卡片标题的换行宽度；如果搜索结果不翻译，先确认 Ajax 内容是否进入 `translate.listener` 的监听范围，再看是否被 `translate-ignore` 或缓存命中。
+
+## 扩展建议
+
+- 只改搜索页展示时，优先使用 `main_search_tab_content_{type}` 或模板层扩展。
+- 新增搜索类型时，同时接入 `search_types`、`search_main_tabs_array` 和内容输出。
+- 新增筛选时，同时处理筛选数据、URL 参数和查询逻辑。
+- 新增排序时，同时处理排序显示和查询 `orderby`。
+- 改搜索字段时，评估 SQL 性能，必要时启用 Meilisearch。
+- 做弹窗或下拉搜索时，优先复用 `zib_get_search_box()`，保持热门关键词、历史搜索和类型选择一致。
+
+## 常见风险
+
+| 风险                      | 说明                                       |
+| ------------------------- | ------------------------------------------ |
+| 只加 Tab 不加内容 Filter  | 页面会出现空结果或加载异常                 |
+| 只加排序链接不改查询      | 用户看到排序已切换，但结果没有变化         |
+| 把 `user` 当文章查询      | 主题会阻止主查询，需要使用 `WP_User_Query` |
+| 无限制扩展 `posts_search` | 大站会出现慢查询和数据库压力               |
+| 把 REST 搜索当开放接口    | 权限、字段、频率限制都不完整               |
+| 忽略 Ajax 路由属性        | 搜索页切换会退化成跳转或状态丢失           |

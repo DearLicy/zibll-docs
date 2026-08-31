@@ -1,0 +1,261 @@
+---
+title: 评论与互动
+description: 梳理子比主题评论提交、审核、置顶、点赞、收藏、关注、举报、消息和等级联动的扩展入口。
+---
+
+## 模块入口
+
+评论和互动不是一个独立模块，而是分散在主题基础函数、Ajax 文件、评论模板、用户模块和消息模块里。
+
+| 文件                                      | 作用                                   |
+| ----------------------------------------- | -------------------------------------- |
+| `action/comment.php`                      | 评论提交、编辑、审核、驳回、删除、置顶 |
+| `action/action.php`                       | 文章点赞、评论点赞、文章收藏、关注用户 |
+| `inc/functions/zib-comments-list.php`     | 评论列表、评论卡片、评论排序           |
+| `inc/functions/zib-theme.php`             | 互动按钮、评论防刷、用户互动状态判断   |
+| `inc/functions/user/ajax.php`             | 举报弹窗、举报提交                     |
+| `inc/functions/message/functions/new.php` | 点赞、收藏、关注、评论等消息通知       |
+| `inc/functions/user/user-level.php`       | 点赞、评论、关注等行为积分或等级联动   |
+
+这组功能高度依赖登录态、nonce、权限、审核和缓存。扩展时优先挂主题已有 Hook，不要直接改用户 meta 或评论 meta。
+
+评论 IP 来源、`comment_addr` 写入、前后台地址展示和归属地接口选择见 [IP 归属地与位置展示](/docs/api/ip-geolocation)。本页只保留评论提交与互动主流程。
+
+## 评论提交流程
+
+评论提交入口是 `submit_comment`：
+
+```php
+add_action('wp_ajax_submit_comment', 'zib_ajax_submit_comment');
+add_action('wp_ajax_nopriv_submit_comment', 'zib_ajax_submit_comment');
+```
+
+`zib_ajax_submit_comment()` 会做这些事：
+
+1. 调用 `zib_ajax_verify_nonce()`。
+2. 如果开启评论人机验证，调用 `zib_ajax_man_machine_verification()`。
+3. 判断评论内容长度。
+4. 判断是否编辑已有评论。
+5. 根据权限、快捷回复、内容审核 API 判断是否免审核。
+6. 调用 `wp_handle_comment_submission()` 走 WordPress 原生评论流程。
+7. 未登录用户设置评论 Cookie。
+8. 使用 `zib_get_comments_list()` 返回前端可插入的评论 HTML。
+
+扩展评论审核优先使用 WordPress 原生 Hook：
+
+```php
+function zib_docs_comment_check($approved, $commentdata)
+{
+    if (empty($commentdata['comment_content'])) {
+        return $approved;
+    }
+
+    if (strpos($commentdata['comment_content'], 'docs') !== false) {
+        return 0;
+    }
+
+    return $approved;
+}
+add_filter('pre_comment_approved', 'zib_docs_comment_check', 20, 2);
+```
+
+不要直接替换 `submit_comment`。它已经串起 nonce、人机验证、内容审核、评论防刷和前端返回结构。
+
+## 评论管理动作
+
+`action/comment.php` 提供这些 Ajax：
+
+| Ajax action           | 说明                   |
+| --------------------- | ---------------------- |
+| `approve_comment`     | 审核或驳回评论         |
+| `get_comment`         | 获取评论数据，用于编辑 |
+| `comment_set_topping` | 设置或取消评论置顶     |
+| `trash_comment`       | 删除评论到回收站       |
+| `submit_comment`      | 提交或编辑评论         |
+
+这些动作都通过 `zib_current_user_can()` 检查主题权限：
+
+```php
+zib_current_user_can('comment_audit', $comment);
+zib_current_user_can('comment_edit', $comment);
+zib_current_user_can('comment_set_topping', $comment);
+zib_current_user_can('comment_delete', $comment);
+```
+
+如果要新增评论管理动作，也要跟随这个权限模型，而不是只检查 `is_super_admin()`。
+
+评论置顶成功会触发：
+
+```php
+do_action('comment_is_topping', $comment);
+```
+
+可以用来发消息或写操作日志：
+
+```php
+function zib_docs_comment_topping_log($comment)
+{
+    if (empty($comment->comment_ID)) {
+        return;
+    }
+
+    update_comment_meta($comment->comment_ID, 'docs_topping_time', current_time('mysql'));
+}
+add_action('comment_is_topping', 'zib_docs_comment_topping_log');
+```
+
+## 评论防刷
+
+评论防刷在 `inc/functions/zib-theme.php`：
+
+```php
+add_filter('pre_comment_approved', 'zib_brush_limit_comment', 99, 2);
+```
+
+它读取 `_pz('brush_limit_comment')`，按当前用户、IP 或评论作者统计：
+
+| 配置         | 作用              |
+| ------------ | ----------------- |
+| `minutes_10` | 10 分钟内评论上限 |
+| `day_1`      | 单日评论上限      |
+
+管理员不受限制。扩展评论频率限制时，不要在前端只禁按钮，服务端必须兜底。
+
+## 互动按钮
+
+主题按钮由函数输出，前端再根据 `data-action` 发送请求：
+
+| 函数                      | data-action    | 数据                                                  |
+| ------------------------- | -------------- | ----------------------------------------------------- |
+| `zib_get_post_like()`     | `like`         | post meta `like`，user meta `like-posts`              |
+| `zib_get_comment_like()`  | `comment_like` | comment meta `comment_like`，user meta `like-comment` |
+| `zib_get_post_favorite()` | `favorite`     | post meta `favorite`，user meta `favorite-posts`      |
+| `zib_get_user_follow()`   | `follow_user`  | user meta `follow-user`、`followed-user`              |
+
+前端请求最终进入 `action/action.php`，并通过 `type` 区分：
+
+```php
+switch ($type) {
+    case 'comment_like':
+        posts_action('like-comment', $post_id, $key, __('已赞！感谢您的支持', 'zib_language'), __('点赞已取消', 'zib_language'), true);
+        break;
+
+    case 'like':
+        posts_action('like-posts', $post_id, $key, __('已赞！感谢您的支持', 'zib_language'), __('点赞已取消', 'zib_language'));
+        break;
+
+    case 'favorite':
+        posts_action('favorite-posts', $post_id, $key, __('已收藏此文章', 'zib_language'), __('已取消收藏', 'zib_language'));
+        break;
+
+    case 'follow_user':
+        follow_action('follow-user', 'followed-user', $post_id);
+        break;
+}
+```
+
+这条链路会更新计数、用户 meta，并触发业务 Hook。扩展时要挂 Hook，不要自己写一份点赞接口。
+
+## 互动 Hook
+
+互动成功时会触发：
+
+```php
+do_action('like-posts', $post_id, $count, $user_id);
+do_action('favorite-posts', $post_id, $count, $user_id);
+do_action('like-comment', $comment_id, $count, $user_id);
+do_action('follow-user', $user_id, $followed_user_id, $follow_count, $followed_count);
+```
+
+主题已有消息和等级模块监听这些 Hook：
+
+| Hook             | 已有联动               |
+| ---------------- | ---------------------- |
+| `like-posts`     | 文章点赞消息、用户等级 |
+| `favorite-posts` | 文章收藏消息、用户等级 |
+| `like-comment`   | 评论点赞消息、用户等级 |
+| `follow-user`    | 关注消息、用户等级     |
+
+新增联动示例：
+
+```php
+function zib_docs_like_posts_mark($post_id, $count, $user_id)
+{
+    if (!$post_id || !$user_id) {
+        return;
+    }
+
+    update_post_meta($post_id, 'docs_last_like_user', $user_id);
+}
+add_action('like-posts', 'zib_docs_like_posts_mark', 20, 3);
+```
+
+如果要统计取消点赞，需要注意：主题只在新增时触发这些 Hook，取消时只返回 Ajax 数据并更新计数。取消行为要另外从前端或自定义入口补充，不要误以为 Hook 会覆盖新增和取消两个方向。
+
+## 举报流程
+
+举报入口在用户模块：
+
+```php
+add_action('wp_ajax_report_modal', 'zib_ajax_report_modal');
+add_action('wp_ajax_nopriv_report_modal', 'zib_ajax_report_modal');
+add_action('wp_ajax_report_user', 'zib_ajax_report_user');
+add_action('wp_ajax_nopriv_report_user', 'zib_ajax_report_user');
+```
+
+`report_modal` 会验证 `report_modal` nonce 并输出 `zib_get_report_modal()`。`report_user` 会收集举报类型、说明、图片证据，并写入后台处理数据，同时发送管理员通知。
+
+扩展举报时要保留：
+
+1. 举报对象校验。
+2. nonce 校验。
+3. 人机验证或频率限制。
+4. 证据图片数量和格式限制。
+5. 后台处理入口。
+6. 站内消息或微信模板消息通知。
+
+## 商品评价与普通评论不同
+
+商城商品评价使用 WordPress comment 存储，但入口不是普通 `submit_comment`。评价会从订单状态进入：
+
+| 文件                                       | 说明                                        |
+| ------------------------------------------ | ------------------------------------------- |
+| `inc/functions/shop/action/action.php`     | `order_comment_modal`、`shop_order_comment` |
+| `inc/functions/shop/inc/comment.php`       | 评价创建、评分、图片、订单评价状态          |
+| `inc/functions/shop/template/comments.php` | 商品评价模板                                |
+
+商品评价成功会写：
+
+```php
+update_comment_meta($comment_id, 'score', $score_data['average']);
+zib_update_comment_meta($comment_id, 'score_data', $comment_score_data);
+zib_update_comment_meta($comment_id, 'order_data', $comment_order_data);
+zib_shop_update_order_comment_status($order_id, 1);
+```
+
+更完整的状态机、评分字段、筛选参数、移动端抽屉和相关推荐链路见 [商城模块](/docs/api/shop#商品评价与评分统计)。这里需要记住的边界是：商品评价虽然存在 comment 表里，但它的入口属于商城订单，不属于普通评论表单。
+
+扩展商品评价时不要绕过订单状态，否则用户可能重复评价、售后状态异常，或商品评分统计、好评数量、有图数量、自动好评和评论缓存不更新。
+
+## 缓存和权限
+
+- 评论列表可以缓存片段，但评论提交、审核、删除、置顶不能缓存 Ajax 响应。
+- 点赞、收藏、关注依赖当前用户 meta，不能被游客缓存错误固定。
+- 评论置顶、审核、删除要按 `zib_current_user_can()` 判断。
+- 举报、评论、私信都可能带图片，上传能力要走主题媒体上传限制。
+- 互动 Hook 已经被消息和等级模块监听，重复发消息前先确认不会双发。
+
+## 调试入口
+
+| 现象           | 优先检查                                                  |
+| -------------- | --------------------------------------------------------- |
+| 评论提交失败   | `submit_comment`、nonce、人机验证、`pre_comment_approved` |
+| 评论一直待审核 | 内容审核、免审核权限、WordPress 讨论设置                  |
+| 点赞收藏无反应 | `action/action.php`、`post_action` nonce、登录态          |
+| 关注失败       | 是否登录、目标用户是否当前用户、`follow-user` meta        |
+| 举报弹窗打不开 | `report_modal` nonce、`RefreshModal`、安全插件            |
+| 商品评价异常   | 订单状态、`comment_status` meta、商品评价设置             |
+
+## 参考源码
+
+本页根据 `action/comment.php`、`action/action.php`、`inc/functions/zib-theme.php`、`inc/functions/zib-comments-list.php`、`inc/functions/user/ajax.php`、`inc/functions/message/functions/new.php`、`inc/functions/shop/inc/comment.php` 蒸馏整理。

@@ -1,0 +1,501 @@
+---
+title: 插件制作指南
+description: 基于子比主题开发可独立安装、停用和复用的 WordPress 插件，覆盖入口文件、加载时机、CSF 设置、Hook、Ajax 与发布检查。
+---
+
+插件适合承载可以独立启用、停用、分发给多个站点复用的功能。和子主题相比，插件不负责替换整站模板，也不应该依赖某个站点的视觉结构；它更适合做支付规则、文章内容增强、后台设置、短代码、Ajax 接口、数据同步、通知等功能模块。
+
+如果功能和当前站点强绑定，例如整站样式、模板覆盖、用户中心页面结构、支付页面模板改造，优先使用 [子主题制作指南](/docs/guide/subtheme-making)。
+
+## 什么时候写插件
+
+| 场景                                    | 推荐方式 |
+| --------------------------------------- | -------- |
+| 功能需要单独安装、停用或分发            | 插件     |
+| 多个站点都要复用同一套功能              | 插件     |
+| 只需要接入 Hook、Ajax、短代码或后台设置 | 插件     |
+| 需要覆盖父主题模板文件                  | 子主题   |
+| 样式和页面结构完全服务于当前站点        | 子主题   |
+
+插件的边界要清楚：它可以调用子比主题函数、读取主题设置、挂载主题 Hook，但不要把父主题模板复制进插件里长期维护。模板覆盖交给子主题，插件保留业务逻辑。
+
+## 基础目录
+
+一个可维护的插件至少分三层：
+
+```text
+zibll-site-tools/
+├── index.php
+└── includes/
+    ├── admin-options.php
+    └── functions.php
+```
+
+`index.php` 负责声明插件、定义常量、检查运行环境和加载文件；`includes/admin-options.php` 负责 CSF 设置页；`includes/functions.php` 负责业务 Hook、过滤器、Ajax 和短代码。
+
+复杂插件可以继续拆分：
+
+```text
+zibll-site-tools/
+├── index.php
+├── assets/
+│   ├── css/
+│   └── js/
+└── includes/
+    ├── admin-options.php
+    ├── ajax.php
+    ├── functions.php
+    ├── shortcode.php
+    └── upgrade.php
+```
+
+## 入口文件
+
+入口文件只做初始化，不要堆业务逻辑：
+
+```php
+<?php
+/*
+ * Description: Site tools for Zibll.
+ * Version: 1.0.0
+ * Author: Your Name
+ */
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+define('ZIBLL_SITE_TOOLS_PATH', plugin_dir_path(__FILE__));
+define('ZIBLL_SITE_TOOLS_URL', plugins_url('', __FILE__));
+
+function zibll_site_tools_get_option($option = '', $default = null)
+{
+    static $options = null;
+
+    if (null === $options) {
+        $options = get_option('zibll_site_tools');
+    }
+
+    return isset($options[$option]) ? $options[$option] : $default;
+}
+
+function zibll_site_tools_init()
+{
+    $require_once = array(
+        'includes/admin-options.php',
+        'includes/functions.php',
+    );
+
+    foreach ($require_once as $require) {
+        require_once ZIBLL_SITE_TOOLS_PATH . $require;
+    }
+}
+add_action('zib_require_end', 'zibll_site_tools_init');
+```
+
+加载时机建议挂到 `zib_require_end`。这样子比主题的函数、CSF 类、支付模块和常用封装已经加载完成，插件可以安全调用主题能力。
+
+入口头信息是 WordPress 识别插件的关键，但文档和示例里不需要把业务名写死。发布给用户前至少包含描述、版本、作者、最低 WordPress/PHP 版本说明，并在 README 里写清楚依赖子比主题：
+
+```php
+<?php
+/*
+ * Description: Site tools for Zibll.
+ * Version: 1.0.0
+ * Requires at least: 5.2
+ * Requires PHP: 7.0
+ */
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+```
+
+如果插件依赖子比主题函数，入口不要在文件加载瞬间直接调用主题函数。先定义常量和辅助函数，再把业务文件挂到 `zib_require_end`，这样能避开主题尚未加载、CSF 类不存在、支付模块未初始化等问题。
+
+## 加载生命周期
+
+子比主题的 `functions.php` 会先载入 `inc/inc.php`，再由 `zib_require()` 依次加载依赖、主题函数、Codestar Framework、小工具、OAuth、Zibpay、Ajax 基础函数和 CSF 扩展类，最后触发：
+
+```php
+do_action('zib_require_end');
+```
+
+这意味着插件可以按依赖强度选择加载点：
+
+| 加载点                      | 适合做什么                                               | 不适合做什么                                        |
+| --------------------------- | -------------------------------------------------------- | --------------------------------------------------- |
+| 插件文件被 WordPress 加载时 | 定义常量、轻量辅助函数、注册激活/卸载钩子                | 直接调用 `_pz()`、`zibpay::*`、`CSF` 或主题模板函数 |
+| `plugins_loaded`            | 读取插件自身版本、加载翻译、准备兼容层                   | 依赖子比主题业务模块                                |
+| `zib_require_end`           | 加载依赖主题能力的业务文件、注册主题 Hook、注册 CSF 设置 | 输出页面 HTML 或执行慢任务                          |
+| `init`                      | 注册短代码、查询变量、自定义路由、轻量 rewrite           | 创建大量设置字段或跑迁移                            |
+| `wp_enqueue_scripts`        | 按页面加载前台资源                                       | 全站无条件加载大脚本                                |
+| `admin_init`                | 注册后台设置、处理后台环境判断                           | 执行前台业务逻辑                                    |
+
+推荐把“入口”和“业务”拆开：
+
+```php
+function zibll_site_tools_boot()
+{
+    if (!defined('ZIB_TEMPLATE_DIRECTORY_URI')) {
+        return;
+    }
+
+    require_once ZIBLL_SITE_TOOLS_PATH . 'includes/admin-options.php';
+    require_once ZIBLL_SITE_TOOLS_PATH . 'includes/functions.php';
+    require_once ZIBLL_SITE_TOOLS_PATH . 'includes/ajax.php';
+}
+add_action('zib_require_end', 'zibll_site_tools_boot');
+```
+
+如果插件需要在非子比主题下给管理员提示，不要让前台报致命错误：
+
+```php
+function zibll_site_tools_admin_notice()
+{
+    if (defined('ZIB_TEMPLATE_DIRECTORY_URI')) {
+        return;
+    }
+
+    echo '<div class="notice notice-warning"><p>' . esc_html__('当前扩展需要启用子比主题后才能工作。', 'zib_language') . '</p></div>';
+}
+add_action('admin_notices', 'zibll_site_tools_admin_notice');
+```
+
+依赖检测只用于阻止业务加载，不要在用户前台 `wp_die()`。站点切换主题、临时排查问题或后台禁用模块时，插件应该保持可进入后台、可停用、可修复。
+
+## 本地样本审计矩阵
+
+`主题插件子主题/子比主题插件合集` 里有一批历史插件样本，适合校准真实项目会遇到的边界，但不要把旧写法原样复制到新插件。审计样本时先看四件事：入口加载点、option key、输出转义、停用和日志清理。
+
+| 样本                   | 可借鉴点                                                         | 需要迁移或警惕的点                                                              | 新项目建议                                                                                                    |
+| ---------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `plugin_demo`          | 有插件头、独立设置页、`options.php` 与 `includes` 分层           | 同名 `plugin_demo` 被同时当常量和函数使用，URL/PATH 常量重复定义，加载点偏旧    | 只保留分层思路；常量、函数、option、Ajax action 都用唯一前缀，入口只做声明和调度                              |
+| `zibll_plugin-main`    | 用独立 URL/PATH 常量，业务文件挂到 `zib_require_end`             | 示例字段适合学习结构，不要把演示业务直接当生产功能                              | 作为新插件骨架参考：入口定义常量和读取函数，`includes/functions.php` 与 `includes/admin-options.php` 延后加载 |
+| `zib-diy`              | CSS 用 `wp_enqueue_style()` 和 `wp_add_inline_style()` 输出      | 多个 `code_editor` 字段 `sanitize => false`，JS/HTML 通过页头页脚直接输出       | 只允许可信管理员编辑；CSS、JS、HTML 分通道、分位置输出，保存允许代码不等于前台可以任意 `echo`                 |
+| `zib-language`         | 前台按钮挂 `zib_nav_radius_button`，脚本在 `wp_footer` 输出      | 仍用 `after_setup_theme` 初始化，脚本拼接查询参数并监听全局 Ajax 完成事件       | 翻译、监听、URL 参数和忽略规则要只在前台启用，动态内容场景要和主题 `auto_fun()`、Ajax 刷新协同                |
+| `zibll-security-guard` | 激活时初始化默认 option，停用清计划任务，日志限量并关闭 autoload | 注册和评论防护同时覆盖子比 Ajax、WP 原生、REST、XML-RPC，逻辑比普通前台表单更宽 | 安全插件按入口分层返回错误：子比 Ajax 返回 `zib_send_json_error()`，REST 返回 `WP_Error`，原生入口 `wp_die()` |
+| `zib-pay-posts`        | `the_content` 展示锁定态，扣款走 Ajax                            | 内容展示和支付扣款容易混在一起，必须在服务端重新校验余额、文章、权限和订单状态  | 前台只展示购买入口；真实扣款、订单状态和下载权限必须复用 Zibpay 订单链路                                      |
+| `zib-sponsor`          | `plugins_loaded` + `zib_require_end` 分层，支付成功后发权益      | 深度依赖 Zibpay、模板、小工具和订单 Hook，停用后仍要保留历史订单和权益          | 模板交给子主题或独立模板文件，支付成功回调做幂等，权益发放写清订单 meta 和用户 meta 边界                      |
+
+这些样本说明：历史插件常用 `after_setup_theme` 作为“主题已可用”的信号，但更贴近子比主题的加载点是 `zib_require_end`。如果插件只依赖 WordPress，可在 `plugins_loaded` 或 `init` 做准备；如果要调用 `_pz()`、`zib_send_json_error()`、Zibpay、用户中心或 CSF 扩展，业务文件应延后到 `zib_require_end`。
+
+加载点可以按下面的边界选：
+
+| 需求                          | 推荐加载点                               | 原因                                                         |
+| ----------------------------- | ---------------------------------------- | ------------------------------------------------------------ |
+| 默认 option、版本号、激活钩子 | 插件主文件、`register_activation_hook()` | 不依赖主题，停用和升级也能独立执行                           |
+| 读取自身 option、加载翻译     | `plugins_loaded`                         | WordPress 已完成插件装载，仍不要调用子比主题函数             |
+| 注册短代码、rewrite、轻量路由 | `init`                                   | 适合 WordPress 原生能力，不适合大字段和慢查询                |
+| 调用子比主题函数或 CSF 扩展   | `zib_require_end`                        | 子比主题函数、CSF、Zibpay、Ajax 基础函数和用户中心能力已加载 |
+| 非子比主题后台提示            | `admin_init` + `admin_notices`           | 主题未加载时仍能进入后台停用、修复或查看提示                 |
+| 前台 CSS/JS                   | `wp_enqueue_scripts`，再按页面和开关判断 | 避免全站注入，避免 Ajax、支付页、登录页被无关脚本影响        |
+
+代码注入类插件要单独做风险分级。`zib-diy` 这类样本适合说明能力边界：CSS 可以通过 inline style 输出，但 JS 和 HTML 应只给 `manage_options` 用户配置，保存时记录来源，输出时按位置、页面和开关判断。不要让普通用户资料、投稿字段、评论、私信或低权限后台字段进入这类输出通道。
+
+安全防护类插件要覆盖所有入口，不能只拦前台表单。注册至少检查子比 `user_signup`、`wp-login.php?action=register`、REST `/wp/v2/users` 和 XML-RPC 用户创建；评论至少检查子比 `submit_comment`、`wp-comments-post.php`、REST `/wp/v2/comments`、XML-RPC `wp.newComment`、`preprocess_comment` 和 `pre_comment_approved`。不同入口返回格式不同：前台 Ajax 用子比 JSON，REST 用 `WP_Error`，原生提交用 `wp_die()` 或 WordPress 错误对象。
+
+日志和清理也要先设计。`zibll-security-guard` 的日志写在独立 option `zibll_security_guard_logs`，`update_option(..., false)` 避免 autoload，保存前清洗字段，按最大行数截断，并用每日计划清理过期记录。新插件不要记录密码、验证码、支付 token、OAuth code 或完整敏感请求体；停用插件只清计划任务，真正卸载时再按后台开关清理插件自有数据。
+
+## CSF 设置页
+
+插件设置页可以复用子比主题随带的 Codestar Framework。关键是保持独立 option key，不要写入 `zibll_options`：
+
+```php
+<?php
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+if (class_exists('CSF')) {
+    $prefix = 'zibll_site_tools';
+
+    CSF::createOptions($prefix, array(
+        'menu_title'      => '站点工具',
+        'menu_slug'       => 'zibll_site_tools',
+        'framework_title' => '站点工具 <small>v1.0.0</small>',
+        'theme'           => 'light',
+    ));
+
+    CSF::createSection($prefix, array(
+        'id'     => 'base',
+        'title'  => '基础设置',
+        'icon'   => 'fa fa-cog',
+        'fields' => array(
+            array(
+                'id'      => 'enabled',
+                'type'    => 'switcher',
+                'title'   => '启用功能',
+                'default' => false,
+            ),
+            array(
+                'id'         => 'notice_text',
+                'type'       => 'text',
+                'title'      => '提示文字',
+                'dependency' => array('enabled', '==', '1'),
+                'default'    => '',
+            ),
+        ),
+    ));
+}
+```
+
+字段命名使用插件前缀或独立 option key，避免和主题字段冲突。读取时统一走辅助函数，例如 `zibll_site_tools_get_option()`，不要在业务代码里反复 `get_option()`。
+
+复杂设置页建议做“只在需要时构建”。CSF 字段很多时，如果每个后台 Ajax 都完整创建设置字段，容易拖慢后台，也可能让默认值保存时机变得混乱：
+
+```php
+function zibll_site_tools_create_options()
+{
+    if (!is_admin() || !class_exists('CSF')) {
+        return;
+    }
+
+    $prefix = 'zibll_site_tools';
+    $is_self_page = !empty($_GET['page']) && $prefix === sanitize_key($_GET['page']);
+    $is_csf_ajax  = wp_doing_ajax()
+        && !empty($_POST['action'])
+        && false !== strpos(sanitize_text_field(wp_unslash($_POST['action'])), 'csf_' . $prefix);
+
+    CSF::createOptions($prefix, array(
+        'menu_title'    => '站点工具',
+        'menu_slug'     => $prefix,
+        'save_defaults' => $is_self_page || $is_csf_ajax,
+        'theme'         => 'light',
+    ));
+
+    CSF::createSection($prefix, array(
+        'id'    => 'base',
+        'title' => '基础设置',
+        'icon'  => 'fa fa-cog',
+    ));
+
+    if (!$is_self_page && !$is_csf_ajax) {
+        return;
+    }
+
+    CSF::createSection($prefix, array(
+        'parent' => 'base',
+        'title'  => '功能开关',
+        'fields' => array(
+            array(
+                'id'      => 'enabled',
+                'type'    => 'switcher',
+                'title'   => '启用功能',
+                'default' => false,
+            ),
+        ),
+    ));
+}
+add_action('admin_init', 'zibll_site_tools_create_options');
+```
+
+这种写法的重点是：先创建菜单壳，保证后台左侧能显示；再按当前页面或 CSF 自身 Ajax 决定是否创建完整字段。
+
+## Hook 写法
+
+业务文件保持子比主题常见写法：命名函数、明确优先级、按场景返回原值。
+
+```php
+<?php
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+function zibll_site_tools_add_article_notice($content)
+{
+    if (!is_single() || !zibll_site_tools_get_option('enabled')) {
+        return $content;
+    }
+
+    $notice = zibll_site_tools_get_option('notice_text', '');
+    if (!$notice) {
+        return $content;
+    }
+
+    $content .= '<div class="muted-2-color em09 mt10">' . esc_html($notice) . '</div>';
+
+    return $content;
+}
+add_filter('the_content', 'zibll_site_tools_add_article_notice', 99);
+```
+
+过滤器要尽量保留原始数据结构，不能处理时直接返回原值。动作函数要先判断开关、页面类型、用户权限和必要参数。
+
+支付或商城规则适合写成过滤器。比如限制某些支付场景使用余额支付，应只改布尔结果，不直接改订单或支付单：
+
+```php
+function zibll_site_tools_filter_balance_pay($allow, $pay_type)
+{
+    $disabled_types = (array) zibll_site_tools_get_option('disabled_balance_pay_types', array());
+
+    if (in_array((string) $pay_type, $disabled_types, true)) {
+        return false;
+    }
+
+    return $allow;
+}
+add_filter('zibpay_is_allow_balance_pay', 'zibll_site_tools_filter_balance_pay', 10, 2);
+```
+
+这类扩展要把“支付类型枚举”和“是否允许”分开，避免在过滤器里创建订单、修改余额或输出页面。
+
+## Ajax 接口
+
+Ajax 接口要保持 WordPress 权限模型和子比主题返回风格：
+
+```php
+function zibll_site_tools_ajax_save_demo()
+{
+    if (!is_user_logged_in()) {
+        zib_send_json_error('请先登录');
+    }
+
+    $user_id = get_current_user_id();
+    $value   = isset($_POST['value']) ? sanitize_text_field(wp_unslash($_POST['value'])) : '';
+
+    if (!$value) {
+        zib_send_json_error('参数错误');
+    }
+
+    update_user_meta($user_id, 'zibll_site_tools_demo', $value);
+
+    zib_send_json_success(array(
+        'msg'   => '保存成功',
+        'value' => $value,
+    ));
+}
+add_action('wp_ajax_zibll_site_tools_save_demo', 'zibll_site_tools_ajax_save_demo');
+```
+
+需要游客访问时再增加 `wp_ajax_nopriv_`。只给已登录用户使用的接口不要开放游客入口。
+
+前台按钮如果要复用主题的 Ajax 交互，action 名称和本地化语言也要对齐。子比主题会用 `zib_is_admin_context()` 判断 Ajax 是否属于前台请求，并提供两个过滤器：
+
+```php
+function zibll_site_tools_frontend_ajax_actions($actions)
+{
+    $actions[] = 'zibll_site_tools_save_demo';
+    return $actions;
+}
+add_filter('zib_locale_frontend_ajax_actions', 'zibll_site_tools_frontend_ajax_actions');
+```
+
+如果你的前台 action 有统一前缀，也可以扩展前缀列表：
+
+```php
+function zibll_site_tools_frontend_ajax_prefixes($prefixes)
+{
+    $prefixes[] = 'zibll_site_tools_';
+    return $prefixes;
+}
+add_filter('zib_locale_frontend_ajax_prefixes', 'zibll_site_tools_frontend_ajax_prefixes');
+```
+
+这样后台语言和前台语言分离时，插件前台 Ajax 不会被误判为后台请求。涉及支付、验证码、用户中心的动作尤其要注意这一点。
+
+公开给游客的 Ajax 要额外做频率、nonce 或人机验证。子比主题里已经有 `zib_ajax_man_machine_verification()`、`zib_ajax_verify_nonce()`、`zib_is_error_frequency_limit()` 这类基础函数，插件可以复用，但要保证调用发生在 `zib_require_end` 之后。
+
+## 资源加载
+
+前台资源按页面条件加载，避免全站无意义注入：
+
+```php
+function zibll_site_tools_enqueue_scripts()
+{
+    if (!zibll_site_tools_get_option('enabled')) {
+        return;
+    }
+
+    wp_enqueue_style(
+        'zibll-site-tools',
+        ZIBLL_SITE_TOOLS_URL . '/assets/css/site-tools.css',
+        array(),
+        '1.0.0'
+    );
+}
+add_action('wp_enqueue_scripts', 'zibll_site_tools_enqueue_scripts');
+```
+
+后台资源使用 `admin_enqueue_scripts`，并根据 `$hook_suffix` 或当前页面参数限制范围。
+
+后台自定义 CSS 或代码编辑字段要特别小心。保存时先过滤，输出时再按场景转义：
+
+```php
+function zibll_site_tools_admin_css()
+{
+    $css = zibll_site_tools_get_option('admin_css', '');
+
+    if (!$css || !current_user_can('manage_options')) {
+        return;
+    }
+
+    echo '<style>' . wp_strip_all_tags($css) . '</style>';
+}
+add_action('admin_head', 'zibll_site_tools_admin_css', 99);
+```
+
+如果允许用户输入 HTML，必须使用 `wp_kses_post()` 或更严格的白名单。不要把后台设置里的任意内容无过滤输出到前台。
+
+## 升级和卸载
+
+插件只要写入自定义 option、user meta、post meta、订单 meta 或自建表，就要提前设计升级和清理策略。推荐用独立版本号记录迁移状态：
+
+```php
+function zibll_site_tools_maybe_upgrade()
+{
+    $version = get_option('zibll_site_tools_version', '0');
+
+    if (version_compare($version, '1.1.0', '<')) {
+        zibll_site_tools_upgrade_110();
+        update_option('zibll_site_tools_version', '1.1.0');
+    }
+}
+add_action('admin_init', 'zibll_site_tools_maybe_upgrade');
+```
+
+迁移函数要小步、幂等、可重复执行：
+
+```php
+function zibll_site_tools_upgrade_110()
+{
+    $options = get_option('zibll_site_tools', array());
+
+    if (!isset($options['enabled'])) {
+        $options['enabled'] = false;
+    }
+
+    update_option('zibll_site_tools', $options);
+}
+```
+
+不要把历史数据迁移写在每次前台访问里。数据量大时，后台分批处理，记录游标和完成时间；涉及 Zibpay 订单、用户积分、余额、分佣、提现的数据，只能通过主题已有函数和订单状态流核对，不能直接改资产字段。
+
+卸载可以分两层：停用插件时只移除运行时任务，不删除用户数据；真正卸载时再根据后台开关清理 option 和插件自有 meta。涉及订单、余额、积分、下载权限和审计日志的数据，默认保留更稳。
+
+```php
+function zibll_site_tools_deactivate()
+{
+    wp_clear_scheduled_hook('zibll_site_tools_daily_event');
+}
+register_deactivation_hook(__FILE__, 'zibll_site_tools_deactivate');
+```
+
+## 发布检查
+
+发布前至少检查：
+
+| 检查项   | 要求                                              |
+| -------- | ------------------------------------------------- |
+| 入口文件 | 有插件头信息、`ABSPATH` 防直访、常量定义          |
+| 加载时机 | 依赖子比主题能力的代码挂到 `zib_require_end` 之后 |
+| 命名     | 函数、option key、action 名称有唯一前缀           |
+| 设置     | 使用独立 option key，不写入主题主配置             |
+| Ajax     | 权限、参数、nonce 或业务校验齐全                  |
+| 输出     | HTML、属性、URL、文本按场景转义                   |
+| 资源     | 只在需要的页面加载 CSS 和 JS                      |
+| 升级     | 迁移按版本执行，幂等、可回滚、可跳过已完成数据    |
+| 卸载     | 停用不删数据，真正卸载时再按配置清理插件自有数据  |
+| 兼容     | 未启用子比主题时后台可提示，前台不应致命错误      |
+
+插件越独立，后期越容易维护。需要和主题深度结合时，也要先让插件负责逻辑，再把模板交给子主题或主题已有 Hook。

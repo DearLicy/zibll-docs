@@ -1,0 +1,57 @@
+name: 文档错误或补充
+description: 报告页面错误、过时内容或缺少的开发资料
+title: 'docs: '
+labels: [documentation]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先确认页面当前仍存在，并尽量提供可复核的主题版本、源码路径、函数、Hook 或运行结果。不要上传完整商业主题源码或任何密钥。
+  - type: input
+    id: page
+    attributes:
+      label: 文档页面
+      description: 请填写页面 URL 或 slug。
+      placeholder: /docs/api/hooks
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 问题类型
+      options:
+        - 内容错误
+        - 内容过时
+        - 缺少示例
+        - 缺少页面
+        - 链接或排版问题
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: 当前问题
+      description: 引用有问题的段落，并说明错误、过时、缺失或排版异常在哪里。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 建议修正
+      description: 说明期望结论、示例或页面结构；尚不确定时可以写明待核对部分。
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 版本、源码依据或复现结果
+      description: 提供经过脱敏的最小证据，不要提交完整主题或插件源码。
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索文档和已有 Issue，确认不是重复报告。
+          required: true
+        - label: 我已删除 API Key、Cookie、密码、私钥和个人信息。
+          required: true

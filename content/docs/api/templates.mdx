@@ -1,0 +1,81 @@
+---
+title: 模板覆盖
+description: 子比主题模板文件、模板标签、业务页面和子主题覆盖的使用边界。
+---
+
+## 模板来源
+
+子比主题既有 WordPress 标准模板，也有业务模块自己的页面模板。改页面前要先确认真实渲染来源。
+
+| 页面类型                 | 可能来源                                                           |
+| ------------------------ | ------------------------------------------------------------------ |
+| 首页、分类、文章、页面   | 根目录模板、`template/*`、`inc/functions/zib-*.php`                |
+| 评论列表                 | `template/comments.php`、`inc/functions/zib-comments-list.php`     |
+| 用户中心                 | `inc/functions/user/page/*`、`inc/functions/zib-user.php`          |
+| 论坛首页、版块、帖子     | `inc/functions/bbs/page/*`、`inc/functions/bbs/inc/template.php`   |
+| 商城首页、商品页、购物车 | `inc/functions/shop/page/*`、`inc/functions/shop/inc/template.php` |
+| 支付相关页面             | `zibpay/page/*`、`zibpay/functions/*`                              |
+
+## 覆盖原则
+
+- 只改展示时优先用子主题覆盖模板。
+- 能用 Hook 或 CSS 完成的，不复制整份模板。
+- 覆盖模板后保留原来的权限、分页、懒加载、nonce、转义和状态判断。
+- 主题升级后对比被覆盖模板，确认结构和函数调用是否要同步。
+- 不把复杂查询、写入、第三方请求堆进模板文件。
+
+## 查找真实模板
+
+可以按这个顺序查：
+
+1. 看当前页面 URL 属于 WordPress 标准路由、论坛路由、商城路由还是用户中心路由。
+2. 搜索页面上的唯一文案或 class。
+3. 搜索 `locate_template`、`do_action('..._locate_template')`。
+4. 搜索业务模块的 `page` 和 `template` 目录。
+5. 搜索渲染函数名，回到调用模板。
+
+```powershell
+rg -n "用户中心|user_center|locate_template|shop_locate_template|bbs_locate_template" C:\Users\Administrator\Desktop\zibll -g "*.php"
+```
+
+## 模板中的安全输出
+
+模板里输出变量时要使用 WordPress 转义函数：
+
+```php
+echo esc_html($title);
+echo esc_url($url);
+echo esc_attr($class);
+echo wp_kses_post($html);
+```
+
+如果调用的是主题函数，先确认它返回的是已转义 HTML 还是原始数据。不要重复转义导致 HTML 显示成文本，也不要把原始用户输入直接输出。
+
+## 模板和业务逻辑分离
+
+模板里适合做：
+
+- 调用主题函数拿到数据。
+- 输出结构。
+- 根据状态显示不同按钮。
+- 调用已经封装好的短代码或展示组件。
+
+模板里不适合做：
+
+- 创建订单。
+- 修改用户资料。
+- 写入余额、积分、下载权限。
+- 处理第三方回调。
+- 大量 SQL 查询。
+
+这些逻辑应该放到插件、业务函数、Ajax 动作或 Hook 回调中。
+
+## 覆盖后的维护
+
+每次主题升级后，至少检查：
+
+1. 被覆盖模板是否有上游变化。
+2. 模板调用的函数是否改名、改参数或改返回结构。
+3. 新版本是否增加了权限、nonce 或转义逻辑。
+4. 移动端结构是否仍然正常。
+5. 缓存和动态用户状态是否仍然正确。

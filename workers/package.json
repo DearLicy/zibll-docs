@@ -1,0 +1,9 @@
+{
+  "name": "zibll-docs-feedback-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx wrangler dev",
+    "deploy": "npx wrangler deploy"
+  }
+}

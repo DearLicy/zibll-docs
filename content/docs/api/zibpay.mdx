@@ -1,0 +1,350 @@
+---
+title: Zibpay 扩展
+description: 子比主题支付、订单、下载权限、余额、积分、VIP、优惠券、分佣和提现相关扩展边界。
+---
+
+## 模块范围
+
+Zibpay 是子比主题里最敏感的业务模块。它不只是“支付按钮”，还包含订单、支付回调、卡密、资源下载、付费阅读、VIP、余额、积分、优惠券、收入、分佣、提现、打款和后台统计。
+
+核心入口是 `zibpay/functions.php`，它加载：
+
+- `zibpay/class/*`：订单类、Ajax 类、卡密类。
+- `zibpay/functions/zibpay-order.php`：订单创建、查询、状态处理。
+- `zibpay/functions/zibpay-ajax.php`：发起支付、检查支付、支付渠道动作。
+- `zibpay/functions/zibpay-download.php`：资源下载权限。
+- `zibpay/functions/zibpay-vip.php`：会员权益。
+- `zibpay/functions/zibpay-balance.php`、`zibpay-points.php`：余额和积分。
+- `zibpay/functions/zibpay-rebate.php`、`zibpay-withdraw.php`、`zibpay-payout.php`：分佣、提现、打款。
+- `zibpay/functions/admin/*`：后台订单、统计、配置、管理 Ajax。
+
+## 不能绕过的链路
+
+涉及支付和资产时，必须以服务端状态为准。
+
+| 数据     | 可信来源                     |
+| -------- | ---------------------------- |
+| 金额     | 服务端商品、订单或配置       |
+| 订单号   | 服务端创建的订单             |
+| 支付状态 | 支付渠道回调和订单状态       |
+| 下载权限 | 订单、会员、资源权限判断     |
+| 余额积分 | 服务端资产记录和变动日志     |
+| 分佣提现 | 订单归属、分佣规则、提现状态 |
+
+不要从前端提交金额、用户 ID、权益类型后直接写入订单或资产。
+
+## 常见扩展场景
+
+### 创建支付数据和订单
+
+主题的支付并不是单条订单直接跳渠道。新版商城会先创建联合付款记录，再为一个或多个业务订单绑定同一个 `payment_id`。核心方法在 `zibpay/class/order-class.php`：
+
+```php
+$payment = ZibPay::add_payment(array(
+    'method' => 'balance',
+    'price'  => 9.9,
+));
+
+if (!$payment) {
+    return new WP_Error('payment_error', __('支付数据创建失败', 'zib_language'));
+}
+
+$order = ZibPay::add_order(array(
+    'user_id'    => get_current_user_id(),
+    'post_id'    => 0,
+    'order_type' => 99,
+    'order_name' => zibpay_get_pay_order_name(__('自定义服务', 'zib_language')),
+    'order_price'=> 9.9,
+    'pay_price'  => 9.9,
+    'payment_id' => $payment['id'],
+    'meta'       => array(
+        'source' => 'docs',
+    ),
+));
+```
+
+创建订单后会触发：
+
+```php
+do_action('order_created', $order_data);
+```
+
+支付成功后统一走：
+
+```php
+ZibPay::payment_order(array(
+    'order_num' => $order_num,
+    'pay_type'  => $pay_type,
+    'pay_num'   => $pay_num,
+));
+```
+
+成功更新订单状态后触发：
+
+```php
+do_action('payment_order_success', $order);
+```
+
+这里的 `$order` 是对象，不是数组。发放权益、同步外部系统、清缓存、写日志都应该挂 `payment_order_success`，并做幂等判断。
+
+### 下单入口差异
+
+本地源码里有两条容易混淆的下单入口：
+
+| 入口            | Ajax action         | 位置                                   | 行为                                                                                                                                                  |
+| --------------- | ------------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Zibpay 通用下单 | `submit_order`      | `zibpay/functions/zibpay-order.php`    | 根据 `order_type` 组装业务订单，创建 payment/order 后直接调用 `zibpay_ajax_initiate_pay($payment_id)`                                                 |
+| 商城确认下单    | `shop_submit_order` | `inc/functions/shop/action/action.php` | 先用 `zib_shop_get_confirm_data()` 重算购物车/商品数据，创建 payment 和一组商城订单后，把 `payment_data` 返回给 Vue 弹窗，再由前端触发 `initiate_pay` |
+
+所以排查商城订单时，不要只搜 `submit_order`。商城商品、购物车、地址、运费、自动发货邮箱和用户必填项都在 `shop_submit_order` 里二次校验。只有付费阅读、付费下载、积分充值、VIP 等通用 Zibpay 场景才主要走 `submit_order`。
+
+两条入口最终都会进入同一条状态流：
+
+```txt
+add_payment/add_order -> initiate_pay -> check_pay 或支付回调 -> ZibPay::payment_order() -> payment_order_success
+```
+
+### 发起支付和联合付款单
+
+订单创建后，前端不是直接拿业务订单号去请求支付渠道，而是通过 `initiate_pay` 使用 `payment_id` 发起支付。入口在 `zibpay/functions/zibpay-ajax.php`：
+
+```php
+add_action('wp_ajax_initiate_pay', 'zibpay_ajax_initiate_pay');
+add_action('wp_ajax_nopriv_initiate_pay', 'zibpay_ajax_initiate_pay');
+```
+
+`zibpay_ajax_initiate_pay()` 的核心流程：
+
+| 步骤              | 行为                                                    |
+| ----------------- | ------------------------------------------------------- |
+| 读取 `payment_id` | 查询 `zibpay_payment` 付款记录                          |
+| 检查状态          | 已支付直接返回成功，已关闭返回错误                      |
+| 检查超时          | `zibpay_get_payment_pay_over_time()` 超时后提示重新下单 |
+| 读取业务订单      | `zibpay::get_order_by_payment_id($payment_id)`          |
+| 刷新付款单号      | 每次发起支付都会写新的 `payment.order_num`              |
+| 切换支付方式      | 前台传入合法 `payment_method` 时更新付款方式            |
+| 拉起渠道          | 调用 `zibpay_initiate_pay()` 或积分支付入口             |
+
+刷新付款单号这一点很重要。继续支付、切换支付方式或重新拉起扫码支付时，主题会给同一个 `payment_id` 生成新的付款单号：
+
+```php
+$payment_data['order_num'] = zibpay::generate_payment_order_num();
+$payment_update_data       = array(
+    'id'        => $payment_id,
+    'order_num' => $payment_data['order_num'],
+);
+```
+
+如果用户从微信切到支付宝，主题还会同步更新各业务订单的 `pay_detail`：
+
+```php
+if ($payment_method !== $old_payment_method) {
+    zibpay::update_other_payment($payment_id, $old_payment_method, $payment_method);
+}
+```
+
+`update_other_payment()` 只处理非积分支付方式。它会把旧支付方式对应金额移到新支付方式下，并更新 `payment_method`：
+
+```php
+$order['pay_detail']['payment_method']    = $new_payment_method;
+$order['pay_detail'][$new_payment_method] = $_price;
+```
+
+所以扩展收银台时，不要只改 `zibpay_payment.method`。如果不同步订单 `pay_detail`，后台订单明细、通知文案和统计口径会显示旧支付方式。
+
+`zibpay_initiate_pay()` 会先解析实际 SDK：
+
+| `payment_method`                           | SDK 来源                        |
+| ------------------------------------------ | ------------------------------- |
+| `balance`、`card_pass`、`paypal`、`stripe` | 直接使用同名 SDK                |
+| `wechat`                                   | `_pz('pay_wechat_sdk_options')` |
+| `alipay`                                   | `_pz('pay_alipay_sdk_options')` |
+
+随后通过动态过滤器发起渠道请求：
+
+```php
+$pay_sdk = apply_filters('zibpay_initiate_paysdk', $pay_sdk, $order_data);
+$payresult = apply_filters('zibpay_initiate_' . $pay_sdk, $order_data);
+```
+
+新增支付渠道时，通常要同时处理 `zibpay_initiate_paysdk`、`zibpay_initiate_{sdk}`、回调验签和支付成功写单。只加一个前端按钮不会进入主题订单状态流。
+
+### 轮询查单和成功幂等
+
+前端支付后会通过 `check_pay` 轮询付款单号：
+
+```php
+add_action('wp_ajax_check_pay', 'zibpay_check_pay');
+add_action('wp_ajax_nopriv_check_pay', 'zibpay_check_pay');
+```
+
+`zibpay_check_pay()` 先查 `zibpay_payment`，如果状态还不是成功，并且创建时间超过 6 秒，会按 `check_sdk` 主动请求渠道查单：
+
+| `check_sdk`       | 查单渠道         | 成功状态                         |
+| ----------------- | ---------------- | -------------------------------- |
+| `official_wechat` | 微信官方扫码支付 | `trade_state === SUCCESS`        |
+| `official_alipay` | 支付宝当面付     | `trade_status === TRADE_SUCCESS` |
+| `epay`            | 易支付           | `status == 1`                    |
+| `xhpay`           | 迅虎 PAY         | `status === complete`            |
+
+查到支付成功后，它不会自己发权益，而是统一调用：
+
+```php
+$pay_order_data = array(
+    'order_num' => $check_order_num,
+    'pay_type'  => 'weixin',
+    'pay_num'   => $result['transaction_id'],
+);
+
+$order_check_data = (array) ZibPay::payment_order($pay_order_data);
+```
+
+`ZibPay::payment_order()` 有两条路径：
+
+| `order_num` 类型 | 行为                                                                                      |
+| ---------------- | ----------------------------------------------------------------------------------------- |
+| 联合付款单号     | 转入 `payment_payment()`，先更新 `zibpay_payment`，再逐个支付同 `payment_id` 下的业务订单 |
+| 普通业务订单号   | 直接更新单个订单                                                                          |
+
+联合付款单处理会把付款单的支付流水写入所有未支付的业务订单：
+
+```php
+$payment_order_data = array(
+    'order_num' => $order['order_num'],
+    'pay_type'  => $data['pay_type'] ?: $payment['method'],
+    'pay_num'   => $data['pay_num'],
+);
+
+$payment_order_data['pay_detail'][$payment['method']] = $order['pay_price'];
+self::payment_order($payment_order_data);
+```
+
+幂等边界在数据库更新条件里。付款单只会从 `status=0` 或 `status=-1` 更新到成功；普通订单也只会从 `status=0` 或 `status=-1` 更新到成功：
+
+```php
+$where = array('order_num' => $values['order_num'], 'status' => array('0', '-1'));
+```
+
+因此同一个支付回调、轮询查单、管理员补单如果重复到达，通常只有第一次成功更新会触发 `payment_order_success`。二开仍然要在自己的 Hook 里做业务幂等，因为不同入口可能针对同一业务写入不同外部系统。
+
+有一个细节要特别小心：`payment_order()` 允许把 `status=-1` 的订单支付成功。这是后台手动补单和部分回调兜底的基础，但也意味着超时关闭后的真实渠道回调仍可能把订单改回成功。扩展关闭订单、渠道取消或外部发货时，要以最终 `payment_order_success` 为准，而不是只看前端曾经显示过“已关闭”。
+
+### 支付成功后同步外部系统
+
+关注 `payment_order_success` 或订单成功相关流程。回调里要做幂等处理，避免支付回调、轮询检查、管理员补单等多次触发造成重复发放。
+
+```php
+add_action('payment_order_success', 'zib_docs_order_paid_sync', 20, 1);
+
+function zib_docs_order_paid_sync($order)
+{
+    if (empty($order->id) || (int) $order->order_type !== 99) {
+        return;
+    }
+
+    if (zibpay::get_meta($order->id, 'docs_synced')) {
+        return;
+    }
+
+    zibpay::update_meta($order->id, 'docs_synced', current_time('mysql'));
+}
+```
+
+### 下载前增加授权日志
+
+关注 `zibpay_download_before`。不要直接输出文件路径，不要把本地路径暴露给前端。
+
+```php
+add_action('zibpay_download_before', 'zib_docs_log_download', 10, 5);
+
+function zib_docs_log_download($post_id, $down_id, $paid, $file_url, $file_local)
+{
+    // 记录用户、资源、订单或会员状态。
+}
+```
+
+### 新增支付渠道
+
+新增渠道时至少拆成四层：
+
+1. 渠道配置：后台保存 app id、密钥、回调开关。
+2. 下单请求：根据服务端订单生成渠道参数。
+3. 回调验签：校验签名、金额、订单号、状态。
+4. 订单更新：走主题已有订单状态变更流程。
+
+### 拉起支付弹窗
+
+主题前端通常通过 `RefreshModal` 拉起收银台或订单支付弹窗。常见入口包括：
+
+| Ajax action            | 说明               |
+| ---------------------- | ------------------ |
+| `pay_cashier_modal`    | 收银台弹窗         |
+| `order_pay_modal`      | 待支付订单继续支付 |
+| `order_details_modal`  | 订单详情           |
+| `close_order_modal`    | 关闭订单确认       |
+| `balance_charge_modal` | 余额充值           |
+| `points_pay_modal`     | 积分支付           |
+| `pay_vip`              | VIP 开通弹窗       |
+
+已有订单继续支付的链接可以按主题写法生成：
+
+```php
+echo zib_get_refresh_modal_link(array(
+    'tag'        => 'a',
+    'class'      => 'but c-blue',
+    'data_class' => 'modal-mini full-sm',
+    'text'       => __('继续支付', 'zib_language'),
+    'query_arg'  => array(
+        'action'     => 'order_pay_modal',
+        'payment_id' => $payment_id,
+    ),
+));
+```
+
+如果是自定义业务，先在服务端创建 payment 和 order，再把用户引到主题已有支付弹窗或收银台，不要在前端拼金额后直接调用渠道接口。
+
+## 订单状态 Hook
+
+常见状态 Hook：
+
+| Hook                    | 触发               |
+| ----------------------- | ------------------ |
+| `order_created`         | 订单创建成功       |
+| `payment_order_success` | 支付成功并更新订单 |
+| `order_closed`          | 订单关闭           |
+| `order_refunded`        | 订单退款           |
+
+主题内置余额、积分、VIP、分佣、创作分成、邮件通知、用户待支付数量缓存都会监听这些 Hook。扩展时要让业务进入这条状态流，才不会漏掉主题自带联动。
+
+## 支付回调要求
+
+- 校验签名。
+- 校验金额。
+- 校验订单状态。
+- 校验商户号或应用 ID。
+- 保证重复回调不会重复发放权益。
+- 记录渠道原始状态和处理结果。
+- 不在响应中输出密钥、SQL、服务器路径。
+
+## 后台扩展
+
+后台订单、统计、提现、分佣等页面通常在 `zibpay/functions/admin/*`。新增后台能力时建议：
+
+- 使用现有后台权限体系。
+- 给筛选、导出、批量操作做 nonce。
+- 大数据导出分批处理。
+- 资产类操作写操作日志。
+- 管理员手动变更订单时也触发必要的业务同步。
+
+## 调试清单
+
+支付问题优先检查：
+
+1. 订单是否成功创建。
+2. 支付渠道请求参数是否正确。
+3. 回调地址能否公网访问。
+4. HTTPS 和证书是否正常。
+5. 回调是否被防火墙、CDN、缓存、安全插件拦截。
+6. 签名、金额、订单号是否匹配。
+7. 订单状态是否重复处理。
+8. 支付成功后下载、VIP、余额、积分、分佣是否同步更新。

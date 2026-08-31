@@ -1,0 +1,89 @@
+name: Validate static documentation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'components/**'
+      - 'content/**'
+      - 'data/**'
+      - 'lib/**'
+      - 'packages/**'
+      - 'scripts/**'
+      - 'workers/**'
+      - 'public/assets/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'next.config.mjs'
+      - 'source.config.ts'
+      - '.github/**'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'SUPPORT.md'
+      - 'SECURITY.md'
+      - 'CODE_OF_CONDUCT.md'
+  workflow_dispatch:
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Validate and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Generate Fumadocs source
+        run: npx fumadocs-mdx
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: MCP protocol check
+        run: |
+          npm run mcp:prepare
+          npm run mcp:check
+
+      - name: Inspect MCP package contents
+        run: npm pack --workspace packages/zibll-docs-mcp --dry-run
+
+      - name: GitHub community configuration check
+        run: npm run community:check
+
+      - name: Check feedback bot syntax
+        run: |
+          node --check scripts/setup-github.mjs
+          node --check workers/feedback-bot.mjs
+
+      - name: Static export check
+        run: npm run build
+
+      - name: Validate static artifact
+        run: npm run pages:check
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Navigation and static route check
+        run: npm run test:navigation

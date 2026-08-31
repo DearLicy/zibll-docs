@@ -1,0 +1,487 @@
+---
+title: 用户成长数据维护
+description: 梳理子比主题用户成长相关 meta、zib_other_data 聚合、后台手动调整、签到数据、徽章缓存、禁封日志、迁移清理和修复边界。
+---
+
+## 模块定位
+
+用户成长数据不只是一组 `user_meta`。子比主题会把大量用户资料、成长、资产、互动数据聚合到 `zib_other_data`，同时保留少数需要原生查询或排序的独立 meta。维护、迁移、批量修复时，最大的风险不是“字段名找不到”，而是绕过主题封装后写到错误位置。
+
+| 数据                   | 推荐读写                                           |
+| ---------------------- | -------------------------------------------------- |
+| 聚合型用户数据         | `zib_get_user_meta()`、`zib_update_user_meta()`    |
+| WordPress 原生用户字段 | `get_userdata()`、`wp_update_user()`               |
+| 需要独立查询的 meta    | 按源码使用 `get_user_meta()`、`update_user_meta()` |
+| 积分和余额             | Zibpay 资产函数                                    |
+| 等级经验               | `zib_add_user_level_integral()` 或后台资料页字段   |
+| 徽章                   | `zib_add_user_medal()`、`zib_remove_user_medal()`  |
+| 禁封                   | `zib_updata_user_ban()`                            |
+
+不要用一条 SQL 批量改所有成长字段。先确认字段是聚合到 `zib_other_data`，还是仍保留为独立 `usermeta`。
+
+## 聚合字段清单
+
+主题在 `inc/dependent.php` 的 `zib_get_option_meta_keys()` 维护聚合 key。成长相关常见字段包括：
+
+| 字段                         | 含义                   |
+| ---------------------------- | ---------------------- |
+| `_user_points_followed`      | 免费积分“被关注”防重复 |
+| `_signin_points_time`        | 每日登录积分奖励日期   |
+| `free_points_detail`         | 每日免费积分合计       |
+| `points_record`              | 积分流水               |
+| `_user_integral_followed`    | 经验值“被关注”防重复   |
+| `_signin_integral_time`      | 每日登录经验奖励日期   |
+| `level_integral_date_detail` | 每日经验合计           |
+| `level_integral_detail`      | 经验流水               |
+| `checkin_reward_days`        | 连续签到奖励周期       |
+| `checkin_detail`             | 签到明细               |
+| `banned_log`                 | 禁封日志               |
+| `auth_info`                  | 认证资料               |
+| `medal_details`              | 用户徽章明细           |
+
+这些字段迁移后可能不再作为独立 `usermeta` 行存在，而是被放进同一个 `zib_other_data` 数组。读取时应使用：
+
+```php
+$detail = zib_get_user_meta($user_id, 'level_integral_detail', true);
+$medals = zib_get_user_meta($user_id, 'medal_details', true);
+```
+
+写入时应使用：
+
+```php
+zib_update_user_meta($user_id, 'checkin_detail', $detail);
+zib_update_user_meta($user_id, 'medal_details', $medals);
+```
+
+这样无论站点处在迁移前、迁移中还是迁移后，读取位置都能保持一致。
+
+## 独立 meta
+
+并不是所有成长字段都进入聚合。源码明确把 `level` 排除在聚合之外：
+
+```php
+$fields = array(
+    'auth',
+    'auth_info',
+    'level', //不能加入zib聚合
+    'level_integral',
+);
+```
+
+常见独立字段：
+
+| 字段                     | 原因                                       |
+| ------------------------ | ------------------------------------------ |
+| `level`                  | 用户等级，需要快速读取和后台资料页直接维护 |
+| `level_integral`         | 当前总经验值，会触发等级重算               |
+| `banned`                 | 禁封状态，需要快速判断                     |
+| `banned_time`            | 禁封到期时间，需要过期自动解封             |
+| `checkin_all_day`        | 累计签到天数，常用于排序和排行             |
+| `checkin_continuous_day` | 连续签到天数，常用于排行和展示             |
+| `wear_medal`             | 当前佩戴徽章                               |
+| `points`                 | 当前积分资产                               |
+| `balance`                | 当前余额资产                               |
+
+维护这些字段时也不要随便 SQL 改。比如 `level_integral` 变更会触发 `zib_update_user_level()` 重新计算 `level`；`points` 和 `balance` 必须走 Zibpay 资产函数以保留流水和并发扣减保护。
+
+## 升级迁移任务
+
+主题升级任务会把 `zib_get_option_meta_keys('user_meta')` 中的字段批量迁移到 `zib_other_data`：
+
+```php
+$_n_m_new = get_user_meta($_n_m_user_id, 'zib_other_data', true) ?: array();
+foreach ($_n_m_data as $metarow) {
+    $_n_m_new[$metarow['meta_key']] = maybe_unserialize($metarow['meta_value']);
+}
+
+update_user_meta($_n_m_user_id, 'zib_other_data', $_n_m_new);
+```
+
+迁移完成后会删除已经迁进去的旧 meta 行：
+
+```php
+$wpdb->query("DELETE FROM {$wpdb->usermeta} WHERE `meta_key` IN ('$user_meta_keys_str') AND `user_id` IN ('$is_needed_user_ids_str')");
+```
+
+最后还会清理旧版本残留：
+
+```php
+$wpdb->query("DELETE FROM `$wpdb->usermeta` WHERE `meta_key` LIKE '_user_points_followed_%' OR `meta_key` LIKE '_user_integral_followed_%' OR `meta_key` = 'posts_draft'");
+```
+
+因此迁移后看到 `usermeta` 里没有 `medal_details`、`checkin_detail`、`level_integral_detail` 不一定是数据丢失。先读 `zib_other_data`，或直接用主题封装函数确认。
+
+## 后台手动调整等级
+
+超级管理员可以在用户资料页手动设置认证、等级和经验。字段来自 `inc/functions/user/admin/admin.php`：
+
+| 字段             | 说明                 |
+| ---------------- | -------------------- |
+| `auth`           | 是否认证             |
+| `auth_info`      | 认证名称、简介、时间 |
+| `level`          | 用户等级             |
+| `level_integral` | 当前经验值           |
+
+保存时会统一写入：
+
+```php
+foreach ($fields as $field) {
+    if (isset($_POST[$field])) {
+        zib_update_user_meta($cuid, $field, $_POST[$field]);
+    }
+}
+
+update_meta_cache('user', array($cuid));
+```
+
+手动调整等级时要注意：
+
+1. `level` 和 `level_integral` 要匹配后台等级规则。
+2. `level_integral` 更新后会通过 meta Hook 触发等级重算。
+3. 如果把 `level` 调高但经验不足，后续经验变化可能又把等级算回去。
+4. 调整历史记录不会自动补写 `level_integral_detail`。
+
+如果是运营补偿，建议调用经验入口写明细：
+
+```php
+function zib_docs_grant_level_integral($user_id, $value, $desc = '')
+{
+    if (!$user_id || !$value || !_pz('user_level_s', true)) {
+        return false;
+    }
+
+    zib_add_user_level_integral($user_id, (int) $value, 'docs_admin_grant', true);
+    zib_update_user_meta($user_id, 'docs_last_integral_grant_desc', $desc);
+
+    return true;
+}
+```
+
+如果只是修正异常等级，则可以在后台用户资料页手动改，但要把修正原因记录到自己的审计日志里。
+
+## 签到数据维护
+
+签到写入时会同时维护四类数据：
+
+| 字段                     | 写入函数                              | 作用             |
+| ------------------------ | ------------------------------------- | ---------------- |
+| `checkin_detail`         | `zib_user_checkin()`                  | 最近签到明细     |
+| `checkin_all_day`        | `zib_user_checkin()`                  | 累计签到天数     |
+| `checkin_continuous_day` | `zib_update_checkin_continuous_day()` | 当前连续签到天数 |
+| `checkin_reward_days`    | `zib_update_checkin_reward_day()`     | 连续奖励周期     |
+
+`checkin_detail` 最多保留多少条由 Filter 控制：
+
+```php
+function zib_docs_checkin_detail_maximum($max)
+{
+    return 60;
+}
+add_filter('user_checkin_detail_maximum', 'zib_docs_checkin_detail_maximum');
+```
+
+不要只改 `checkin_detail` 来“补签”。补签会影响累计天数、连续天数和连续奖励周期。若确实要后台补签，至少要同时维护四个字段，并考虑是否补发积分和经验。
+
+示例：只做运营标记，不直接补签：
+
+```php
+function zib_docs_mark_manual_checkin_note($user_id, $date, $remark)
+{
+    if (!$user_id || !$date) {
+        return false;
+    }
+
+    $notes = zib_get_user_meta($user_id, 'docs_checkin_notes', true);
+    if (!$notes || !is_array($notes)) {
+        $notes = array();
+    }
+
+    $notes[$date] = array(
+        'remark' => sanitize_text_field($remark),
+        'time'   => current_time('mysql'),
+    );
+
+    return zib_update_user_meta($user_id, 'docs_checkin_notes', $notes);
+}
+```
+
+真正发放签到奖励应继续走 `zib_user_checkin()` 或单独走经验、积分入口，避免重复触发 `user_checkined`。
+
+## 徽章数据维护
+
+用户徽章数据保存在 `medal_details`，当前佩戴保存在 `wear_medal`。授予和收回应使用主题函数：
+
+```php
+zib_add_user_medal($user_id, __('活动达人', 'zib_language'), __('完成活动', 'zib_language'));
+zib_remove_user_medal($user_id, __('活动达人', 'zib_language'));
+```
+
+`zib_add_user_medal()` 会做这些事：
+
+1. 读取 `medal_details`。
+2. 兼容旧版独立 meta。
+3. 检查徽章是否已存在。
+4. 检查徽章配置是否存在。
+5. 触发 `user_add_medal`。
+6. 写入 `medal_details`。
+
+徽章配置会缓存到对象缓存：
+
+```php
+wp_cache_set('user_medal_args', $user_medal_args, 'zib_cache_group');
+```
+
+保存主题配置后会刷新：
+
+```php
+add_action('csf_zibll_options_saved', 'zib_medal_args_cache_set');
+```
+
+如果手动改了徽章配置数组或通过代码过滤 `user_medal_args`，排查时要清理 `user_medal_args` 缓存、对象缓存和页面缓存。
+
+## 禁封日志维护
+
+禁封状态由三个字段组成：
+
+| 字段          | 说明                                           |
+| ------------- | ---------------------------------------------- |
+| `banned`      | 禁封类型，`0` 未禁封、`1` 小黑屋、`2` 禁止登录 |
+| `banned_time` | 到期时间，空值为长期                           |
+| `banned_log`  | 当前禁封和历史记录                             |
+
+更新禁封必须走：
+
+```php
+zib_updata_user_ban($user_id, $type, $info);
+```
+
+注意函数名是主题源码里的 `updata`。它会写 `banned`、`banned_time`，在禁封时写入 `banned_log.current`，并触发：
+
+```php
+do_action('updata_user_ban', $user_id, $type, $info);
+```
+
+用户状态读取会自动处理过期禁封：
+
+```php
+if (strtotime($ban_time) < strtotime($current_time)) {
+    zib_updata_user_ban($user_id, 0, array('desc' => __('到期自动解封', 'zib_language')));
+    return false;
+}
+```
+
+不要只把 `banned` 改成 `0`。这样会绕过消息通知、日志、申诉处理和扩展 Hook。
+
+## 资产数据边界
+
+积分和余额虽然经常和成长奖励一起出现，但它们属于 Zibpay 资产体系：
+
+| 数据     | 正确入口                        |
+| -------- | ------------------------------- |
+| 当前积分 | `zibpay_get_user_points()`      |
+| 积分变动 | `zibpay_update_user_points()`   |
+| 当前余额 | `zibpay_get_user_balance()`     |
+| 余额变动 | `zibpay_update_user_balance()`  |
+| 免费积分 | `zibpay_add_user_free_points()` |
+
+不要用 `zib_update_user_meta($user_id, 'points', 100)` 补积分。这样不会写 `points_record`，也会绕过扣减并发保护。运营补偿积分示例：
+
+```php
+function zib_docs_grant_user_points($user_id, $value, $desc = '')
+{
+    if (!$user_id || !$value || !_pz('points_s', true)) {
+        return false;
+    }
+
+    return zibpay_update_user_points($user_id, array(
+        'order_num' => '',
+        'value'     => (int) $value,
+        'type'      => __('运营补偿', 'zib_language'),
+        'desc'      => $desc ? $desc : __('后台手动补发积分', 'zib_language'),
+    ));
+}
+```
+
+## 数据迁移检查
+
+迁移服务器、换域名、导入数据库或升级主题后，用户成长数据至少检查：
+
+| 检查项           | 验证方式                                                    |
+| ---------------- | ----------------------------------------------------------- |
+| `zib_other_data` | 随机用户用 `zib_get_user_meta()` 能读到徽章、签到、经验明细 |
+| 等级             | 用户资料页等级与经验值是否匹配                              |
+| 签到             | 今日签到、累计天数、连续天数、详情弹窗                      |
+| 免费积分         | 用户中心积分流水、每日免费积分详情                          |
+| 徽章             | 公开徽章弹窗、本人佩戴、后台手动授予                        |
+| 禁封             | 小黑屋限制、禁止登录、到期自动解封、申诉入口                |
+| 资产             | 余额、积分、转账、购买积分、退款回滚                        |
+| 对象缓存         | 徽章配置、用户卡片、用户中心是否刷新                        |
+
+如果导入的是老站数据库，看到旧的独立 meta 和新的 `zib_other_data` 同时存在，要以主题封装函数读取结果为准，不要手工删除。让升级任务跑完后再做清理。
+
+## 批量修复建议
+
+批量修复用户成长数据时建议按这个顺序：
+
+1. 备份数据库。
+2. 关闭页面缓存或进入维护时段。
+3. 使用主题封装函数读取样本用户。
+4. 小批量 dry run，先输出即将修改的用户 ID 和字段。
+5. 每批处理后清理对象缓存。
+6. 抽样验证用户中心、作者页、后台用户资料页。
+
+示例：给经验异常用户重新触发等级计算：
+
+```php
+function zib_docs_rebuild_user_level_by_integral($user_id)
+{
+    if (!$user_id || !_pz('user_level_s', true)) {
+        return false;
+    }
+
+    $integral = (int) get_user_meta($user_id, 'level_integral', true);
+    zib_update_user_level(0, $user_id, 'level_integral', $integral);
+    update_meta_cache('user', array($user_id));
+
+    return true;
+}
+```
+
+示例：检查徽章配置中已删除的徽章，不直接删除用户历史：
+
+```php
+function zib_docs_find_unknown_user_medals($user_id)
+{
+    $medals = zib_get_user_meta($user_id, 'medal_details', true);
+    if (!$medals || !is_array($medals)) {
+        return array();
+    }
+
+    $unknown = array();
+    foreach ($medals as $name => $detail) {
+        if (!zib_get_single_medal_args($name)) {
+            $unknown[$name] = $detail;
+        }
+    }
+
+    return $unknown;
+}
+```
+
+先列出异常，再决定是恢复徽章配置、收回徽章，还是保留历史。不要因为当前配置里没有某个徽章，就直接清空用户的 `medal_details`。
+
+## 长期审计报表
+
+用户成长字段里的很多明细只适合前台近期展示，不适合直接当长期运营报表：
+
+| 明细             | 字段                         | 源码保留范围                                            | 适合用途                   |
+| ---------------- | ---------------------------- | ------------------------------------------------------- | -------------------------- |
+| 签到明细         | `checkin_detail`             | 默认最多 30 条，可被 `user_checkin_detail_maximum` 调整 | 用户中心和签到详情弹窗     |
+| 经验流水         | `level_integral_detail`      | 最多 50 条                                              | 用户最近经验变化           |
+| 每日经验合计     | `level_integral_date_detail` | 最多 30 天                                              | 今日上限和近期趋势         |
+| 积分流水         | `points_record`              | 通常最多 50 条                                          | 用户中心近期资产记录       |
+| 免费积分每日合计 | `free_points_detail`         | 通常最多 50 条                                          | 免费积分每日上限           |
+| 禁封日志         | `banned_log`                 | 持续累积但结构服务于当前状态                            | 用户禁封历史和当前禁封说明 |
+
+如果要做月报、活动复盘、长期反作弊或迁移后巡检，建议另建追加型审计表或日志，不要把 `checkin_detail`、`level_integral_detail` 当作唯一事实来源。主题字段用于“当前状态 + 近期展示”，审计表用于“长期证据 + 可追溯报表”。
+
+长期审计可以从这些 Hook 和入口采集：
+
+| 事件         | 推荐监听                                                     | 关键字段                                                                             |
+| ------------ | ------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| 签到成功     | `user_checkined`                                             | `user_id`、`time`、`points`、`integral`、`checkin_all_day`、`checkin_continuous_day` |
+| 经验奖励     | 自定义奖励调用处或 `updated_user_meta` 中的 `level_integral` | `user_id`、变更前后经验、业务 key                                                    |
+| 免费积分奖励 | 自定义奖励调用处或 Zibpay 资产封装结果                       | `user_id`、积分值、type、desc、order_num                                             |
+| 徽章授予     | `user_add_medal`                                             | 徽章名、授予时间、备注                                                               |
+| 徽章收回     | `user_remove_medal`                                          | 徽章名、操作者、原因                                                                 |
+| 邀请码使用   | `zib_use_invit_code`                                         | 邀请码 ID、使用者、奖励配置、推荐人奖励                                              |
+| 禁封变化     | `updata_user_ban`                                            | 禁封类型、到期时间、操作者、原因、是否允许申诉                                       |
+
+最小审计记录建议包含：
+
+| 字段          | 说明                                                  |
+| ------------- | ----------------------------------------------------- |
+| `event`       | 稳定事件名，例如 `checkin`、`medal_add`、`ban_update` |
+| `user_id`     | 被影响用户                                            |
+| `object_id`   | 可选，文章、评论、邀请码、订单或徽章名                |
+| `value`       | 可选，积分、经验、余额、天数等数值                    |
+| `meta`        | 原始业务参数，保存为 JSON                             |
+| `operator_id` | 操作者，系统事件可为 `0`                              |
+| `created_at`  | 事件发生时间                                          |
+
+示例：只做轻量审计记录，把采集和主题状态写入分开：
+
+```php
+function zib_docs_growth_audit_log($event, $user_id, array $meta = array())
+{
+    if (!$event || !$user_id) {
+        return false;
+    }
+
+    global $wpdb;
+    return $wpdb->insert(
+        $wpdb->prefix . 'zib_docs_growth_audit',
+        array(
+            'event'      => sanitize_key($event),
+            'user_id'    => (int) $user_id,
+            'meta'       => wp_json_encode($meta),
+            'created_at' => current_time('mysql'),
+        ),
+        array('%s', '%d', '%s', '%s')
+    );
+}
+
+add_action('user_checkined', function ($user_id, $the_data) {
+    zib_docs_growth_audit_log('checkin', $user_id, array(
+        'points'         => isset($the_data['points']) ? (int) $the_data['points'] : 0,
+        'integral'       => isset($the_data['integral']) ? (int) $the_data['integral'] : 0,
+        'all_day'        => zib_get_user_checkin_all_day($user_id),
+        'continuous_day' => zib_get_user_checkin_continuous_day($user_id),
+    ));
+}, 20, 2);
+
+add_action('user_add_medal', function ($user_id, $medal_args) {
+    zib_docs_growth_audit_log('medal_add', $user_id, array(
+        'name' => isset($medal_args['name']) ? $medal_args['name'] : '',
+        'time' => isset($medal_args['time']) ? $medal_args['time'] : current_time('mysql'),
+    ));
+}, 20, 2);
+
+add_action('updata_user_ban', function ($user_id, $type, $info) {
+    zib_docs_growth_audit_log('ban_update', $user_id, array(
+        'type' => (int) $type,
+        'info' => $info,
+    ));
+}, 20, 3);
+```
+
+这个表只追加审计事件，不反向修改主题数据。修复用户状态仍要回到主题入口：签到走 `zib_user_checkin()` 或明确的运营补偿逻辑，经验走 `zib_add_user_level_integral()`，积分余额走 Zibpay 资产函数，徽章走 `zib_add_user_medal()` / `zib_remove_user_medal()`，禁封走 `zib_updata_user_ban()`。
+
+插件样本 `zib-mission` 的累计签到奖励也体现了这个边界：领取状态应按用户保存，例如 `reward_{key}_claimed` 这类 user meta；奖励发放仍然调用 `zib_add_user_level_integral()`、`zibpay_update_user_points()`、`zibpay_update_user_balance()`、`zibpay_update_user_vip()`。如果领取判断用全局 option，而实际领取状态用 user meta，前台就可能出现跨用户显示不一致。做任务系统时要保证“显示是否可领取”和“提交时是否已领取”使用同一份用户维度状态。
+
+长期报表的验收顺序：
+
+1. 事件能追加，不影响主题原流程返回。
+2. 同一业务有幂等标记，刷新或重复提交不会重复发奖。
+3. 报表记录的 `user_id`、事件时间和主题状态能对上。
+4. 近期展示字段被裁剪后，审计表仍保留历史记录。
+5. 报表只读或导出，不直接作为批量修复脚本的数据源。
+
+## 常见误区
+
+| 误区                            | 后果                                          |
+| ------------------------------- | --------------------------------------------- |
+| 直接查 `usermeta.medal_details` | 迁移后读不到，因为数据可能在 `zib_other_data` |
+| 直接改 `points`                 | 没有积分流水，可能破坏并发扣减                |
+| 直接改 `banned`                 | 没有日志、通知和 Hook                         |
+| 只改 `checkin_detail`           | 累计天数、连续天数、奖励周期不一致            |
+| 手动把 `level` 调高             | 后续经验变化可能触发重算又降回去              |
+| 清空 `medal_details`            | 用户历史徽章、佩戴状态和消息记录断裂          |
+| 删除 `_user_*` 防重复字段       | 可能导致历史点赞、收藏、关注再次发奖励        |
+| 导入老库后立刻手工删 meta       | 可能删掉尚未迁入 `zib_other_data` 的数据      |
+| 用近期明细做长期报表            | 明细会被裁剪，月报和活动复盘会漏数据          |
+| 任务领取状态用全局 option       | 多用户之间可能互相影响领取展示和发奖判断      |
+
+## 参考来源
+
+本页根据 `inc/dependent.php`、`inc/options/upgrade.php`、`inc/functions/user/admin/admin.php`、`inc/functions/user/user-level.php`、`inc/functions/user/user-checkin.php`、`inc/functions/user/user_medal.php`、`inc/functions/user/user-ban.php`、`inc/functions/user/invit-code.php`、`zibpay/functions/zibpay-points.php`、插件样本 `zib-mission`、[用户成长与权限体系](/docs/api/user-growth-permissions)、[用户成长奖励事件](/docs/api/user-growth-reward-events) 和 [用户资产、积分与余额](/docs/api/user-assets-points-balance) 蒸馏整理。

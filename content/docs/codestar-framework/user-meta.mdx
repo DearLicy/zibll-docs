@@ -1,0 +1,387 @@
+---
+title: 用户 Meta
+description: 按子比主题源码说明用户资料字段、后台 profile 表单、zib_other_data 聚合、前台读取与保存边界。
+---
+
+## 文件位置
+
+用户资料后台字段在：
+
+```txt
+inc/options/profile-options.php
+```
+
+前台用户资料保存逻辑主要在：
+
+```txt
+action/user.php
+```
+
+主题设置中的用户相关开关在：
+
+```txt
+inc/options/admin-options.php
+```
+
+因此用户 Meta 要分三层看：
+
+| 层级              | 文件                              | 职责                                       |
+| ----------------- | --------------------------------- | ------------------------------------------ |
+| 后台 profile 字段 | `inc/options/profile-options.php` | 在 WordPress 用户编辑页渲染字段            |
+| 前台用户操作      | `action/user.php`                 | 保存头像、封面、资料、绑定等用户提交       |
+| 全站用户开关      | `inc/options/admin-options.php`   | 控制注册登录、绑定、认证、积分、会员等功能 |
+
+## 保存位置
+
+子比主题把一部分用户 meta 聚合到 `zib_other_data`。字段清单来自：
+
+```php
+zib_get_option_meta_keys('user_meta')
+```
+
+典型字段包括：
+
+```txt
+qq
+weixin
+weibo
+github
+url_name
+address
+privacy
+message_shield
+favorite_forum_posts
+follow_plate
+rewards_title
+cover_image
+cover_image_id
+custom_avatar
+custom_avatar_id
+rewards_wechat_image_id
+rewards_alipay_image_id
+rewards_alipay_account
+rewards_paypal_email
+follow-user
+followed-user
+vip_level_expired
+balance_record
+points_record
+auth_info
+medal_details
+```
+
+社交登录信息也会动态加入：
+
+```php
+$social_type = array(
+    'qq',
+    'weixin',
+    'weixingzh',
+    'weibo',
+    'gitee',
+    'baidu',
+    'alipay',
+    'dingtalk',
+    'huawei',
+    'xiaomi',
+    'github',
+    'google',
+    'apple',
+    'microsoft',
+    'facebook',
+    'twitter',
+);
+
+foreach ($social_type as $value) {
+    $keys['user_meta'][] = 'oauth_' . $value . '_getUserInfo';
+}
+```
+
+读取和写入统一使用：
+
+```php
+$avatar = zib_get_user_meta($user_id, 'custom_avatar', true);
+zib_update_user_meta($user_id, 'custom_avatar', $avatar_url);
+```
+
+不要直接假设这些字段在单独的 `wp_usermeta` 行里。
+
+## 后台 Profile 表单
+
+`zib_render_profile_form_fields($profile_user)` 会在 WordPress 用户资料页输出“更多资料”字段：
+
+```php
+add_action('show_user_profile', 'zib_render_profile_form_fields');
+add_action('edit_user_profile', 'zib_render_profile_form_fields');
+```
+
+渲染前先读取旧值：
+
+```php
+$option_meta_keys = zib_get_option_meta_keys('user_meta');
+$zib_meta         = get_user_meta($profile_user->ID, 'zib_other_data', true);
+
+foreach ($fields as $field) {
+    if (!empty($field['id'])) {
+        if (in_array($field['id'], $option_meta_keys)) {
+            if (isset($zib_meta[$field['id']])) {
+                $value[$field['id']] = $zib_meta[$field['id']];
+            }
+        } else {
+            $value[$field['id']] = get_user_meta($profile_user->ID, $field['id'], true);
+        }
+    }
+}
+```
+
+然后交给 ZCSF：
+
+```php
+ZCSF::instance('profile_options', array(
+    'value'  => $value,
+    'form'   => false,
+    'nonce'  => false,
+    'fields' => $fields,
+));
+```
+
+保存 Hook：
+
+```php
+add_action('personal_options_update', 'zib_admin_save_profile');
+add_action('edit_user_profile_update', 'zib_admin_save_profile');
+```
+
+保存时只处理白名单字段：
+
+```php
+$fields = array(
+    'custom_avatar',
+    'cover_image',
+    'gender',
+    'qq',
+    'weixin',
+    'weibo',
+    'github',
+    'url_name',
+    'address',
+    'privacy',
+);
+
+foreach ($fields as $field) {
+    if (isset($_POST[$field])) {
+        zib_update_user_meta($cuid, $field, $_POST[$field]);
+    }
+}
+```
+
+## 前台资料保存
+
+`action/user.php` 里前台资料保存会处理用户提交的社交资料、地址、隐私设置等：
+
+```php
+zib_update_user_meta($cuid, 'qq', trim(strip_tags($_POST['qq'])));
+zib_update_user_meta($cuid, 'weixin', trim(strip_tags($_POST['weixin'])));
+zib_update_user_meta($cuid, 'weibo', trim(strip_tags($_POST['weibo'])));
+zib_update_user_meta($cuid, 'github', trim(strip_tags($_POST['github'])));
+zib_update_user_meta($cuid, 'url_name', trim(strip_tags($_POST['url_name'])));
+zib_update_user_meta($cuid, 'address', trim(strip_tags($_POST['address'])));
+zib_update_user_meta($cuid, 'privacy', trim(strip_tags($_POST['privacy'])));
+```
+
+这里体现了主题风格：
+
+- 前台输入先清洗。
+- 写入统一走 `zib_update_user_meta()`。
+- 字段名沿用主题已有语义。
+- 不在前台暴露敏感或管理员字段。
+
+## 头像和封面
+
+自定义头像相关字段：
+
+```txt
+custom_avatar
+custom_avatar_id
+```
+
+用户封面相关字段：
+
+```txt
+cover_image
+cover_image_id
+```
+
+上传后主题会保存附件 ID 和图片 URL：
+
+```php
+zib_update_user_meta($cuid, 'custom_avatar_id', $img_id);
+zib_update_user_meta($cuid, 'custom_avatar', $image_url[0]);
+```
+
+封面同理：
+
+```php
+zib_update_user_meta($cuid, 'cover_image_id', $img_id);
+zib_update_user_meta($cuid, 'cover_image', $image_url[0]);
+```
+
+前台输出时：
+
+```php
+$avatar = zib_get_user_meta($user_id, 'custom_avatar', true);
+if ($avatar) {
+    echo '<img src="' . esc_url($avatar) . '" alt="">';
+}
+```
+
+## 邮箱绑定与验证码
+
+邮箱绑定逻辑在 `action/user.php`，是否要求验证码取决于主题设置：
+
+```php
+if (_pz('user_bind_option', true, 'email_set_captch')) {
+    // 需要邮箱验证码
+}
+```
+
+这类字段不是普通用户资料字段。它属于账号安全流程，通常要同时处理：
+
+- 当前登录用户校验。
+- 邮箱格式校验。
+- 邮件验证码校验。
+- 已绑定邮箱冲突。
+- 更新 WordPress 用户主表的 `user_email`。
+- 触发绑定成功 Hook。
+
+不要把它当作普通 `zib_update_user_meta($user_id, 'email', $email)`。
+
+## 社交登录数据
+
+社交登录信息字段形式：
+
+```txt
+oauth_qq_getUserInfo
+oauth_weixin_getUserInfo
+oauth_github_getUserInfo
+```
+
+读取：
+
+```php
+$oauth = zib_get_user_meta($user_id, 'oauth_qq_getUserInfo', true);
+$oauth = is_array($oauth) ? $oauth : array();
+```
+
+解绑时主题会把对应字段置空：
+
+```php
+zib_update_user_meta($_POST['user_id'], 'oauth_' . $_POST['type'] . '_getUserInfo', false);
+```
+
+这些字段和第三方登录流程绑定，不建议只改 meta，不处理授权状态。
+
+## 资金、会员、积分字段
+
+下面这些字段属于业务账务或权限状态，不应作为普通资料字段直接修改：
+
+| 字段                | 含义         |
+| ------------------- | ------------ |
+| `balance_record`    | 余额记录     |
+| `points_record`     | 积分记录     |
+| `vip_level_expired` | 会员过期状态 |
+| `pay_down_number`   | 下载次数     |
+| `pay_down_log`      | 下载记录     |
+| `rebate_rule`       | 返佣规则     |
+| `income_rule`       | 收益规则     |
+| `auth_info`         | 身份认证信息 |
+| `medal_details`     | 徽章明细     |
+
+这些字段通常要走对应业务函数，让订单、记录、通知、缓存一起更新。只写 meta 会造成前台显示和实际权益不一致。
+
+## 读取用户资料
+
+普通资料：
+
+```php
+$qq = zib_get_user_meta($user_id, 'qq', true);
+```
+
+隐私字段：
+
+```php
+$privacy = zib_get_user_meta($user_id, 'privacy', true);
+if ($privacy === 'private') {
+    return;
+}
+```
+
+关注版块：
+
+```php
+$follow_plate = zib_get_user_meta($user_id, 'follow_plate', true);
+$follow_plate = is_array($follow_plate) ? $follow_plate : array();
+```
+
+打赏收款图：
+
+```php
+$wechat_id = zib_get_user_meta($user_id, 'rewards_wechat_image_id', true);
+$alipay_id = zib_get_user_meta($user_id, 'rewards_alipay_image_id', true);
+```
+
+## 权限边界
+
+后台保存用户资料前，至少要判断当前用户能否编辑目标用户：
+
+```php
+if (!current_user_can('edit_user', $user_id)) {
+    return;
+}
+```
+
+前台保存用户资料时，目标用户通常必须是当前登录用户：
+
+```php
+$cuid = get_current_user_id();
+if (!$cuid) {
+    return;
+}
+```
+
+管理员代改、用户自改、系统业务写入是三类不同场景，不能混用同一套权限判断。
+
+## 常见错误
+
+### 后台能保存，前台读不到
+
+检查字段是否进入 `zib_other_data`：
+
+```php
+in_array($field_id, zib_get_option_meta_keys('user_meta'));
+```
+
+如果进入聚合，必须用 `zib_get_user_meta()` 读取。
+
+### 资料字段被任意用户修改
+
+前台 Ajax 必须使用当前用户 ID，不要信任提交的 `user_id`：
+
+```php
+$cuid = get_current_user_id();
+```
+
+只有管理员场景才允许传入目标用户 ID，并且要 `current_user_can('edit_user', $user_id)`。
+
+### 开关关闭后仍然显示
+
+读取布尔字段时不要只判断是否存在，要判断实际值：
+
+```php
+$privacy = zib_get_user_meta($user_id, 'privacy', true);
+if ($privacy) {
+    // ...
+}
+```
+
+如果字段可能保存为数组、空字符串、`false`，先规范化再判断。

@@ -1,0 +1,559 @@
+---
+title: 用户系统
+description: 扩展登录注册、用户资料、头像封面、邮箱手机绑定、认证、签到、等级、勋章和用户中心。
+---
+
+## 模块入口
+
+用户系统由两部分组成：前台 Ajax 动作和主题用户函数。
+
+| 位置                          | 作用                                                                 |
+| ----------------------------- | -------------------------------------------------------------------- |
+| `action/sign_register.php`    | 登录、注册、免密登录、找回密码、验证码                               |
+| `action/user.php`             | 用户资料、头像、封面、邮箱/手机绑定、密码修改、账号验证              |
+| `inc/functions/user/user.php` | 用户模块入口，加载认证、等级、权限、封禁、签到、勋章、邀请码、用户页 |
+| `inc/functions/zib-user.php`  | 用户展示、用户链接、头像、昵称、徽章、用户页渲染                     |
+| `inc/functions/user/page/*`   | 用户中心页面                                                         |
+| `inc/functions/user/admin/*`  | 用户认证、封禁、邀请码等后台管理                                     |
+
+用户中心本身是一套前台模板路由，不是后台页面。入口在 `inc/functions/user/user.php`：
+
+```php
+add_action('generate_rewrite_rules', 'zib_user_center_rewrite_rules');
+add_filter('query_vars', 'zib_add_user_center_query_vars');
+add_action('template_redirect', 'zib_user_center_load_template', 5);
+```
+
+模板会触发：
+
+```php
+do_action('locate_template_' . $page_type);
+do_action($page_type . '_page_header');
+do_action($page_type . '_page_content');
+do_action($page_type . '_page_footer');
+```
+
+用户中心页面的 `$page_type` 是 `user_center`，所以可用入口包括 `locate_template_user_center`、`user_center_page_header`、`user_center_page_content`、`user_center_page_footer`。
+
+## 能扩展什么
+
+| 场景                         | 推荐方式                                                         |
+| ---------------------------- | ---------------------------------------------------------------- |
+| 登录注册增加限制             | 使用 `registration_errors` 或登录注册 Ajax 前后的 Hook           |
+| 用户昵称、徽章、头像角标展示 | Filter：`user_show_name`、`user_name_badge`、`user_avatar_badge` |
+| 用户中心增加入口             | Filter：`user_center_page_sidebar` 或相关用户中心 Tab            |
+| 用户绑定邮箱后同步外部系统   | Action：`zib_user_bind_email`                                    |
+| 用户上传头像后处理图片       | Action：`user_save_custom_avatar`                                |
+| 用户封禁、认证、等级扩展     | 阅读 `inc/functions/user/*` 后用 Hook 或插件封装                 |
+
+## 登录注册 Ajax 动作
+
+登录注册入口在 `action/sign_register.php`。这些动作同时包含已登录和未登录场景：
+
+| Ajax action             | 函数                               | 用途                   |
+| ----------------------- | ---------------------------------- | ---------------------- |
+| `user_signin_nopas`     | `zib_ajax_user_signin_nopas()`     | 免密登录               |
+| `user_signup`           | `zib_ajax_user_signup()`           | 注册并登录             |
+| `user_signin`           | `zib_ajax_user_signin()`           | 用户名、邮箱或手机登录 |
+| `signup_captcha`        | `zib_ajax_signup_captcha()`        | 注册验证码             |
+| `signin_captcha`        | `zib_ajax_signin_captcha()`        | 登录验证码             |
+| `resetpassword_captcha` | `zib_ajax_resetpassword_captcha()` | 找回密码验证码         |
+| `reset_password`        | `zib_ajax_reset_password()`        | 重置密码并登录         |
+
+注册流程会走 WordPress 原生校验：
+
+```php
+$errors = apply_filters('registration_errors', $errors, $sanitized_user_login, $email);
+```
+
+注册成功、免密登录、重置密码成功后都会触发：
+
+```php
+do_action('wp_login', $user->user_login, $user);
+```
+
+所以扩展登录后行为优先监听 `wp_login`，注册限制优先走 `registration_errors`，不要直接改 Ajax 回调里的密码、cookie 或用户状态。
+
+## 资料与安全 Ajax 动作
+
+用户资料相关入口在 `action/user.php`：
+
+| Ajax action             | 函数                               | 用途                       |
+| ----------------------- | ---------------------------------- | -------------------------- |
+| `user_edit_datas`       | `zib_ajax_user_edit_datas()`       | 修改昵称、简介、站点等资料 |
+| `user_upload_avatar`    | `zib_ajax_user_upload_avatar()`    | 上传头像                   |
+| `user_upload_cover`     | `zib_ajax_user_upload_cover()`     | 上传封面                   |
+| `user_set_rewards`      | `zib_ajax_user_set_rewards()`      | 设置打赏标题和收款二维码   |
+| `user_change_password`  | `zib_ajax_user_change_password()`  | 修改密码                   |
+| `user_oauth_untying`    | `zib_ajax_user_oauth_untying()`    | 解绑第三方账号             |
+| `bind_email_captcha`    | `zib_ajax_bind_email_captcha()`    | 绑定邮箱验证码             |
+| `user_bind_email`       | `zib_ajax_user_bind_email()`       | 绑定邮箱                   |
+| `bind_phone_captcha`    | `zib_ajax_bind_phone_captcha()`    | 绑定手机验证码             |
+| `user_bind_phone`       | `zib_ajax_user_bind_phone()`       | 绑定手机                   |
+| `verify_user_captcha`   | `zib_ajax_verify_user_captcha()`   | 用户验证验证码             |
+| `verify_user`           | `zib_ajax_verify_user()`           | 账号验证                   |
+| `user_set_modal`        | `zib_ajax_user_set_modal()`        | 用户设置弹窗               |
+| `user_edit_quick_often` | `zib_ajax_user_edit_quick_often()` | 我的快捷回复编辑弹窗       |
+| `save_user_quick_often` | `zib_ajax_save_user_quick_often()` | 保存我的快捷回复           |
+
+这些动作都必须以当前登录用户为准，不应允许前端传入任意 `user_id` 后修改资料。子比源码里绑定成功后有明确的业务 Hook：
+
+```php
+do_action('user_save_custom_avatar', $cuid, $img_id, $image_url[0]);
+do_action('zib_user_bind_email', $cuid, $captcha_val, $email);
+do_action('zib_user_update_bind_phone', $cuid, $captcha_val, $old_phone);
+do_action('zib_user_bind_phone', $cuid, $captcha_val, $old_phone);
+```
+
+例如同步邮箱绑定：
+
+```php
+function zib_docs_user_bind_email_sync($user_id, $captcha_val, $email)
+{
+    if (!$user_id || !$email) {
+        return;
+    }
+
+    zib_update_user_meta($user_id, 'docs_email_synced', current_time('mysql'));
+}
+add_action('zib_user_bind_email', 'zib_docs_user_bind_email_sync', 10, 3);
+```
+
+### 资料编辑字段校验
+
+`user_edit_datas` 只修改当前登录用户，源码不会让前端传入任意 `user_id` 后代写其他用户资料。扩展资料字段时，也应从 `get_current_user_id()` 取用户 ID，再做 nonce、登录态和字段校验。
+
+主题默认处理这些字段：
+
+| 字段                                                              | 写入位置                   | 关键校验                                                        |
+| ----------------------------------------------------------------- | -------------------------- | --------------------------------------------------------------- |
+| `name`                                                            | `display_name`、`nickname` | 走 `zib_ajax_username_judgment('name')`，避免昵称冲突和非法昵称 |
+| `desc`                                                            | 用户签名 meta              | 长度限制为 4 到 60 个字符                                       |
+| `url`、`url_name`                                                 | `user_url` 和站点名称 meta | 必须成对填写                                                    |
+| `address`、`weibo`、`github`、`qq`、`weixin`、`privacy`、`gender` | 用户 meta                  | 按主题字段保存                                                  |
+
+如果后台启用 `_pz('audit_user_desc')`，昵称和签名会合并送入 `ZibAudit::ajax_text($_POST['desc'] . $_POST['name'], '昵称或签名')`。这意味着扩展资料字段时，公开展示字段最好也进入同一套审核或敏感词流程，避免用户中心和个人主页展示未审内容。
+
+### 头像和封面上传
+
+头像和封面不是普通文本字段，它们走独立 Ajax：
+
+| Ajax action          | nonce 字段            | nonce action    | 写入 meta                           |
+| -------------------- | --------------------- | --------------- | ----------------------------------- |
+| `user_upload_avatar` | `upload_avatar_nonce` | `upload_avatar` | `custom_avatar_id`、`custom_avatar` |
+| `user_upload_cover`  | `upload_cover_nonce`  | `upload_cover`  | `cover_image_id`、`cover_image`     |
+
+两个上传动作都会要求登录态和 `$_FILES['file']`，实际入库前调用 `zib_php_upload()`。上传成功后，主题会删除旧的附件 ID，再写入新的附件 ID 与 URL，避免用户多次更换头像或封面后留下孤立附件。
+
+头像上传成功后会触发：
+
+```php
+do_action('user_save_custom_avatar', $cuid, $img_id, $image_url[0]);
+```
+
+适合在这里压缩图片、同步头像到外部系统、刷新用户卡片缓存。前端返回值会带 `replace_img='.avatar-id-{uid}'` 或 `.user-cover-id-{uid}`，所以自定义头像、封面位置时，可以复用相同 class，让上传后局部替换生效。
+
+### 收款资料与打赏弹窗
+
+用户中心的收款设置来自 `main_user_tab_content_rewards`，弹窗入口来自 `user_collection_set_modal`。表单最终提交到 `user_set_rewards`，只允许当前登录用户修改自己的收款资料。
+
+| 字段或文件             | 存储位置                  | 用途                                           |
+| ---------------------- | ------------------------- | ---------------------------------------------- |
+| `rewards_title`        | user meta                 | 文章打赏弹窗标题，默认是“文章很赞！支持一下吧” |
+| `weixin` 上传文件      | `rewards_wechat_image_id` | 微信收款二维码附件 ID                          |
+| `alipay` 上传文件      | `rewards_alipay_image_id` | 支付宝收款二维码附件 ID                        |
+| `upload_rewards_nonce` | nonce                     | 对应 `upload_rewards`                          |
+
+`user_set_rewards` 会先读取旧的二维码附件 ID，上传新二维码成功后删除旧附件，再写入新的附件 ID。保存后会清理 `user_rewards_img_urls` 对象缓存，并立即调用 `zib_get_user_rewards_img_urls($cuid)` 重新生成缓存。
+
+```php
+function zib_docs_after_rewards_saved($user_id)
+{
+    wp_cache_delete($user_id, 'user_rewards_img_urls');
+    $urls = zib_get_user_rewards_img_urls($user_id);
+
+    if (empty($urls['weixin']) && empty($urls['alipay'])) {
+        return;
+    }
+
+    zib_update_user_meta($user_id, 'docs_rewards_checked', current_time('mysql'));
+}
+```
+
+主题源码没有给 `user_set_rewards` 提供保存后 Hook。如果二开需要同步收款码，推荐新建独立的保存入口或在用户中心增加额外表单；不要直接改成允许前端传 `user_id`，否则普通用户可能覆盖他人收款资料。
+
+公开文章里的打赏按钮由 `zib_get_rewards_button()` 判断：只有作者配置了微信或支付宝二维码时才输出按钮。点击后加载 `user_rewards_modal`，这个 Ajax 同时注册了登录和游客入口，只读取 `id` 对应用户的二维码 URL 和标题，不做写入。
+
+用户资料详情弹窗 `user_details_data_modal` 也是公开弹窗，但它会走 `zib_get_user_details_data_modal()` 的隐私判断。签名、注册时间、最后登录默认可展示；邮箱、性别、地址、个人网站、QQ、微信、微博、Github 等字段会根据 `privacy`、当前登录用户、是否本人和管理员身份决定是否显示“用户未公开”。
+
+因此扩展作者页或文章底部用户卡片时，要把“公开展示弹窗”和“用户中心设置弹窗”分开处理：
+
+1. 展示弹窗可以注册 `nopriv`，但只能读取允许公开的数据。
+2. 设置弹窗必须要求登录态、nonce 和当前用户身份。
+3. 收款码上传要保留文件类型、大小、旧附件删除和缓存刷新。
+4. 不要在公开弹窗里输出支付宝账号、PayPal 邮箱、旧手机号等提现或安全字段。
+
+### 我的快捷回复
+
+快捷回复分两层：后台配置的系统快捷回复，以及当前登录用户保存到自己账号里的“我的快捷回复”。它们共用输入框展开面板，但数据来源和审核含义不同。
+
+| 来源         | 存储                                                           | 渲染入口                                 | 说明                                       |
+| ------------ | -------------------------------------------------------------- | ---------------------------------------- | ------------------------------------------ |
+| 系统快捷回复 | `_pz('comment_quick_often')`、`_pz('bbs_comment_quick_often')` | `zib_get_input_expand_but('quick', ...)` | 由后台配置，评论命中后可能走免审核         |
+| 我的快捷回复 | user meta `quick_often`                                        | `zib_get_user_quick_often()`             | 当前用户自己的常用语，只用于快速填充输入框 |
+
+编辑入口由 `zib_get_user_edit_quick_often_link()` 生成，使用主题 `RefreshModal` 打开 `user_edit_quick_often` 弹窗。弹窗内是可克隆的 `val[]` 文本域，前端限制 `data-max="20"`，保存时 `save_user_quick_often` 也会再次限制最多 20 条。
+
+保存流程只允许当前登录用户：
+
+```php
+function zib_docs_add_default_quick_often($user_id)
+{
+    $quick_often = zib_get_user_quick_often($user_id);
+    if ($quick_often) {
+        return;
+    }
+
+    zib_save_user_quick_often($user_id, array(
+        __('感谢反馈，我会尽快查看。', 'zib_language'),
+        __('这个问题已经处理完成。', 'zib_language'),
+    ));
+}
+add_action('user_register', 'zib_docs_add_default_quick_often');
+```
+
+主题保存时会过滤空项，并在返回 HTML 时用 `esc_attr()` 输出。二开如果在其它位置直接读取 `quick_often`，仍要按输出场景再做转义；不要把用户个人快捷回复直接加入免审核白名单，否则用户可以自己添加任意文本绕过评论审核。
+
+### 密码修改与 OAuth 新账号
+
+`user_change_password` 仍以当前登录用户为准，基础规则是：
+
+- `password` 和 `password2` 必填。
+- 密码长度至少 6 位。
+- 两次密码必须一致。
+- 必须通过 `img_yz_change_password` 人机验证。
+
+普通账号修改密码时，还会要求 `passwordold`，并用 `wp_check_password()` 校验旧密码；新旧密码不能相同。旧密码连续错误会进入 `zib_is_error_frequency_limit('change_password')` 频率限制，成功后再 `zib_reset_error_frequency_limit('change_password')`。
+
+第三方登录新账号可能带有 `oauth_new` 用户 meta。这个场景是“设置密码”而不是“修改密码”，源码不会要求旧密码；设置成功后会删除 `oauth_new`，之后再改密码就回到普通账号流程。
+
+### 邮箱手机换绑的旧账号验证
+
+绑定邮箱和绑定手机分为两个阶段：先发送新邮箱或新手机号验证码，再提交绑定动作。换绑已有邮箱或手机时，还可能要求先验证旧邮箱或旧手机。
+
+| Ajax action           | 用途                             | 关键点                                                      |
+| --------------------- | -------------------------------- | ----------------------------------------------------------- |
+| `verify_user_captcha` | 给当前已绑定邮箱或手机发送验证码 | 只验证当前登录用户自己的旧账号                              |
+| `verify_user`         | 校验旧邮箱或旧手机验证码         | 成功后调用 `zib_set_verify_user($type, $cuid)` 缓存验证状态 |
+| `bind_email_captcha`  | 给新邮箱发验证码                 | 邮箱格式、不能与当前邮箱相同、不能已存在                    |
+| `user_bind_email`     | 写入 `user_email`                | 需要验证码；开启旧邮箱验证时还要检查旧账号验证状态          |
+| `bind_phone_captcha`  | 给新手机号发验证码               | 手机格式、不能与当前手机号相同、不能已绑定                  |
+| `user_bind_phone`     | 写入 `phone_number`              | 需要验证码；换绑旧手机时触发更新 Hook                       |
+
+邮箱绑定成功后触发 `zib_user_bind_email`。手机号首次绑定和换绑都会触发 `zib_user_bind_phone`，换绑时额外触发 `zib_user_update_bind_phone`。扩展短信服务、绑定日志或风控提示时，优先挂这些 Hook，而不是复制主题 Ajax。
+
+## 登录注册扩展边界
+
+登录、注册、找回密码涉及验证码、人机验证、邮箱/手机、邀请码、第三方账号绑定和 WordPress 原生用户状态。扩展时不要直接绕过主题 Ajax 流程。
+
+重点检查：
+
+- 是否允许注册、登录。
+- 是否启用邮箱或手机验证码。
+- 是否启用人机验证。
+- 是否需要邀请码。
+- 是否存在第三方登录待绑定状态。
+- 是否需要触发 `wp_login`。
+
+## 用户资料扩展
+
+用户资料编辑、头像上传、封面上传、邮箱绑定、手机绑定、密码修改都属于敏感操作。扩展时必须校验当前用户身份，不允许前端传任意 user id 后直接修改。
+
+```php
+add_action('zib_user_bind_email', 'zib_docs_user_email_bound', 10, 3);
+
+function zib_docs_user_email_bound($user_id, $captcha_val, $email)
+{
+    // 邮箱绑定成功后同步外部系统或写入日志。
+}
+```
+
+## 用户后台管理入口
+
+用户后台入口集中在 `inc/functions/user/admin/admin.php`。它不是单独重写 WordPress 用户系统，而是在 `users.php` 下追加子菜单、后台待办提醒，并给用户资料页补主题字段。
+
+| 后台能力                 | 入口                                     | 条件                                     |
+| ------------------------ | ---------------------------------------- | ---------------------------------------- |
+| 邀请码管理               | `users.php?page=invit_code`              | 总是注册，页面内再提示邀请码功能是否启用 |
+| 身份认证处理             | `users.php?page=user_auth`               | `_pz('user_auth_s', true)`               |
+| 举报与禁封申诉           | `users.php?page=user_ban`                | `_pz('user_ban_s', true)`                |
+| 用户资料页认证和等级字段 | `show_user_profile`、`edit_user_profile` | `is_super_admin()`                       |
+
+菜单注册方式：
+
+```php
+function zib_add_user_auth_submenu_page()
+{
+    add_submenu_page('users.php', __('处理身份认证申请', 'zib_language'), __('身份认证', 'zib_language'), 'administrator', 'user_auth', 'zib_require_user_auth_submenu_page');
+}
+
+function zib_require_user_auth_submenu_page()
+{
+    require get_theme_file_path('inc/functions/user/admin/auth-page.php');
+}
+```
+
+后台待处理数量不是直接查用户 meta，而是查消息表。认证申请使用 `type=auth_apply`，禁封申诉使用 `type=ban_appeal`，用户举报使用 `type=user_report`：
+
+```php
+$withdraw_count = ZibMsg::get_count(array(
+    'type'   => 'auth_apply',
+    'status' => 0,
+));
+```
+
+这说明认证、举报和申诉本质上是“用户提交 -> 消息待处理 -> 后台处理 -> 消息回复”的流程。扩展后台审核时，优先复用消息状态和处理函数，不要另建一个只写 user meta 的孤立审核表，否则用户中心、通知、邮件和待办数量会脱节。
+
+### 用户资料页主题字段
+
+超级管理员打开用户资料页时，主题会通过 `ZCSF::instance('profile_options', $csf_args)` 渲染认证和等级字段：
+
+```php
+if (is_super_admin()) {
+    add_action('show_user_profile', 'zib_render_profile_auth_form_fields');
+    add_action('edit_user_profile', 'zib_render_profile_auth_form_fields');
+    add_action('personal_options_update', 'zib_admin_save_profile_auth');
+    add_action('edit_user_profile_update', 'zib_admin_save_profile_auth');
+}
+```
+
+字段保存到用户 meta：
+
+| 字段             | 说明                     |
+| ---------------- | ------------------------ |
+| `auth`           | 是否认证                 |
+| `auth_info`      | 认证名称、简介、认证时间 |
+| `level`          | 用户等级                 |
+| `level_integral` | 用户经验值               |
+
+扩展用户资料页字段时，可以跟随这个模式，但要注意两个边界：
+
+1. 后台用户资料页字段只适合管理员修正资料，不适合替代前台用户中心。
+2. 如果字段会影响权限、等级、认证、资产或消息，保存时还要触发对应业务函数或 Hook，不能只写 meta。
+
+例如给用户资料页追加一个只供管理员维护的内部备注：
+
+```php
+function zib_docs_render_profile_note_field($profile_user)
+{
+    if (!is_super_admin() || empty($profile_user->ID)) {
+        return;
+    }
+
+    $note = zib_get_user_meta($profile_user->ID, 'docs_admin_note', true);
+
+    echo '<h3>' . esc_html__('内部备注', 'zib_language') . '</h3>';
+    echo '<table class="form-table"><tbody><tr>';
+    echo '<th><label for="docs_admin_note">' . esc_html__('备注', 'zib_language') . '</label></th>';
+    echo '<td><textarea name="docs_admin_note" id="docs_admin_note" rows="4" class="large-text">' . esc_textarea($note) . '</textarea></td>';
+    echo '</tr></tbody></table>';
+}
+add_action('show_user_profile', 'zib_docs_render_profile_note_field');
+add_action('edit_user_profile', 'zib_docs_render_profile_note_field');
+
+function zib_docs_save_profile_note_field($user_id)
+{
+    if (!is_super_admin() || !isset($_POST['docs_admin_note'])) {
+        return;
+    }
+
+    zib_update_user_meta($user_id, 'docs_admin_note', sanitize_textarea_field(wp_unslash($_POST['docs_admin_note'])));
+}
+add_action('personal_options_update', 'zib_docs_save_profile_note_field');
+add_action('edit_user_profile_update', 'zib_docs_save_profile_note_field');
+```
+
+如果是认证、等级、封禁这类主题已有业务，优先调用主题函数或走审核流程。比如认证状态应走 `zib_add_user_auth()` 或后台认证处理；封禁状态应走 `zib_updata_user_ban()`；不要只更新 `auth`、`level` 或 `ban` 相关 meta。
+
+## 用户中心扩展
+
+用户中心不是普通静态页面，里面包含登录态、订单、余额、消息、资料、关注、收藏等动态数据。不要把它整页缓存成静态 HTML。
+
+核心结构在 `inc/functions/user/page.php`：
+
+```php
+add_action('user_center_page_content', 'zib_user_page_header', 8);
+add_action('user_center_page_content', 'zib_user_page_content');
+add_filter('user_ctnter_main_tabs_array', 'zib_user_ctnter_main_tabs_array_filter_main');
+add_filter('user_center_page_sidebar', 'zib_user_center_page_sidebar_statistics', 5);
+add_filter('user_center_page_sidebar', 'zib_user_center_page_sidebar_button_1', 50);
+add_filter('user_center_page_sidebar', 'zib_user_center_page_sidebar_button_2', 60);
+```
+
+主 Tab 使用 `user_ctnter_main_tabs_array`，内容使用 `main_user_tab_content_{id}`。源码里默认有资料、账号、安全、积分、打赏等内容，消息模块也会通过 filter 把消息加入用户中心。
+
+新增一个只读 Tab 的写法：
+
+```php
+function zib_docs_user_center_tabs($tabs_array)
+{
+    $tabs_array['docs'] = array(
+        'title' => __('开发资料', 'zib_language'),
+        'icon'  => 'fa fa-book',
+    );
+
+    return $tabs_array;
+}
+add_filter('user_ctnter_main_tabs_array', 'zib_docs_user_center_tabs');
+
+function zib_docs_main_user_tab_content_docs()
+{
+    $user_id = get_queried_object_id();
+    if (!$user_id) {
+        return '';
+    }
+
+    return '<div class="box-body">' . esc_html__('这里显示当前用户可见的资料。', 'zib_language') . '</div>';
+}
+add_filter('main_user_tab_content_docs', 'zib_docs_main_user_tab_content_docs');
+```
+
+侧栏按钮可以挂：
+
+```php
+function zib_docs_user_center_button_args($buttons)
+{
+    $buttons[] = array(
+        'name'  => __('开发资料', 'zib_language'),
+        'icon'  => 'fa fa-book',
+        'href'  => zib_get_user_center_url('docs'),
+        'class' => 'c-blue',
+    );
+
+    return $buttons;
+}
+add_filter('zib_user_center_page_sidebar_button_2_args', 'zib_docs_user_center_button_args');
+```
+
+新增用户中心功能时建议：
+
+1. 用插件注册功能入口。
+2. 通过 Hook 或 Filter 加入侧栏或 Tab。
+3. 页面内容只展示当前用户有权访问的数据。
+4. 写入操作走 Ajax，并校验 nonce。
+5. 所有用户可见字段都做转义。
+
+## 原生刷新弹窗
+
+子比主题大量弹窗不是提前写在页面里，而是通过 `RefreshModal` 按需向 `admin-ajax.php` 请求内容。入口函数在 `inc/functions/functions.php`：
+
+```php
+zib_get_refresh_modal_link(array(
+    'tag'           => 'a',
+    'class'         => 'but c-blue',
+    'data_class'    => 'modal-mini full-sm',
+    'text'          => __('打开弹窗', 'zib_language'),
+    'query_arg'     => array(
+        'action' => 'docs_user_note_modal',
+    ),
+    'mobile_bottom' => true,
+    'height'        => 360,
+));
+```
+
+它最终会输出 `data-toggle="RefreshModal"`、`data-remote`、`data-class`、`mobile-bottom`、`data-height` 等属性。源码里头像、封面、用户设置、认证、勋章、私信、商城订单详情都用这套方式加载弹窗。
+
+最小 Ajax 弹窗示例：
+
+```php
+function zib_docs_user_note_modal()
+{
+    if (!is_user_logged_in()) {
+        echo zib_get_modal_colorful_header('jb-yellow', '<i class="fa fa-info-circle"></i>', __('请先登录', 'zib_language'));
+        exit;
+    }
+
+    $html = zib_get_modal_colorful_header('jb-blue', '<i class="fa fa-user"></i>', __('用户备注', 'zib_language'));
+    $html .= '<div class="padding-20">';
+    $html .= '<p class="muted-2-color">' . esc_html__('这里显示当前用户可见的内容。', 'zib_language') . '</p>';
+    $html .= '</div>';
+
+    echo $html;
+    exit;
+}
+add_action('wp_ajax_docs_user_note_modal', 'zib_docs_user_note_modal');
+```
+
+弹窗里如果有写入表单，提交动作要另开 Ajax action，并做 nonce、登录态、权限、字段长度和服务端数据校验。弹窗 action 只负责渲染，不要把敏感写入逻辑混在弹窗渲染里。
+
+已有用户弹窗入口：
+
+| Ajax action                 | 说明             |
+| --------------------------- | ---------------- |
+| `user_avatar_set_modal`     | 头像设置弹窗     |
+| `user_cover_set_modal`      | 封面设置弹窗     |
+| `user_collection_set_modal` | 收款资料设置弹窗 |
+| `user_set_modal`            | 用户设置弹窗     |
+| `user_rewards_modal`        | 打赏弹窗         |
+| `user_details_data_modal`   | 用户资料详情弹窗 |
+
+`user_rewards_modal` 和 `user_details_data_modal` 都有 `nopriv` 入口，适合公开展示；`user_collection_set_modal`、`user_avatar_set_modal`、`user_cover_set_modal` 和 `user_set_modal` 都是登录用户自己的设置入口。给弹窗新增字段前，先确认它属于公开展示还是账号设置。
+
+如果只是扩展用户资料或安全设置，优先挂 `user_center_account_setup`、`user_ctnter_main_tabs_array`、`zib_user_center_page_sidebar_button_2_args` 等现有入口，不要另造一套孤立用户中心。
+
+## Ajax Tab 结构
+
+主题通用 Ajax Tab 函数是 `zib_get_ajax_tab()`。它会为没有预置内容的 Tab 生成 `.post_ajax_trigger`，再通过 `ajax-href` 拉取对应 action。
+
+最小结构：
+
+```php
+$tabs = array(
+    array(
+        'name'   => __('最近记录', 'zib_language'),
+        'id'     => 'tab-docs-records',
+        'action' => 'docs_user_records',
+        'loader' => '<div class="placeholder k2"></div>',
+        'active' => true,
+    ),
+);
+
+$html  = '<ul class="list-inline scroll-x mini-scrollbar">';
+$html .= zib_get_ajax_tab('nav', $tabs);
+$html .= '</ul>';
+$html .= '<div class="tab-content">';
+$html .= zib_get_ajax_tab('con', $tabs);
+$html .= '</div>';
+```
+
+对应 Ajax：
+
+```php
+function zib_docs_user_records()
+{
+    if (!is_user_logged_in()) {
+        zib_send_json_error(array('msg' => __('请先登录', 'zib_language')));
+    }
+
+    echo '<div class="box-body">' . esc_html__('暂无记录', 'zib_language') . '</div>';
+    exit;
+}
+add_action('wp_ajax_docs_user_records', 'zib_docs_user_records');
+```
+
+适合分页列表、用户记录、订单子状态、消息列表这类内容。需要无限加载时，再结合主题已有的 `ajax-next`、`ias` 和列表分页结构。
+
+## 常见风险
+
+- 邮箱、手机绑定没有校验验证码。
+- 修改资料时允许操作任意 user id。
+- 上传头像时没有限制文件类型和大小。
+- 用户中心页面被缓存，导致数据串号。
+- OAuth 绑定和普通登录流程没有区分。
+- 修改密码没有校验旧密码或邮箱验证码。
+- 在 `user_ctnter_main_tabs_array` 中增加入口，但没有提供 `main_user_tab_content_{id}`。
+- 在用户中心输出订单、余额、消息等私有数据时没有确认当前用户权限。
+
+## 调试入口
+
+登录注册问题优先看浏览器 Network 里的 `action` 参数，常见动作包括注册、登录、验证码、找回密码。资料问题优先看 `action/user.php`。如果按钮点击没反应，先检查前端 JS、`admin-ajax.php` 是否 403、nonce 是否过期、安全插件是否拦截。按钮触发和 Ajax 提交协议见 [前端交互协议](/docs/api/frontend-events)；密码登录、人机验证、`signin` 错误频率限制和 nonce 返回结构的完整排查顺序见 [账户与验证码](/docs/guide/account-verification)。

@@ -1,0 +1,136 @@
+name: Review friend link request
+
+on:
+  issues:
+    types: [opened, edited, reopened, labeled]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: friend-link-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    if: contains(github.event.issue.labels.*.name, 'friend-link')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate request and update data
+        id: validate
+        uses: actions/github-script@v7
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const body = process.env.ISSUE_BODY || '';
+
+            function field(label) {
+              const listPattern = new RegExp(`^- ${label}：([^\\n]*)$`, 'm');
+              const listValue = body.match(listPattern)?.[1]?.trim();
+              if (listValue) return listValue;
+              const headingPattern = new RegExp(`### ${label}\\s+([^#]+)`, 'm');
+              return body.match(headingPattern)?.[1]?.trim().replace(/\\n+/g, ' ') || '';
+            }
+
+            function value(label) {
+              const result = field(label).trim();
+              return /^(_No response_|未提供|未填写|none|n\/a)$/i.test(result)
+                ? ''
+                : result;
+            }
+
+            function validUrl(value, optional = false) {
+              if (!value || value === '未提供') return optional;
+              try {
+                const url = new URL(value);
+                return url.protocol === 'http:' || url.protocol === 'https:';
+              } catch {
+                return false;
+              }
+            }
+
+            const request = {
+              name: value('名称'),
+              url: value('网站地址') || value('网址'),
+              description: value('网站介绍') || value('介绍'),
+              logo: value('Logo 地址') || value('Logo'),
+              email: value('联系邮箱'),
+              backlink: value('回链地址'),
+            };
+            const errors = [];
+            if (!request.name || request.name.length > 80) errors.push('名称为空或超过 80 个字符');
+            if (!validUrl(request.url)) errors.push('网站地址不是有效的 http(s) 地址');
+            if (!request.description || request.description.length > 300) errors.push('网站介绍为空或超过 300 个字符');
+            if (!validUrl(request.logo, true)) errors.push('Logo 地址不是有效的 http(s) 地址');
+            if (!validUrl(request.backlink, true)) errors.push('回链地址不是有效的 http(s) 地址');
+            if (request.email && !/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(request.email)) errors.push('联系邮箱格式不正确');
+
+            const dataPath = 'data/friends.json';
+            const friends = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
+            if (request.url && friends.some((friend) => friend.url.toLowerCase() === request.url.toLowerCase())) errors.push('该网站地址已经收录');
+
+            if (errors.length) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `自动校验未通过：\\n\\n${errors.map((error) => `- ${error}`).join('\\n')}\\n\\n请补充信息后重新提交。`,
+              });
+              core.setOutput('valid', 'false');
+              return;
+            }
+
+            const publicEntry = {
+              name: request.name,
+              url: request.url,
+              description: request.description,
+              logo: request.logo,
+              featured: false,
+            };
+            friends.push(publicEntry);
+            fs.writeFileSync(dataPath, `${JSON.stringify(friends, null, 2)}\\n`);
+            core.setOutput('valid', 'true');
+
+      - name: Create pull request
+        id: pull-request
+        if: steps.validate.outputs.valid == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: 'docs: add approved friend link request #${{ github.event.issue.number }}'
+          branch: bot/friend-link-${{ github.event.issue.number }}
+          delete-branch: true
+          title: 'docs: review friend link request #${{ github.event.issue.number }}'
+          body: |
+            此 PR 由友情链接申请 #${{ github.event.issue.number }} 自动生成。
+
+            合并前请人工检查网站内容、可访问性、Logo、介绍和回链。联系邮箱与回链仅保留在申请 Issue 中，不写入公开站点数据。
+
+            Closes #${{ github.event.issue.number }}
+          labels: |
+            friend-link
+            automated-pr
+
+      - name: Report result
+        if: always() && steps.validate.outputs.valid == 'true'
+        uses: actions/github-script@v7
+        env:
+          PULL_REQUEST_URL: ${{ steps.pull-request.outputs.pull-request-url }}
+        with:
+          script: |
+            const url = process.env.PULL_REQUEST_URL;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: url
+                ? `信息已通过自动校验，已创建待维护者审核的 PR：${url}`
+                : '信息已通过自动校验，但没有创建新的 PR，可能已有相同分支或 PR。',
+            });

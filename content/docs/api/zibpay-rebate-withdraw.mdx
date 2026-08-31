@@ -1,0 +1,699 @@
+---
+title: Zibpay 分佣与提现
+description: 梳理子比主题推广返佣、创作分成、提现申请、处理中锁定、后台处理、API 打款和消息通知链路。
+---
+
+## 模块边界
+
+分佣与提现属于 Zibpay 资产链路，不是普通用户字段展示。它同时连接订单、推荐人、创作分成、用户余额、收款方式、站内消息、邮件通知、微信模板消息和后台处理页。
+
+扩展这条链路时要遵守两个原则：
+
+1. 金额、订单 ID、可提现状态必须由服务端重新读取和计算。
+2. 提现申请、锁定、处理、打款和通知要走主题已有函数与 Hook。
+
+核心源码：
+
+| 文件                                   | 作用                                                              |
+| -------------------------------------- | ----------------------------------------------------------------- |
+| `zibpay/functions/zibpay-rebate.php`   | 推广链接、推荐人识别、返佣规则、佣金统计和用户中心返佣内容        |
+| `zibpay/functions/zibpay-income.php`   | 创作分成统计、用户中心分成明细和状态展示                          |
+| `zibpay/functions/zibpay-withdraw.php` | 提现弹窗、提现记录、提现申请读取、后台处理和余额冻结              |
+| `zibpay/functions/zibpay-payout.php`   | 微信、支付宝、PayPal API 打款准备、账户读取、汇率换算和请求过滤器 |
+| `zibpay/functions/ajax.php`            | `apply_withdraw` 提现申请 Ajax                                    |
+| `zibpay/functions/rebate-ajax.php`     | 用户中心返佣明细 Ajax                                             |
+| `zibpay/functions/zibpay-msg.php`      | 返佣、提现申请和提现处理通知                                      |
+| `zibpay/class/order-class.php`         | Zibpay 订单字段、查询、创建和状态更新                             |
+
+## 数据结构
+
+Zibpay 订单表里和分佣、分成、提现相关的字段：
+
+| 字段            | 说明                                         |
+| --------------- | -------------------------------------------- |
+| `referrer_id`   | 推荐人用户 ID                                |
+| `rebate_price`  | 该订单产生的推广佣金                         |
+| `rebate_status` | 佣金提现状态                                 |
+| `rebate_detail` | 佣金提现处理详情，例如提现记录 ID 和处理时间 |
+| `income_price`  | 该订单产生的创作分成                         |
+| `income_status` | 创作分成提现状态                             |
+| `income_detail` | 创作分成提现处理详情                         |
+
+`rebate_status` 和 `income_status` 的常见值：
+
+| 状态 | 含义                       |
+| ---- | -------------------------- |
+| `0`  | 未提现，可被统计为有效金额 |
+| `1`  | 已提现，处理完成           |
+| `3`  | 提现待处理，已被申请锁定   |
+
+提现申请本身存到消息表，类型是 `withdraw`：
+
+| 数据                           | 说明                                 |
+| ------------------------------ | ------------------------------------ |
+| `type = withdraw`              | 标记这是一条提现申请                 |
+| `send_user`                    | 申请提现的用户                       |
+| `receive_user`                 | 后台接收处理的管理员                 |
+| `status = 0`                   | 待处理                               |
+| `status = 1`                   | 已处理                               |
+| `status = 2`                   | 已拒绝                               |
+| `meta.withdraw_price`          | 用户申请提现金额                     |
+| `meta.service_price`           | 手续费                               |
+| `meta.withdraw_orders.rebate`  | 本次申请锁定的返佣订单 ID            |
+| `meta.withdraw_orders.income`  | 本次申请锁定的分成订单 ID            |
+| `meta.withdraw_detail.balance` | 本次申请涉及的余额提现或转入余额金额 |
+
+用户 meta 里会涉及：
+
+| 字段                     | 说明                   |
+| ------------------------ | ---------------------- |
+| `referrer_id`            | 用户注册时保存的推荐人 |
+| `rebate_rule`            | 用户独立返佣规则       |
+| `income_rule`            | 用户独立创作分成规则   |
+| `balance_withdraw_ing`   | 正在提现冻结的余额     |
+| `balance_add_ing`        | 待转入余额的金额       |
+| `oauth_weixingzh_openid` | 微信 API 打款账户来源  |
+| `rewards_alipay_account` | 支付宝 API 打款账户    |
+| `rewards_paypal_email`   | PayPal API 打款账户    |
+
+## 推荐人识别
+
+推广链接由 `zibpay_get_rebate_link()` 生成，本质是在 URL 上追加 `ref`：
+
+```php
+$url = zibpay_get_rebate_link(get_current_user_id(), get_permalink($post_id));
+```
+
+访问者带着 `?ref={user_id}` 进入站点后，主题会在 `template_redirect` 中读取并写入 session：
+
+```php
+$_SESSION['ZIBPAY_REFERRER_ID']
+```
+
+用户注册时，`zibpay_register_save_referrer()` 会把推荐人写入用户 meta：
+
+```php
+referrer_id
+```
+
+订单创建或计算返佣时，推荐人读取入口是：
+
+```php
+$referrer_id = zibpay_get_referrer_id($user_id);
+```
+
+它会根据 `_pz('pay_rebate_judgment')` 决定优先读取用户保存的推荐人，还是只按当前推广链接识别；再根据 `_pz('pay_rebate_self_s', true)` 判断是否允许自己推广自己。
+
+识别模式的实际差异在 `zibpay_get_referrer_id()`：
+
+| `pay_rebate_judgment` | 读取顺序                                                                | 适合场景                                                       |
+| --------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------- |
+| 非 `link`             | 先读用户 meta `referrer_id`，没有再读 `$_SESSION['ZIBPAY_REFERRER_ID']` | 绑定注册，用户通过推广链接注册后，后续消费继续给同一推荐人返佣 |
+| `link`                | 跳过用户 meta，只读当前 session 中的推广人                              | 仅推广链接，当次购买带推广来源才返佣                           |
+
+`zibpay_save_referrer()` 只是把 URL 上的 `ref` 存入 session，不会立即写入用户，也不会创建佣金。注册时 `zibpay_register_save_referrer()` 会调用同一个 `zibpay_get_referrer_id($user_id, false)`，把当时识别到的推荐人保存到新用户 `referrer_id`。这条链路和邀请码注册是两套机制：邀请码使用后写 `ZibCardPass.meta.user_id` 并触发 `zib_use_invit_code`；推广链接注册写用户 meta `referrer_id`，后续订单再按返佣规则计算佣金。
+
+如果关闭自推 `_pz('pay_rebate_self_s')`，`zibpay_get_referrer_id()` 会在 session 推荐人等于当前用户时返回 `false`。二开生成推广链接或创建订单时不要绕过这个判断，否则会出现自己购买给自己返佣的异常。
+
+## 返佣规则
+
+支持返佣的订单类型由 `zibpay_get_rebate_types()` 返回：
+
+| 类型 | 说明     |
+| ---- | -------- |
+| `1`  | 付费阅读 |
+| `2`  | 付费资源 |
+| `3`  | 产品购买 |
+| `4`  | 购买会员 |
+| `5`  | 付费图片 |
+| `6`  | 付费视频 |
+| `7`  | 自动售卡 |
+| `9`  | 购买积分 |
+
+返佣规则读取入口是：
+
+```php
+$rule = zibpay_get_user_rebate_rule($user_id);
+```
+
+规则优先级：
+
+1. 用户独立 `rebate_rule`。
+2. VIP 等级配置。
+3. 普通用户配置。
+
+计算某个推荐人在某个订单类型下的比例时，使用：
+
+```php
+$ratio = zibpay_get_referrer_rebate_ratio($referrer_id, $order_type);
+```
+
+扩展时不要自己复制一份比例配置。新增订单类型或业务权益时，应该先确认 `zibpay_get_rebate_types()`、订单创建数据和支付成功链路是否都认识该类型。
+
+### 返佣写入时机
+
+普通 Zibpay 订单在创建前会先调用 `zibpay_get_referrer_id($user_id)`。如果识别到推荐人，并且 `zibpay_get_referrer_rebate_ratio($referrer_id, $order_type)` 返回比例，订单数据会写入：
+
+```php
+$__data['referrer_id'] = $get_referrer_id;
+```
+
+如果当前内容配置了 `posts_zibpay.pay_rebate_discount`，会先从应付金额里扣除推广优惠，并把优惠写入 `pay_detail.rebate_discount` 和价格明细。随后佣金按扣除优惠后的实际支付金额计算：
+
+```php
+$effective_amount = $_pay_price;
+$__data['rebate_price'] = $effective_amount > 0 ? round($effective_amount * $rebate_rule / 100, 2) : 0;
+```
+
+这意味着推广优惠和推荐佣金不是两个互不相关的字段。扩展价格计算时要保持顺序：先识别推荐人和推广优惠，再处理优惠码、积分抵扣等支付明细，最后用最终有效金额保存 `rebate_price`。如果只在支付成功后临时补 `referrer_id`，后台订单、佣金统计、提现锁定和推荐人通知都会缺少创建阶段的数据。
+
+商城订单也会调用 `zibpay_get_referrer_id($user_id)`，但还会先检查商品返佣配置。积分商品不参与佣金；现金商品只有商品返佣配置开启、推荐人有效、按比例或固定金额算出 `rebate_price > 0` 时，才会把 `referrer_id` 写入订单。
+
+## 佣金统计
+
+用户可提现佣金统计入口：
+
+```php
+$data = zibpay_get_user_rebate_data($user_id, 'effective');
+```
+
+返回结构：
+
+| 字段    | 说明                                     |
+| ------- | ---------------------------------------- |
+| `count` | 符合条件的订单数量                       |
+| `sum`   | 佣金合计                                 |
+| `ids`   | 订单 ID 列表，提现申请会用它做一致性校验 |
+
+`$status` 支持：
+
+| 参数        | 查询                        |
+| ----------- | --------------------------- |
+| `all`       | 当前用户全部有效返佣订单    |
+| `effective` | `rebate_status = 0`，可提现 |
+| `invalid`   | `rebate_status = 1`，已提现 |
+
+函数内部查询条件包含：
+
+```php
+referrer_id = $user_id
+status = 1
+rebate_price > 0
+```
+
+创作分成使用同类入口：
+
+```php
+$income = zibpay_get_user_income_data($user_id, 'effective');
+```
+
+## 提现申请流程
+
+用户中心提现入口通过 `zibpay_get_withdraw_link()` 打开 `apply_withdraw_modal`，提交时走 Ajax：
+
+```php
+add_action('wp_ajax_apply_withdraw', 'zibpay_ajax_apply_withdraw');
+```
+
+服务端处理顺序：
+
+1. `zib_ajax_verify_nonce()` 校验 nonce。
+2. 校验当前用户和提交的 `user_id` 一致。
+3. `zib_ajax_debounce('apply_withdraw', $user_id)` 防重复提交。
+4. `zibpay_get_user_withdraw_ing($user_id)` 阻止重复申请。
+5. `zibpay_user_has_withdraw_collection($user_id)` 检查收款方式。
+6. 重新读取返佣、分成和余额。
+7. 对比前端提交的 `rebate_ids`、`income_ids`、`effective_sum`。
+8. 校验全额提现或自定义提现金额。
+9. 把本次申请涉及的返佣、分成订单锁定为 `3`。
+10. 把余额提现部分写入冻结字段。
+11. 创建 `type = withdraw` 的消息记录。
+12. 触发 `user_apply_withdraw`。
+
+这条流程的关键点是“前端只带快照，服务端重新裁决”。如果用户在弹窗打开后又产生新佣金、分成、余额变化，提交时会被要求刷新。
+
+锁定订单使用：
+
+```php
+zibpay_withdraw_order_set_ing('rebate', $rebate_ids);
+zibpay_withdraw_order_set_ing('income', $income_ids);
+```
+
+余额冻结使用：
+
+```php
+zibpay_withdraw_balance_set_ing($user_id, $money);
+```
+
+`$money > 0` 表示从余额里冻结待提现金额；`$money < 0` 表示剩余提现金额待转入余额。
+
+## 提现处理流程
+
+后台处理提现时，最终入口是：
+
+```php
+zibpay_withdraw_process($withdraw_id, $is_allow, $message, $payout_args);
+```
+
+它只处理仍处于待处理状态的提现消息：
+
+```php
+array(
+    'id'     => $withdraw_id,
+    'type'   => 'withdraw',
+    'status' => 0,
+)
+```
+
+批准提现时：
+
+| 数据     | 变化                                                                     |
+| -------- | ------------------------------------------------------------------------ |
+| 返佣订单 | `rebate_status = 1`，写入 `rebate_detail.withdraw_id` 和 `withdraw_time` |
+| 分成订单 | `income_status = 1`，写入 `income_detail.withdraw_id` 和 `withdraw_time` |
+| 余额提现 | 先解冻，再通过 `zibpay_update_user_balance()` 扣除                       |
+| 提现消息 | `status = 1`                                                             |
+| 用户通知 | 创建 `withdraw_reply` 消息                                               |
+
+拒绝提现时：
+
+| 数据     | 变化                                |
+| -------- | ----------------------------------- |
+| 返佣订单 | `rebate_status = 0`，重新变为可提现 |
+| 分成订单 | `income_status = 0`，重新变为可提现 |
+| 余额提现 | 解冻，不扣除                        |
+| 提现消息 | `status = 2`                        |
+| 用户通知 | 创建 `withdraw_reply` 消息          |
+
+处理完成后触发：
+
+```php
+do_action('withdraw_process_newmsg', $new_msg_arge, $msg_db);
+do_action('withdraw_process', $msg_db, $is_allow, $msg);
+```
+
+邮件和微信模板消息就挂在这些 Hook 上。
+
+## 订单与提现通知
+
+Zibpay 订单成功后统一触发 `payment_order_success`，但每类通知都有自己的跳过条件。扩展通知时不要只看 Hook 是否触发，还要看订单数据是否满足通知入口的条件。
+
+| 通知函数                                  | 接收方   | 触发条件                                      | 跳过条件                                                                 |
+| ----------------------------------------- | -------- | --------------------------------------------- | ------------------------------------------------------------------------ |
+| `zibpay_mail_payment_order()`             | 购买用户 | 订单支付成功，且有有效 `user_id`              | 积分支付 `pay_type=points` 不发；用户不存在不发                          |
+| `zibpay_mail_payment_order_to_admin()`    | 管理员   | 订单支付成功                                  | 管理员自己购买不发；积分支付不发                                         |
+| `zibpay_mail_payment_order_to_income()`   | 作者     | 订单有 `post_author`，且分成值大于 0          | 无作者不发；现金分成 `income_price<=0` 不发；积分分成点数小于等于 0 不发 |
+| `zibpay_mail_payment_order_to_referrer()` | 推荐人   | 订单有 `referrer_id` 且 `rebate_price >= 0.1` | 无推荐人、不存在推荐人用户、佣金太低都不发                               |
+
+这些函数都会先创建站内消息，再按开关发送邮件或微信模板：
+
+| 场景               | 站内消息类型 | 邮件开关                          | 微信模板类型                |
+| ------------------ | ------------ | --------------------------------- | --------------------------- |
+| 购买成功通知用户   | `pay`        | `email_payment_order`             | `payment_order`             |
+| 新订单通知管理员   | `pay`        | `email_payment_order_to_admin`    | `payment_order_admin`       |
+| 创作分成通知作者   | `pay`        | `email_payment_order_to_income`   | `payment_order_to_income`   |
+| 推广佣金通知推荐人 | `pay`        | `email_payment_order_to_referrer` | `payment_order_to_referrer` |
+
+其中购买用户和管理员通知会直接跳过积分支付；作者分成通知支持积分分成，但微信模板只在非积分支付时发送。推荐人佣金通知只看 `rebate_price`，所以创建订单时必须已经写入正确的 `referrer_id` 和 `rebate_price`。
+
+提现相关通知分两段：
+
+| 阶段         | Hook                      | 接收方 | 内容                                                                   |
+| ------------ | ------------------------- | ------ | ---------------------------------------------------------------------- |
+| 用户提交提现 | `user_apply_withdraw`     | 管理员 | 邮件 `email_apply_withdraw_to_admin` 和微信模板 `apply_withdraw_admin` |
+| 后台处理提现 | `withdraw_process_newmsg` | 用户   | 邮件 `email_withdraw_process`                                          |
+| 后台处理提现 | `withdraw_process`        | 用户   | 微信模板 `withdraw_process`                                            |
+
+`zibpay_withdraw_process()` 本身已经创建 `withdraw_reply` 站内消息，并更新提现消息状态、返佣/分成订单状态和余额冻结字段。扩展提现通知时，应挂在 `withdraw_process_newmsg` 或 `withdraw_process` 后面读取最终状态，不要在后台表单提交前就发“提现成功”通知。
+
+## 提现收款设置
+
+用户申请提现前，服务端会调用：
+
+```php
+zibpay_user_has_withdraw_collection($user_id);
+```
+
+它不是只检查 API 打款账号，而是读取 `zibpay_get_user_withdraw_collection_data($user_id)` 返回的全部可用收款方式。可用方式分为两类：
+
+| 收款方式         | 来源                                     | 是否依赖 API 打款渠道就绪          |
+| ---------------- | ---------------------------------------- | ---------------------------------- |
+| `weixin_img`     | `rewards_wechat_image_id` 对应收款码图片 | 否                                 |
+| `alipay_img`     | `rewards_alipay_image_id` 对应收款码图片 | 否                                 |
+| `weixin_openid`  | `oauth_weixingzh_openid`                 | 是，要求微信 API 打款渠道可绑定    |
+| `alipay_account` | `rewards_alipay_account`                 | 是，要求支付宝 API 打款渠道可绑定  |
+| `paypal_email`   | `rewards_paypal_email`                   | 是，要求 PayPal API 打款渠道可绑定 |
+
+用户打开设置弹窗走 `user_withdraw_collection_set_modal`，提交保存走：
+
+```php
+add_action('wp_ajax_user_set_withdraw_collection', 'zibpay_ajax_user_set_withdraw_collection');
+```
+
+保存动作会做登录态、nonce 和字段校验，然后处理这些数据：
+
+| 提交字段         | 写入位置                  | 校验                                                |
+| ---------------- | ------------------------- | --------------------------------------------------- |
+| `weixin` 文件    | `rewards_wechat_image_id` | 走 `zib_php_upload('weixin')`，上传成功后删除旧附件 |
+| `alipay` 文件    | `rewards_alipay_image_id` | 走 `zib_php_upload('alipay')`，上传成功后删除旧附件 |
+| `alipay_account` | `rewards_alipay_account`  | `sanitize_text_field()`，不能为空                   |
+| `paypal_email`   | `rewards_paypal_email`    | `sanitize_email()`，必须 `is_email()`               |
+
+如果微信 API 打款渠道可绑定，且用户没有上传微信收款码，保存时还会检查 `oauth_weixingzh_openid`；也就是说绑定公众号登录可以作为微信自动打款账号。最后至少要有一种收款方式可用，否则返回“请至少完成一个收款设置”。
+
+保存完成后会清理 `user_rewards_img_urls` 缓存并重新读取二维码 URL：
+
+```php
+wp_cache_delete($cuid, 'user_rewards_img_urls');
+zib_get_user_rewards_img_urls($cuid);
+```
+
+因此“提现收款设置”和“打赏收款码设置”会共用微信、支付宝二维码附件字段。二开时不要新建一套同名收款码 meta，也不要以为填写了 `rewards_alipay_account` 就一定能 API 打款；只有 `zibpay_payout_user_can_bind('alipay')` 为真时，`alipay_account` 才会出现在可用 API 打款账户里。
+
+## API 打款
+
+主题内置 API 打款渠道：
+
+| 渠道     | 配置判断                                        | 用户账号                 |
+| -------- | ----------------------------------------------- | ------------------------ |
+| `wechat` | 官方微信支付和公众号登录配置完整，且 AppID 匹配 | `oauth_weixingzh_openid` |
+| `alipay` | 官方支付宝 API 打款开启且配置完整               | `rewards_alipay_account` |
+| `paypal` | PayPal API 打款开启且配置完整                   | `rewards_paypal_email`   |
+
+可用渠道读取：
+
+```php
+$channels = zibpay_payout_get_ready_channels();
+```
+
+用户打款账户读取：
+
+```php
+$account = zibpay_get_user_payout_account($user_id, 'alipay');
+```
+
+后台选择 API 打款时，`zibpay_withdraw_process()` 会先校验渠道和用户账户，再调用：
+
+```php
+$result = zibpay_payout_request(array(
+    'withdraw_id' => $withdraw_id,
+    'user_id'     => $user_id,
+    'amount'      => $pay_amount,
+    'channel'     => 'alipay',
+    'desc'        => get_bloginfo('name') . __('提现', 'zib_language'),
+));
+```
+
+`zibpay_payout_request()` 会做这些事：
+
+1. 校验渠道是否支持后台 API 打款。
+2. 检查同一提现记录是否已经有成功的 `api_payout` 结果，避免重复打款。
+3. 按渠道汇率把站内金额换算为结算金额。
+4. 调用动态过滤器：
+
+```php
+apply_filters('zibpay_payout_' . $channel, $error, $args);
+```
+
+内置 SDK 文件会注册微信、支付宝和 PayPal 的实际请求逻辑。扩展时不要绕过 `zibpay_payout_request()` 直接在后台表单里请求渠道，否则会丢失提现记录幂等、汇率和失败保护。
+
+### API 打款就绪条件
+
+API 打款不是只看用户有没有填写收款账号。主题先检查后台是否开启了对应渠道的 API 自动打款，再检查官方收款配置是否完整，最后才读取用户账户。
+
+渠道开关来自 `zibpay_payout_is_channel_enabled($channel)`：
+
+| 渠道     | 开关来源                                     |
+| -------- | -------------------------------------------- |
+| `wechat` | `_pz('official_wechat', '', 'api_payout_s')` |
+| `alipay` | `_pz('official_alipay', '', 'api_payout_s')` |
+| `paypal` | `_pz('paypal', '', 'api_payout_s')`          |
+
+官方配置完整性由 `zibpay_payout_is_official_ready($channel)` 判断：
+
+| 渠道     | 必要条件                                                                                                      |
+| -------- | ------------------------------------------------------------------------------------------------------------- |
+| `wechat` | 当前微信支付 SDK 是 `official_wechat`，并且有 `merchantid`、`appid`、`key`、API 证书、API 私钥                |
+| `alipay` | 当前支付宝 SDK 是 `official_alipay`，并且有 `webappid`、`webprivatekey`                                       |
+| `paypal` | PayPal SDK 开启；REST 模式需要 `client_id` 和 `client_secret`，旧模式需要 `username`、`password`、`signature` |
+
+微信打款还有额外限制：公众号登录 AppID 必须和微信支付 AppID 一致。源码会先确认公众号登录开启，再读取 `get_oauth_config('weixingzh')`：
+
+```php
+function zibpay_payout_wechat_appid_matched()
+{
+    $config = zibpay_get_payconfig('official_wechat');
+    if (empty($config['appid'])) {
+        return false;
+    }
+
+    if (!_pz('oauth_weixingzh_s')) {
+        return false;
+    }
+
+    $wx_oauth = get_oauth_config('weixingzh');
+    if (empty($wx_oauth['appid'])) {
+        return false;
+    }
+
+    return $wx_oauth['appid'] === $config['appid'];
+}
+```
+
+证书路径支持三种形式，最终都要解析到本地可读文件：
+
+| 形式         | 解析方式                                         |
+| ------------ | ------------------------------------------------ |
+| 附件 ID      | `get_attached_file((int) $cert)`                 |
+| 附件 URL     | `attachment_url_to_postid($cert)` 后再取附件文件 |
+| 本地绝对路径 | `file_exists($cert)`                             |
+
+因此部署迁移后 API 打款失败，优先检查证书附件文件是否真实存在，而不是只看配置项里还有 ID 或 URL。
+
+用户账户读取入口是 `zibpay_get_user_payout_account($user_id, $channel)`：
+
+| 渠道     | 用户字段                 | 说明                                               |
+| -------- | ------------------------ | -------------------------------------------------- |
+| `wechat` | `oauth_weixingzh_openid` | 只有微信支付 AppID 和公众号登录 AppID 匹配时才返回 |
+| `alipay` | `rewards_alipay_account` | 支付宝收款账号                                     |
+| `paypal` | `rewards_paypal_email`   | PayPal 收款邮箱                                    |
+
+后台判断是否能发起自动打款时，走的是 `zibpay_payout_admin_can_payout($channel)`，当前等同于 `zibpay_payout_user_can_bind($channel)`。如果你扩展新的后台打款渠道，建议同时补齐：
+
+```php
+function zib_docs_payout_user_can_bind_bank($ready, $user_id)
+{
+    if (!$user_id) {
+        return false;
+    }
+
+    return (bool) zib_get_user_meta($user_id, 'rewards_bank_account', true);
+}
+```
+
+不要只在前端展示一个输入框。打款渠道必须同时具备后台开关、官方配置、用户账户、金额换算和幂等记录。
+
+### 金额换算和幂等记录
+
+`zibpay_payout_request()` 接收站内金额后，会把 `local_amount` 保留为站内金额，再按渠道换算 `amount`：
+
+| 渠道     | 换算入口                                          |
+| -------- | ------------------------------------------------- |
+| `wechat` | `zibpay_convert_for_wechat($local_amount)`        |
+| `alipay` | `zibpay_convert_for_alipay($local_amount)`        |
+| `paypal` | `local_amount * zibpay_payout_get_rate('paypal')` |
+
+界面里的汇率提示由这些函数生成：
+
+| 函数                                         | 用途                             |
+| -------------------------------------------- | -------------------------------- |
+| `zibpay_payout_get_amount_hint_html()`       | 指定金额的实际打款提示           |
+| `zibpay_payout_get_channel_rate_hint_html()` | 收款设置里的渠道汇率说明         |
+| `zibpay_payout_get_rate_rule_text()`         | `站内货币 1 = 结算货币 x` 的文案 |
+
+同一提现记录的幂等判断依赖 `ZibMsg` meta 的 `api_payout`：
+
+```php
+$msg_row = (array) ZibMsg::get_row(array('id' => $withdraw_id, 'type' => 'withdraw'));
+if (!empty($msg_row['meta']['api_payout']['success'])) {
+    return array(
+        'success' => true,
+        'out_no'  => $msg_row['meta']['api_payout']['out_no'] ?? '',
+        'msg'     => __('该提现已打款成功', 'zib_language'),
+        'raw'     => $msg_row['meta']['api_payout']['raw'] ?? array(),
+    );
+}
+```
+
+渠道 SDK 或扩展适配器应该在成功或失败后写入清晰的调用日志。主题提供了：
+
+```php
+function zibpay_payout_api_log($scene, $biz_id, array $data)
+{
+    if ($scene === 'payout' && $biz_id) {
+        ZibMsg::set_meta((int) $biz_id, 'api_payout', $data);
+    }
+}
+```
+
+二开时不要自己用一个临时 option 记录打款结果。提现处理页、幂等判断和后续审计都围绕提现消息的 `api_payout` meta 展开。
+
+## 用户中心入口
+
+用户侧主要入口：
+
+| 函数                                         | 用途                   |
+| -------------------------------------------- | ---------------------- |
+| `zibpay_get_rebate_link()`                   | 生成推广链接           |
+| `zibpay_get_withdraw_link()`                 | 打开提现申请弹窗       |
+| `zibpay_get_withdraw_record_link()`          | 打开提现记录弹窗       |
+| `zibpay_get_user_rebate_data()`              | 读取返佣统计           |
+| `zibpay_get_user_income_data()`              | 读取分成统计           |
+| `zibpay_get_user_withdraw_ing()`             | 判断是否已有待处理申请 |
+| `zibpay_get_user_withdraw_collection_data()` | 读取可用收款方式       |
+
+返佣明细 Ajax 会限制当前登录用户，只查询：
+
+```php
+status = 1
+rebate_price > 0
+referrer_id = get_current_user_id()
+```
+
+所以不要新建公开接口展示某个用户的提现记录、佣金明细或收款账户。
+
+## 示例：输出当前用户推广链接
+
+```php
+function zib_docs_get_current_user_rebate_link($url = '')
+{
+    $user_id = get_current_user_id();
+    if (!$user_id || !function_exists('zibpay_get_rebate_link')) {
+        return '';
+    }
+
+    if (!$url) {
+        $url = home_url('/');
+    }
+
+    return zibpay_get_rebate_link($user_id, $url);
+}
+```
+
+## 示例：读取当前用户可提现金额
+
+```php
+function zib_docs_get_user_withdrawable_summary($user_id = 0)
+{
+    if (!$user_id) {
+        $user_id = get_current_user_id();
+    }
+
+    if (!$user_id) {
+        return array(
+            'rebate' => 0,
+            'income' => 0,
+            'balance' => 0,
+            'total' => 0,
+        );
+    }
+
+    $rebate = function_exists('zibpay_get_user_rebate_data') ? zibpay_get_user_rebate_data($user_id, 'effective') : array('sum' => 0);
+    $income = function_exists('zibpay_get_user_income_data') ? zibpay_get_user_income_data($user_id, 'effective') : array('sum' => 0);
+    $balance = function_exists('zibpay_get_user_balance') && _pz('pay_balance_withdraw_s') ? zibpay_get_user_balance($user_id) : 0;
+
+    return array(
+        'rebate'  => round((float) $rebate['sum'], 2),
+        'income'  => round((float) $income['sum'], 2),
+        'balance' => round((float) $balance, 2),
+        'total'   => round((float) $rebate['sum'] + (float) $income['sum'] + (float) $balance, 2),
+    );
+}
+```
+
+这里只适合做当前用户视角展示。真正提交提现仍然要走 `apply_withdraw`，不要用这个汇总结果直接写订单状态。
+
+## 示例：监听提现申请
+
+```php
+add_action('user_apply_withdraw', 'zib_docs_audit_apply_withdraw', 20, 1);
+
+function zib_docs_audit_apply_withdraw($msg_args)
+{
+    if (empty($msg_args['send_user']) || empty($msg_args['meta']['withdraw_price'])) {
+        return;
+    }
+
+    $user_id = (int) $msg_args['send_user'];
+    $price   = round((float) $msg_args['meta']['withdraw_price'], 2);
+
+    zib_update_user_meta($user_id, 'last_apply_withdraw_time', current_time('mysql'));
+    zib_update_user_meta($user_id, 'last_apply_withdraw_price', $price);
+}
+```
+
+这里适合写审计、通知或外部同步。不要在这个 Hook 里提前把 `rebate_status` 或 `income_status` 改成已提现，因为后台还没有处理。
+
+## 示例：监听提现处理结果
+
+```php
+add_action('withdraw_process', 'zib_docs_after_withdraw_process', 20, 3);
+
+function zib_docs_after_withdraw_process($msg_db, $is_allow, $msg = '')
+{
+    if (empty($msg_db['id']) || empty($msg_db['send_user'])) {
+        return;
+    }
+
+    $user_id = (int) $msg_db['send_user'];
+    $status  = $is_allow ? 'allowed' : 'rejected';
+
+    zib_update_user_meta($user_id, 'last_withdraw_process', array(
+        'withdraw_id' => (int) $msg_db['id'],
+        'status'      => $status,
+        'time'        => current_time('mysql'),
+    ));
+}
+```
+
+这个 Hook 已经处于处理完成之后，适合同步 CRM、写审计或清理自定义缓存。不要在这里再次请求第三方打款，API 打款应交给 `zibpay_payout_request()`。
+
+## 示例：补充 API 打款日志
+
+```php
+add_filter('zibpay_payout_alipay', 'zib_docs_log_alipay_payout_result', 30, 2);
+
+function zib_docs_log_alipay_payout_result($result, $args)
+{
+    if (empty($args['withdraw_id'])) {
+        return $result;
+    }
+
+    $log = array(
+        'withdraw_id' => (int) $args['withdraw_id'],
+        'success'     => !empty($result['success']) ? 1 : 0,
+        'out_no'      => !empty($result['out_no']) ? $result['out_no'] : '',
+        'time'        => current_time('mysql'),
+    );
+
+    ZibMsg::set_meta((int) $args['withdraw_id'], 'docs_payout_audit', $log);
+
+    return $result;
+}
+```
+
+这个例子只补审计记录，并保留内置渠道的处理结果。需要改写官方渠道请求时，必须保持幂等、签名校验、错误返回和原始响应脱敏。
+
+## 风险清单
+
+| 不要这样做                                | 推荐做法                                                     |
+| ----------------------------------------- | ------------------------------------------------------------ |
+| 直接改 `rebate_status` 或 `income_status` | 走提现申请和后台处理流程                                     |
+| 相信前端提交的金额、订单 ID、用户 ID      | 服务端重新读取 `effective` 数据并校验                        |
+| 用户可重复提交提现                        | 用 `zibpay_get_user_withdraw_ing()` 和 `zib_ajax_debounce()` |
+| 公开展示佣金、提现记录、收款账户          | 只在当前用户中心或后台权限内展示                             |
+| 绕过 `zibpay_payout_request()` 请求渠道   | 保留 API 打款幂等、汇率和失败保护                            |
+| 在支付成功 Hook 里重复发放返佣            | 先判断订单状态、业务类型和处理记录                           |
+| 把后台提现页面压缩代码复制到扩展里        | 只复用可读函数、Hook 和状态流                                |
+
+分佣与提现的本质是资产状态机。扩展时越靠近主题已有状态流，越容易保住订单、用户中心、后台统计和通知的一致性。

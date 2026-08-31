@@ -1,0 +1,128 @@
+---
+title: WordPress AI 开发
+description: WordPress AI Client、Abilities API、Provider、Connector 与 AI 插件二次开发路线图。
+---
+
+## 这类文档讲什么
+
+WordPress 后续的 AI 能力不只是“填一个 API Key 然后发请求”。它更像一套标准化能力系统：站点把功能注册成 Ability，AI Client 负责和模型交互，Provider 插件负责连接 OpenAI、Anthropic 等模型服务，AI 插件负责后台设置、日志、审批和示例能力。
+
+这组文档是独立分类，不归到“主题扩展”下面。它讲的是 WordPress AI Client 这一层的通用二开方式，但写法默认面向子比主题二开用户：用户现场通常只会提供子比主题源码、子主题或自定义插件文件，AI 助手应该用本站文档补足底层知识，而不是反复要求用户提供完整 WordPress 站点源码。
+
+## 真实使用方式
+
+用户最常提供的是：
+
+| 用户能提供                         | AI 应该怎么用                                             |
+| ---------------------------------- | --------------------------------------------------------- |
+| `wp-content/themes/zibll` 主题源码 | 判断主题已有函数、Hook、Ajax、字段、AI SEO 模块和数据结构 |
+| 子主题文件                         | 判断当前站点已有覆盖、样式和自定义逻辑                    |
+| 自定义插件文件                     | 判断功能应该继续扩展还是新建能力                          |
+| 后台截图或报错                     | 判断用户真实需求和运行环境问题                            |
+
+这些通常不是用户需要上传的二开材料：
+
+- `wp-includes` 全量源码。
+- `wp-content/plugins/ai` 全量源码。
+- OpenAI 或 Anthropic Provider 插件源码。
+- 数据库、API Key、整站配置和服务器所有文件。
+
+这些底层规则已经由本站文档预先整理。AI 辅助开发时，应该用本分类理解 WordPress AI Client 的规则，再结合用户提供的子比主题源码判断扩展落点。只有运行状态会影响代码时，才询问 WordPress 版本、AI 插件是否启用、Provider 是否连接、API Key 是否已经配置。
+
+## 阅读路径
+
+<Cards>
+  <Card
+    title="快速开始"
+    description="先理解站长要准备什么、开发者从哪里下手、第一版功能怎么拆。"
+    href="/docs/wp-ai/quick-start"
+  />
+  <Card
+    title="只提供主题源码时"
+    description="说明用户只有子比主题源码时，AI 助手如何继续定位字段、Hook、Ajax 和扩展落点。"
+    href="/docs/wp-ai/theme-source-only"
+  />
+  <Card
+    title="核心概念"
+    description="用小白能理解的方式解释 Ability、Provider、Connector、Prompt Builder 和 Resolver。"
+    href="/docs/wp-ai/concepts"
+  />
+  <Card
+    title="Abilities API"
+    description="注册分类、注册 Ability、写输入输出 schema，并理解 WP_Ability::execute()。"
+    href="/docs/wp-ai/abilities-api"
+  />
+  <Card
+    title="REST 与权限"
+    description="说明 show_in_rest、GET/POST 方法、readonly/destructive 标注和权限回调。"
+    href="/docs/wp-ai/rest-and-permissions"
+  />
+  <Card
+    title="AI Client 调用"
+    description="使用 wp_ai_client_prompt() 生成文本、控制模型参数、处理错误和结构化 JSON。"
+    href="/docs/wp-ai/ai-client"
+  />
+  <Card
+    title="让 AI 调用 Ability"
+    description="理解 using_abilities() 与 WP_AI_Client_Ability_Function_Resolver 的安全边界。"
+    href="/docs/wp-ai/ability-calling"
+  />
+  <Card
+    title="Provider 与 Connector"
+    description="梳理 OpenAI、Anthropic Provider、API Key 来源、常量、环境变量和模型能力。"
+    href="/docs/wp-ai/providers-connectors"
+  />
+  <Card
+    title="AI 插件能力"
+    description="看 AI 插件如何提供设置、日志、审批、模型发现、AI_Service 和示例 Ability。"
+    href="/docs/wp-ai/ai-plugin"
+  />
+  <Card
+    title="实战示例"
+    description="从读取文章、生成 SEO 描述、保存结果到类封装写法，给可复制的代码骨架。"
+    href="/docs/wp-ai/examples"
+  />
+  <Card
+    title="自动化边界"
+    description="哪些适合 AI 自动读取和生成建议，哪些必须人工确认后才能执行。"
+    href="/docs/wp-ai/automation-safety"
+  />
+  <Card
+    title="排错清单"
+    description="整理 Ability 注册、REST、模型、Provider、审批、日志和 function call 常见问题。"
+    href="/docs/wp-ai/troubleshooting"
+  />
+</Cards>
+
+## 推荐顺序
+
+第一次做 WordPress AI 功能时，不要一上来就做全自动代理。按这个顺序更稳：
+
+1. 先读 [快速开始](/docs/wp-ai/quick-start)，确认插件、Provider 和 API Key 都准备好。
+2. 如果用户只给了子比主题源码，先读 [只提供主题源码时](/docs/wp-ai/theme-source-only)，确认该查主题哪里、该问用户什么。
+3. 再读 [核心概念](/docs/wp-ai/concepts)，把 Ability、AI Client、Provider 的关系理清楚。
+4. 写一个只读 `read-*` Ability，参考 [Abilities API](/docs/wp-ai/abilities-api)。
+5. 通过 REST 或 PHP 直接执行 Ability，参考 [REST 与权限](/docs/wp-ai/rest-and-permissions)。
+6. 用 [AI Client 调用](/docs/wp-ai/ai-client) 生成结果，先只生成不保存。
+7. 需要模型读取上下文时，再接 [让 AI 调用 Ability](/docs/wp-ai/ability-calling)。
+8. 最后按 [自动化边界](/docs/wp-ai/automation-safety) 决定哪些功能必须人工确认。
+
+## 已整理的底层资料
+
+这组文档主要整理过下面这些底层路径。它们是本站写文档时的参考来源，不是用户每次提问必须提供的材料：
+
+| 底层位置                                       | 已整理内容                                                       |
+| ---------------------------------------------- | ---------------------------------------------------------------- |
+| `wp-includes/abilities-api`                    | Ability、Ability 分类、注册表、执行流程                          |
+| `wp-includes/abilities-api.php`                | `wp_register_ability()`、`wp_get_ability()` 等公共函数           |
+| `wp-includes/ai-client`                        | Prompt Builder、消息、结果、工具调用解析                         |
+| `wp-includes/ai-client.php`                    | `wp_supports_ai()`、`wp_ai_client_prompt()`                      |
+| `wp-content/plugins/ai`                        | 设置页、功能开关、日志、审批、模型发现、AI_Service、示例 Ability |
+| `wp-content/plugins/ai-provider-for-openai`    | OpenAI Provider、Responses API、Images API、API Key              |
+| `wp-content/plugins/ai-provider-for-anthropic` | Anthropic Provider、Messages API、模型能力、API Key              |
+
+## 和主题扩展的关系
+
+[主题内置 AI 扩展](/docs/api/theme-ai-abilities) 仍然放在“主题扩展”里，因为它讲的是主题源码 `inc/functions/ai` 里的内置 SEO 生成能力。
+
+本分类讲更底层的 WordPress AI Client 和 Abilities API。用户只提供子比主题源码时，AI 应该先查主题里的 `inc/functions/ai`、后台 SEO 字段、文章 Meta、Ajax 和 Hook，再用本分类补足底层 AI Client、Provider、Connector 和 Ability 规则。具体流程见 [只提供主题源码时](/docs/wp-ai/theme-source-only)。

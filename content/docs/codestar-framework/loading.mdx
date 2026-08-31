@@ -1,0 +1,118 @@
+---
+title: 加载机制
+description: 理解 Codestar Framework 在子比主题中的加载顺序、扩展层、图标和后台条件加载。
+---
+
+## 加载顺序
+
+子比主题在 `inc/inc.php` 中加载 Codestar Framework 和主题扩展层。大致顺序是：
+
+```txt
+functions.php
+└─ inc/inc.php
+   ├─ inc/options/options
+   ├─ inc/codestar-framework/codestar-framework
+   ├─ inc/widgets/widget-class
+   ├─ inc/functions/functions
+   ├─ inc/widgets/widget-index
+   ├─ inc/csf-framework/classes/zib-csf.class
+   └─ do_action('zib_require_end')
+```
+
+`inc/options/options.php` 在后台继续加载：
+
+```txt
+inc/options/admin-options.php
+inc/options/metabox-options.php
+inc/options/profile-options.php
+inc/options/action.php
+```
+
+所以主题内部新增后台能力时，建议等主题完成基础加载后再执行，例如挂到 `after_setup_theme` 较靠后的优先级，或在需要主题全部加载完成时挂到 `zib_require_end`。
+
+## 原始框架和子比扩展层
+
+| 层级       | 目录                     | 说明                                                              |
+| ---------- | ------------------------ | ----------------------------------------------------------------- |
+| 原始 CSF   | `inc/codestar-framework` | 提供 `CSF::createOptions()`、字段基类、原始字段和样例             |
+| 子比扩展   | `inc/csf-framework`      | 覆盖后台 options、taxonomy、widget 类，并增加 `ZCSF` 和自定义字段 |
+| 子比设置   | `inc/options`            | 使用 CSF 注册主题后台、Meta、用户资料、菜单项配置                 |
+| 子比小工具 | `inc/widgets`            | 使用 CSF widget 能力注册小工具                                    |
+
+## Font Awesome 版本
+
+子比主题在 `inc/options/options.php` 中使用：
+
+```php
+add_filter('csf_fa4', '__return_true');
+```
+
+这表示后台 CSF 图标优先使用 Font Awesome 4。写字段或菜单 icon 时，如果你参考的是 FA5/FA6 文档，可能出现图标不显示。子比主题里常见写法是：
+
+```php
+'icon' => 'fa fa-fw fa-sliders'
+```
+
+而不是：
+
+```php
+'icon' => 'fa-solid fa-sliders'
+```
+
+## 自定义 SVG 图标
+
+主题给 CSF icon 字段扩展了内置 SVG 图标和自定义 SVG 插入能力。相关逻辑在 `inc/options/options.php` 的 `zib_csf_custom_icons()`。如果你在后台字段中使用 `icon` 类型，可以选择主题内置的 `zibsvg-*` 图标，也可以按主题提供的方式插入 SVG。
+
+输出到前台时要注意：SVG 属于 HTML，不能随便把用户输入原样输出。后台保存的 SVG 也应该在前台使用白名单过滤或只允许可信管理员维护。
+
+## 后台条件加载
+
+主题自己的设置页有性能优化逻辑：只有进入主题设置页或处理相关 CSF Ajax 保存时，才完整创建部分设置数据，避免后台每个页面都加载庞大的配置。
+
+主题内部新增设置页时也建议：
+
+```php
+function zib_register_custom_options() {
+    if (!is_admin()) {
+        return;
+    }
+
+    if (!class_exists('CSF')) {
+        return;
+    }
+
+    // 注册 options...
+}
+```
+
+如果设置项非常多，可以参考主题做法，根据 `$_GET['page']` 或 Ajax action 判断是否需要构建完整字段。
+
+## ZCSF 什么时候加载
+
+`ZCSF::instance()` 来自：
+
+```txt
+inc/csf-framework/classes/zib-csf.class.php
+```
+
+它用于在自定义表单里渲染字段，例如用户资料页、自定义 meta box、弹窗、独立后台页面的一小段字段。它不是替代 `CSF::createOptions()` 的完整设置页系统，而是一个字段渲染器。
+
+## 扩展代码推荐挂载点
+
+| 场景               | 推荐 Hook                                                 |
+| ------------------ | --------------------------------------------------------- |
+| 注册后台设置页     | `admin_init` 或 `after_setup_theme` 后再判断 `is_admin()` |
+| 注册菜单项配置扩展 | `after_setup_theme`，晚于主题注册                         |
+| 注册文章 Meta Box  | `add_meta_boxes`                                          |
+| 保存文章 Meta      | `save_post`                                               |
+| 用户资料字段输出   | `show_user_profile`、`edit_user_profile`                  |
+| 保存用户资料字段   | `personal_options_update`、`edit_user_profile_update`     |
+| 注册小工具         | `widgets_init`                                            |
+
+## 常见加载问题
+
+- `Class "CSF" not found`：注册太早或主题未加载。
+- `Class "ZCSF" not found`：没有等到 `inc/csf-framework/classes/zib-csf.class.php` 加载。
+- 图标不显示：使用了不兼容的 Font Awesome class。
+- 字段样式丢失：没有正确进入后台页面，或自定义表单没有触发 CSF 资源入队。
+- 设置页每个后台页面都变慢：字段构建没有做后台页面判断。

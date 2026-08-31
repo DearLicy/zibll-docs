@@ -1,0 +1,245 @@
+---
+title: Taxonomy Meta
+description: 说明子比主题分类、标签、专题、论坛、商城 taxonomy 字段的注册方式、保存方式和读取边界。
+---
+
+## 适用对象
+
+子比主题里 taxonomy meta 不是只服务 WordPress 默认分类。它覆盖这些对象：
+
+| Taxonomy        | 用途         |
+| --------------- | ------------ |
+| `category`      | 文章分类     |
+| `post_tag`      | 文章标签     |
+| `topics`        | 专题         |
+| `plate_cat`     | 论坛板块分类 |
+| `forum_topic`   | 论坛话题     |
+| `forum_tag`     | 论坛标签     |
+| `shop_cat`      | 商品分类     |
+| `shop_tag`      | 商品标签     |
+| `shop_discount` | 商品优惠     |
+
+相关源码分布在：
+
+```txt
+inc/options/metabox-options.php
+inc/functions/bbs/admin/meta-option.php
+inc/functions/shop/admin/options/term-option.php
+```
+
+## 保存位置
+
+子比主题提供 term meta 封装：
+
+```php
+zib_get_term_meta($id, $key, $single = false);
+zib_update_term_meta($id, $key, $value);
+```
+
+其中一部分字段会聚合到 `zib_other_data`。清单来自：
+
+```php
+zib_get_option_meta_keys('term_meta')
+```
+
+当前典型字段：
+
+```txt
+xzh_tui_back
+cover_image
+term_seo
+```
+
+因此分类封面这类字段要这样读：
+
+```php
+$cover = zib_get_term_meta($term_id, 'cover_image', true);
+```
+
+## CSF Taxonomy Options
+
+独立 taxonomy 表单通常用：
+
+```php
+CSF::createTaxonomyOptions($prefix, array(
+    'title'     => __('阅读权限配置', 'zib_language'),
+    'taxonomy'  => 'category',
+    'data_type' => 'serialize',
+));
+
+CSF::createSection($prefix, array(
+    'fields' => array(
+        array(
+            'id'      => 'allow_view_roles',
+            'type'    => 'checkbox',
+            'title'   => __('允许查看的用户组', 'zib_language'),
+            'options' => array(
+                'logged' => __('登录用户', 'zib_language'),
+                'vip'    => __('会员用户', 'zib_language'),
+            ),
+        ),
+    ),
+));
+```
+
+`data_type => serialize` 表示字段保存到一个数组 meta 中：
+
+```txt
+wp_termmeta.meta_key = $prefix
+```
+
+读取方式：
+
+```php
+$options = get_term_meta($term_id, $prefix, true);
+$options = is_array($options) ? $options : array();
+```
+
+## 百度资源提交
+
+`metabox-options.php` 里有一个跨 taxonomy 的配置：
+
+```php
+CSF::createTaxonomyOptions('term_baidu_resource_submission', array(
+    'title'     => __('百度资源提交', 'zib_language'),
+    'taxonomy'  => array('category', 'post_tag', 'topics', 'plate_cat', 'forum_topic', 'forum_tag', 'shop_cat', 'shop_tag', 'shop_discount'),
+    'data_type' => 'unserialize',
+));
+```
+
+这类配置说明：
+
+- 一个 prefix 可以绑定多个 taxonomy。
+- `taxonomy` 可以是字符串，也可以是数组。
+- 保存方式由 `data_type` 决定，不一定走 `zib_get_term_meta()` 的单字段读取。
+
+## 分类封面与 SEO
+
+子比常见 term 字段：
+
+| 字段           | 读取方式                                            |
+| -------------- | --------------------------------------------------- |
+| `cover_image`  | `zib_get_term_meta($term_id, 'cover_image', true)`  |
+| `term_seo`     | `zib_get_term_meta($term_id, 'term_seo', true)`     |
+| `xzh_tui_back` | `zib_get_term_meta($term_id, 'xzh_tui_back', true)` |
+
+SEO 字段通常是数组：
+
+```php
+$seo = zib_get_term_meta($term_id, 'term_seo', true);
+$seo = is_array($seo) ? $seo : array();
+
+$title       = !empty($seo['title']) ? $seo['title'] : '';
+$keywords    = !empty($seo['keywords']) ? $seo['keywords'] : '';
+$description = !empty($seo['description']) ? $seo['description'] : '';
+```
+
+输出前按上下文转义：
+
+```php
+echo esc_html($title);
+echo esc_attr($keywords);
+echo esc_html($description);
+```
+
+## 论坛 Taxonomy
+
+论坛模块会使用：
+
+```txt
+plate_cat
+forum_topic
+forum_tag
+```
+
+这些 taxonomy 与 `plate`、`forum_post` 内容类型配合使用。开发时要先判断模块是否启用和 taxonomy 是否存在：
+
+```php
+if (!taxonomy_exists('forum_topic')) {
+    return;
+}
+```
+
+如果字段是论坛业务字段，优先查：
+
+```txt
+inc/functions/bbs/admin/meta-option.php
+```
+
+不要把论坛 taxonomy 当成普通文章标签处理，它还会影响板块、话题页、发帖筛选和权限判断。
+
+## 商城 Taxonomy
+
+商城模块会使用：
+
+```txt
+shop_cat
+shop_tag
+shop_discount
+```
+
+相关后台字段在：
+
+```txt
+inc/functions/shop/admin/options/term-option.php
+```
+
+开发时先判断 taxonomy 是否存在：
+
+```php
+if (!taxonomy_exists('shop_cat')) {
+    return;
+}
+```
+
+商城 taxonomy 通常和商品价格、折扣、库存、商品列表筛选联动，字段命名要避免和文章分类字段混淆。
+
+## 读取规则
+
+| 字段来源                                           | 读取方式                                          |
+| -------------------------------------------------- | ------------------------------------------------- |
+| `zib_get_option_meta_keys('term_meta')` 中的字段   | `zib_get_term_meta($term_id, $key, true)`         |
+| `CSF::createTaxonomyOptions()` 的 serialize prefix | `get_term_meta($term_id, $prefix, true)` 后取数组 |
+| WordPress 原生 term 信息                           | `get_term()`、`get_term_link()`                   |
+| taxonomy 是否可用                                  | `taxonomy_exists($taxonomy)`                      |
+
+## 常见错误
+
+### 把 prefix 当字段读
+
+如果 CSF prefix 是 `category_pay_limit`，字段 id 是 `allow_view_roles`，保存后通常是：
+
+```php
+$options = get_term_meta($term_id, 'category_pay_limit', true);
+$roles   = !empty($options['allow_view_roles']) ? $options['allow_view_roles'] : array();
+```
+
+不是：
+
+```php
+$roles = get_term_meta($term_id, 'allow_view_roles', true);
+```
+
+### 绕过子比封装
+
+聚合字段错误写法：
+
+```php
+update_term_meta($term_id, 'cover_image', $cover);
+```
+
+推荐：
+
+```php
+zib_update_term_meta($term_id, 'cover_image', $cover);
+```
+
+### taxonomy 名称写错
+
+论坛和商城 taxonomy 名称不要凭感觉写。先在源码里搜索 `register_taxonomy` 或直接判断：
+
+```php
+if (!taxonomy_exists('plate_cat')) {
+    return;
+}
+```

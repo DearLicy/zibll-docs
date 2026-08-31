@@ -1,0 +1,29 @@
+name: 案例分享
+description: 分享子比主题、子主题、插件或本地开发工具的实践案例
+title: '案例：'
+body:
+  - type: input
+    id: project
+    attributes:
+      label: 项目名称或链接
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: 案例简介
+      description: 说明使用场景、解决的问题和最终效果。
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: 关键源码或文档依据
+      description: 可以填写公开仓库路径、文档链接或最小代码片段。
+  - type: checkboxes
+    id: compliance
+    attributes:
+      label: 发布确认
+      options:
+        - label: 内容不包含密钥、Cookie、密码、个人数据或未授权代码。
+          required: true

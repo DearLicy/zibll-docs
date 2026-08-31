@@ -1,0 +1,1197 @@
+---
+title: 商城发货、售后与优惠
+description: 蒸馏子比主题商城订单付款后的发货、物流、确认收货、售后状态机、退款、商品优惠和优惠码扩展边界。
+---
+
+## 模块边界
+
+商城订单不是只靠 Zibpay 创建一条支付记录就结束。子比主题在订单付款成功后，还会继续处理库存、发货、物流、确认收货、售后、退款、优惠明细和用户中心展示。
+
+官网商城教程把这一块描述为完整销售体系：支持自动发货虚拟商品、手动发货虚拟商品、实物商品，包含发货、收货、评价、售后和优惠赠品。本页只保留二开需要的运行链路：后台配置怎么落到订单 meta，付款成功后哪个 Hook 触发，发货和售后状态由哪些函数维护。
+
+| 官网场景                   | 本地源码落点                                                      | 二开重点                                                |
+| -------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------- |
+| 自动虚拟商品、卡密、邀请码 | `shipping_type=auto`、`auto_delivery`、`zib_shop_auto_shipping()` | 空发货内容会转为商家处理，不要强行标记已发货            |
+| 手动发货虚拟商品           | `shipping_type=manual`、`zib_shop_manual_shipping()`              | 不需要收货地址，通常要配合 `user_required` 收集交付信息 |
+| 实物商品物流发货           | `shipping_type=express`、`shipping_data`、`express_data`          | 发货、修改物流、自动确认收货都会影响 `shipping_status`  |
+| 自定义售后服务             | `after_sale_opt`、`zib_shop_get_order_after_sale_opt()`           | 能否申请售后要看发货状态、确认收货时间和历史售后记录    |
+| 优惠活动和赠品             | `shop_discount_config`、`discount_hit`、`gift_data`               | 赠品展示在确认单，真正自动兑现发生在确认收货时          |
+
+| 能力               | 主要源码                                                                  | 关键数据                                                                                                                          |
+| ------------------ | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 付款成功联动       | `inc/functions/shop/inc/pay.php`                                          | `payment_order_success`、`order_created`、`order_closed`                                                                          |
+| 发货与物流         | `inc/functions/shop/inc/shipping.php`                                     | `shipping_status`、`shipping_time`、`order_data.shipping_data`、`order_data.express_data`                                         |
+| 售后流程           | `inc/functions/shop/inc/after-sale.php`                                   | `after_sale_status`、`after_sale_time`、`order_data.after_sale_data`、`order_data.after_sale_record`                              |
+| 前台售后交互       | `inc/functions/shop/action/action.php`                                    | `order_after_sale_modal`、`order_after_sale_apply`、`order_after_sale_return_express`、`order_after_sale_cancel`                  |
+| 后台发货与售后处理 | `inc/functions/shop/admin/actions/ajax.php`                               | `admin_shipping_submit`、`admin_batch_shipping_submit`、`admin_after_sale_handle_submit`、`admin_after_sale_refund_return_handle` |
+| 后台待办提醒       | `inc/functions/shop/admin/admin.php`                                      | `zib_shop_add_admin_notice()`、`zib_shop_add_admin_order_address_notice()`                                                        |
+| 后台订单列表       | `zibpay/functions/admin/admin-ajax.php`                                   | `admin_shipping_table_list`、`admin_after_sale_table_list`、`admin_after_sale_record_html`                                        |
+| 商品优惠           | `inc/functions/shop/inc/discount.php`                                     | `shop_discount`、`discount_scope`、`discount_type`、`discount_hit`                                                                |
+| Zibpay 优惠码      | `zibpay/functions/zibpay-coupon.php`、`zibpay/functions/zibpay-order.php` | `coupon_id`、`coupon_data`、`prices.coupon`                                                                                       |
+
+扩展商城时要先判断自己改的是哪个层级：
+
+| 需求                             | 优先入口                                                                        |
+| -------------------------------- | ------------------------------------------------------------------------------- |
+| 支付成功后做库存、销量、发货联动 | `payment_order_success` 之后的商城流程                                          |
+| 修改自动发货内容                 | `shop_auto_delivery_content` 过滤器                                             |
+| 展示物流状态                     | `zib_shop_get_express_data()` 或 `zib_shop_get_default_express_traces()` 的结果 |
+| 判断用户是否能申请售后           | `zib_shop_get_order_after_sale_opt()`                                           |
+| 记录售后处理结果                 | `zib_shop_after_sale_to_end()` 维护的 `after_sale_data` 和 `after_sale_record`  |
+| 订单金额减免                     | 商品优惠或 Zibpay 优惠码，不要直接改最终支付金额                                |
+
+不要直接改 `shipping_status`、`after_sale_status`、`refund_price` 或 `order_data` 的深层字段来“模拟完成流程”。这些字段会影响用户中心计数、后台待办、退款、销量、评价状态、消息通知和缓存清理。
+
+## 后台待办提醒
+
+商城开启后，后台会通过 `admin_notices` 提醒两类待处理事项：
+
+| 提醒             | 统计来源                                                                    | 跳转入口                                                           |
+| ---------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| 待发货订单       | `zib_shop_get_shipping_status_count('0')`                                   | `zibpay_get_admin_shop_url('shipping', 'shipping_status=0')`       |
+| 待处理售后       | `zib_shop_get_after_sale_status_count([1, 2])`                              | `zibpay_get_admin_shop_url('after-sale', 'after_sale_status=1,2')` |
+| 收货地址修改申请 | `ZibMsg::get_count(array('type' => 'order_modify_address', 'status' => 0))` | `zibmsg_get_conter_url('system')`                                  |
+
+入口在 `inc/functions/shop/admin/admin.php`：
+
+```php
+add_action('admin_notices', 'zib_shop_add_admin_notice');
+add_action('admin_notices', 'zib_shop_add_admin_order_address_notice');
+```
+
+自定义商城后台待办时，优先把真实订单状态写回主题已有字段，让待办统计自然变化。不要只隐藏 notice 或直接清空 `after_sale_status`，否则后台看起来“已处理”，用户中心和订单记录仍会停在旧状态。
+
+## 支付成功后的主流程
+
+商城订单付款成功后，主题通过 `payment_order_success` 进入商城处理：
+
+```php
+add_action('payment_order_success', 'zib_shop_order_payment_success', 10, 2);
+function zib_shop_order_payment_success($order)
+{
+    $order = zibpay::order_data_map($order);
+    if ($order['order_type'] != zib_shop_get_order_type()) {
+        return;
+    }
+
+    zib_shop_update_order_shipping_status($order['id'], 0);
+
+    $shipping_type = zib_shop_get_product_config($order['post_id'], 'shipping_type');
+    if ($shipping_type === 'auto') {
+        zib_shop_auto_shipping($order);
+    } else {
+        zib_shop_notify_shipping($order);
+    }
+
+    zib_shop_update_product_sales_volume($order['post_id'], $order['count']);
+}
+```
+
+虽然商城源码注册时写了 `add_action(..., 10, 2)`，但 `payment_order_success` 实际只传一个 `$order` 对象。自定义扩展不要写成 `$payment, $orders` 两参数；多商品联合支付会在 Zibpay 内部逐个业务订单触发这个 Hook。
+
+库存扣减在订单创建时执行：
+
+```php
+add_action('order_created', 'zib_shop_order_created', 10, 1);
+function zib_shop_order_created($order)
+{
+    if ($order['order_type'] != zib_shop_get_order_type()) {
+        return;
+    }
+
+    $product_id      = $order['post_id'];
+    $product_opt_str = $order['meta']['order_data']['options_active_str'];
+    zib_shop_product_deduct_stock($product_id, $product_opt_str, $order['count']);
+}
+```
+
+订单关闭或退款时会恢复库存：
+
+```php
+add_action('order_closed', 'zib_shop_order_closed', 10, 1);
+add_action('order_refunded', 'zib_shop_order_closed', 10, 1);
+```
+
+所以自定义“取消订单”“强制退款”“超时关闭”时，要尽量走订单关闭或退款流程，不要只改支付状态。
+
+## 发货数据结构
+
+发货数据主要存在 Zibpay 订单 meta 里：
+
+| 字段                                            | 含义                                                |
+| ----------------------------------------------- | --------------------------------------------------- |
+| `shipping_status`                               | 发货状态：`0` 待发货，`1` 已发货待收货，`2` 已收货  |
+| `shipping_time`                                 | 最近一次发货/物流状态更新时间                       |
+| `order_data.shipping_type`                      | 商品发货类型，例如 `auto`、`manual`、`express`      |
+| `order_data.shipping_data.delivery_time`        | 发货时间                                            |
+| `order_data.shipping_data.delivery_type`        | 发货细分类型，例如 `express`、`no_express`、`fixed` |
+| `order_data.shipping_data.delivery_content`     | 虚拟内容或自动发货内容                              |
+| `order_data.shipping_data.delivery_remark`      | 商家发货备注                                        |
+| `order_data.shipping_data.express_number`       | 快递单号                                            |
+| `order_data.shipping_data.express_company_name` | 快递公司名称                                        |
+| `order_data.shipping_data.receive_time`         | 确认收货时间                                        |
+| `order_data.express_data`                       | 远程物流查询结果和缓存                              |
+
+虚拟商品自动发货会写入 `shipping_data` 后直接确认收货：
+
+```php
+function zib_shop_virtual_shipping(array $order, $delivery_html, $delivery_type = '')
+{
+    $order_meta_data                  = zibpay::get_meta($order['id'], 'order_data');
+    $order_meta_data['shipping_data'] = $order_meta_data['shipping_data'] ?? array();
+
+    $current_time                     = current_time('mysql');
+    $order_meta_data['shipping_data'] = array_merge($order_meta_data['shipping_data'], array(
+        'delivery_time'    => $current_time,
+        'delivery_content' => $delivery_html,
+        'delivery_type'    => $delivery_type,
+    ));
+
+    zibpay::update_meta($order['id'], 'order_data', $order_meta_data);
+    zib_shop_order_receive_confirm($order['id'], 'auto', __('虚拟商品自动确认收货', 'zib_language'), $order_meta_data);
+}
+```
+
+手动发货会根据 `delivery_type` 写入快递或无需物流信息，然后把 `shipping_status` 更新为 `1`。后台发货列表来自 `admin_shipping_table_list`，列表数据会读取 `shipping_status`、`shipping_time`、`shipping_data` 和 `express_data`。如果自定义后台发货入口，要保持这些字段一致，否则用户中心和后台统计会互相对不上。
+
+## 后台发货操作
+
+后台发货 Ajax 在 `inc/functions/shop/admin/actions/ajax.php`，统一使用 `admin_order_page_ajax_submit` nonce，并要求 `current_user_can('administrator')`。
+
+| Action                        | 用途                       | 关键处理函数                                                     |
+| ----------------------------- | -------------------------- | ---------------------------------------------------------------- |
+| `admin_shipping_submit`       | 单个订单发货或修改发货信息 | `zib_shop_manual_shipping()`、`zib_shop_update_order_shipping()` |
+| `admin_batch_shipping_submit` | 多个订单批量发货           | `zib_shop_manual_shipping()`                                     |
+
+单个发货会先读取 `zibpay::get_order($order_id)` 和 `zibpay::get_meta($order_id, 'order_data', true)`，再按商品发货类型组装发货数据：
+
+| `order_data.shipping_type` | 后台提交要求                                                                            | 写入重点                                                                             |
+| -------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `auto`                     | 必须提供 `delivery_content`                                                             | 写入 `delivery_content`、`delivery_type=manual`、`delivery_remark`，再走虚拟商品发货 |
+| `manual`                   | 可填写发货备注                                                                          | 写入 `delivery_type=manual`、`delivery_remark`                                       |
+| 其他实物发货               | `delivery_type` 不是 `no_express` 时，必须有 `express_number` 和 `express_company_name` | 写入快递单号、快递公司、发货备注、`delivery_type=express/no_express`                 |
+
+核心分支是：
+
+```php
+if (zib_shop_get_order_shipping_status($order_id) != 0) {
+    zib_shop_update_order_shipping($order_data, $shipping_data);
+    zib_send_json_success(__('发货信息修改成功', 'zib_language'));
+}
+
+zib_shop_manual_shipping($order_data, $shipping_data);
+zib_send_json_success(__('发货成功', 'zib_language'));
+```
+
+所以同一个后台入口既能“首次发货”，也能“修改发货信息”。区别在于当前 `shipping_status`：未发货走 `zib_shop_manual_shipping()`，已发货或已收货走 `zib_shop_update_order_shipping()`。
+
+`zib_shop_manual_shipping()` 会写入 `order_data.shipping_data.delivery_time`、`receive_time`、`delivery_type`、`delivery_remark`，快递发货还会写入 `express_number` 和 `express_company_name`，然后更新 `shipping_status=1`、刷新 `shipping_time`，并在首次写入快递单号时通知用户。`zib_shop_update_order_shipping()` 只合并新的 `shipping_data`，并清掉旧 `order_data.express_data`，让下次物流查询重新拉取。
+
+批量发货会对每个 `order_id` 单独读取订单和 `shipping_type`。自动发货商品缺少发货内容会记录失败原因；实物发货在需要快递时缺少物流信息也会记录失败原因。最后返回成功数量、失败数量和去重后的失败原因：
+
+```php
+zib_send_json_success(array(
+    'ys'    => $ys,
+    'title' => $title,
+    'msg'   => $msg,
+));
+```
+
+扩展批量发货时不要只按前端选择的订单数量返回成功。应该逐单校验订单是否存在、发货类型是否匹配、必填字段是否完整，并保留主题这种“部分成功、部分失败”的反馈结构。
+
+## 自动发货配置与库存
+
+商品后台的 `shipping_type=auto` 会显示 `auto_delivery` 字段组。它支持四种模式：
+
+| 模式           | 字段                                                   | 说明                                               |
+| -------------- | ------------------------------------------------------ | -------------------------------------------------- |
+| 固定内容       | `type=fixed`、`fixed_content`                          | 每次购买发同一段内容，适合教程、固定链接、群号等   |
+| 邀请码         | `type=invit_code`、`invit_code_mode`、`invit_code_key` | 从已有邀请码库存中取码，或付款后自动创建邀请码     |
+| 卡密           | `type=card_pass`、`card_pass_key`                      | 从卡密表按标识取未发货卡密，支持普通卡密、优惠码等 |
+| 按选项分别配置 | `type=opts`、`opts[选项组合]`                          | 不同规格发不同固定内容、邀请码或卡密               |
+
+自动发货商品的库存不一定来自 `stock_all` 或 `stock_opts`。`zib_shop_get_product_stock()` 会在 `shipping_type=auto` 时重新读取 `auto_delivery`，并可能用卡密/邀请码库存覆盖商品库存：
+
+```php
+function zib_shop_get_product_stock($product_id)
+{
+    $_configs      = zib_shop_get_product_config($product_id);
+    $shipping_type = $_configs['shipping_type'] ?? 'express';
+
+    if ($shipping_type !== 'auto') {
+        return $default;
+    }
+
+    $auto_delivery      = $_configs['auto_delivery'] ?? array();
+    $auto_delivery_type = $auto_delivery['type'] ?? '';
+
+    if ($auto_delivery_type === 'card_pass') {
+        $default['stock_type'] = 'all';
+        $default['stock_all']  = zib_shop_get_product_card_pass_stock($auto_delivery['card_pass_key']);
+    }
+
+    return $default;
+}
+```
+
+库存读取规则：
+
+| 自动发货类型              | 库存来源                                                                  |
+| ------------------------- | ------------------------------------------------------------------------- |
+| `fixed`                   | 商品自己的 `stock_all` / `stock_opts`                                     |
+| `invit_code` + 已有邀请码 | `ZibCardPass` 中 `other=邀请码标识`、`type=invit_code`、`status=0` 的数量 |
+| `invit_code` + 自动创建   | 无限库存，付款时调用 `zib_generate_invit_code()` 创建                     |
+| `card_pass`               | `ZibCardPass` 中 `other=卡密标识`、`status=0` 的数量                      |
+| `opts`                    | 每个选项组合单独按 `opts_type`、`invit_code_key`、`card_pass_key` 计算    |
+
+卡密库存统计使用：
+
+```php
+function zib_shop_get_product_card_pass_stock($other, $card_type = null)
+{
+    $where = array(
+        'other'  => $other,
+        'status' => '0',
+    );
+
+    if ($card_type === 'invit_code') {
+        $where['type'] = $card_type;
+    }
+
+    return (int) ZibCardPass::get_count($where);
+}
+```
+
+注意卡密自动发货不是简单把卡密 `status` 改成已用。发货时主题会把当前卡密的 `other` 追加为 `原标识_shipped_{order_id}`，并在 `meta` 写入 `shipped_time` 和 `shipped_order_id`，这样它会从原标识库存池中消失，也能在后台卡密列表追溯到发货订单。
+
+## 自动发货扩展
+
+自动发货内容由 `zib_shop_get_auto_delivery_content()` 生成，支持固定内容、邀请码、卡密和按规格分别配置。主题提供了一个适合追加内容的过滤器：
+
+```php
+$delivery_html = apply_filters('shop_auto_delivery_content', $delivery_html, $order);
+```
+
+扩展示例：
+
+```php
+add_filter('shop_auto_delivery_content', 'zib_child_shop_append_delivery_notice', 10, 2);
+function zib_child_shop_append_delivery_notice($delivery_html, $order)
+{
+    if (!$delivery_html) {
+        return $delivery_html;
+    }
+
+    if (empty($order['post_id'])) {
+        return $delivery_html;
+    }
+
+    $notice = zib_shop_get_product_config($order['post_id'], 'delivery_notice');
+    if (!$notice) {
+        return $delivery_html;
+    }
+
+    $delivery_html .= '<div class="muted-box mt20" style="white-space:pre-wrap;">' . wp_kses_post($notice) . '</div>';
+
+    return $delivery_html;
+}
+```
+
+这个示例只追加展示内容，不改订单状态。自动发货失败时主题会通知用户联系商家，并通知商家手动发货；扩展时不要把空内容强行当成已发货，否则用户会拿不到交付内容。
+
+### 卡密与邀请码发货
+
+卡密和邀请码最终都走 `zib_shop_get_auto_delivery_card_pass_content()`。取货流程是：
+
+1. 判断 `auto_delivery.type`。
+2. 邀请码且 `invit_code_mode=auto_add` 时，按购买数量调用 `zib_generate_invit_code()` 自动创建。
+3. 否则按 `other=标识`、`status=0` 查询 `ZibCardPass`。
+4. 邀请码额外限制 `type=invit_code`。
+5. 如果可用数量不足，返回空内容，自动发货失败并转为商家处理。
+6. 发货成功后为每条卡密写入 `shipped_time`、`shipped_order_id`，并拼装带复制属性的交付 HTML。
+
+核心查询结构：
+
+```php
+$where = array(
+    'other'  => $where_other,
+    'status' => '0',
+);
+
+if ($type === 'invit_code') {
+    $where['type'] = 'invit_code';
+}
+
+$db_data = ZibCardPass::get($where, 'id', 0, $count, 'ASC');
+```
+
+按选项配置时，主题会先根据订单里的 `options_active_str` 找到当前规格，再递归回 `zib_shop_get_auto_delivery_content()`：
+
+```php
+$pot_auto_delivery             = $auto_delivery['opts'][$auto_delivery['options_active_str']] ?? array();
+$pot_auto_delivery['order_id'] = $auto_delivery['order_id'];
+$pot_auto_delivery['count']    = $auto_delivery['count'];
+$pot_auto_delivery['type']     = $pot_auto_delivery['opts_type'];
+
+$delivery_html = zib_shop_get_auto_delivery_content($pot_auto_delivery);
+```
+
+因此扩展按规格发货时，不要自己重新解析规格字符串。订单创建时已经把规格组合保存为 `order_data.options_active_str`，自动发货链路会用它命中对应配置。
+
+用户中心展示自动发货订单时，会根据 `shipping_type=auto` 输出“自动发货”时间线；发货成功后点击可查看 `delivery_content`，发货失败时显示“自动发货失败，等待商家处理”。自定义交付内容可以使用 `data-clipboard-text` 和 `data-clipboard-tag`，这样仍能复用主题的复制交互。
+
+## 物流查询与兜底轨迹
+
+物流查询入口是：
+
+```php
+$express_data = zib_shop_get_express_data($order);
+```
+
+它会先检查：
+
+| 判断                                 | 结果                                                   |
+| ------------------------------------ | ------------------------------------------------------ |
+| 自动发货订单                         | 不查询物流                                             |
+| `delivery_type=express` 但没有单号   | 不查询物流                                             |
+| `express_data.query_time` 仍在间隔内 | 返回缓存                                               |
+| 已签收                               | 返回缓存，不重复查询                                   |
+| 有快递单号                           | 通过 `ZibExpress::query($express_number, $phone)` 查询 |
+
+如果远程接口没有轨迹，主题会用订单时间生成兜底轨迹：用户完成支付、商家已发货、用户确认收货。展示物流文本时可以复用：
+
+```php
+$context = zib_shop_handle_express_context($context);
+```
+
+这个函数会把手机号和座机号转成 `tel:` 链接。自定义物流输出时，不要把接口原始 JSON、手机号、收件地址整包输出到公开页面；只在订单所属用户、商家或管理员视角展示。
+
+## 确认收货
+
+确认收货由 `zib_shop_order_receive_confirm()` 完成。它会：
+
+| 动作                              | 影响                             |
+| --------------------------------- | -------------------------------- |
+| 写入 `shipping_data.receive_time` | 用户中心和物流轨迹可显示收货时间 |
+| 更新 `shipping_status=2`          | 订单进入已收货                   |
+| 初始化评价状态                    | 后续可评价商品                   |
+| 更新 `shipping_time`              | 后台列表可排序                   |
+| 写回 `order_data`                 | 保留收货备注和处理类型           |
+
+虚拟商品自动发货会自动确认收货。实物商品或需要商家确认的商品，不建议直接调用确认收货来跳过用户收货环节，除非业务明确要求自动收货，并且已经同步好消息通知和售后窗口。
+
+### 自动确认收货时效
+
+实物或手动发货订单进入 `shipping_status=1` 后，并不是只能等用户点击确认收货。主题在读取收货状态时会顺手检查自动确认收货时效：
+
+```php
+function zib_shop_get_order_shipping_status($order_id)
+{
+    $shipping_status = (int) zibpay::get_meta($order_id, 'shipping_status');
+    if ($shipping_status === 1) {
+        $receipt_over_time = zib_shop_get_order_receipt_over_time($order_id);
+        if ($receipt_over_time == 'over') {
+            return 2;
+        }
+    }
+
+    return $shipping_status;
+}
+```
+
+`zib_shop_get_order_receipt_over_time()` 会读取 `order_data.shipping_data.delivery_time`，再按主题设置 `_pz('order_receipt_max_day', 15)` 计算最后确认时间。超过时会直接调用：
+
+```php
+zib_shop_order_receive_confirm($order_id, 'auto', __('自动确认收货', 'zib_language'));
+```
+
+这个检查会在多个“读订单”的位置被触发：
+
+| 位置                                                   | 行为                                                               |
+| ------------------------------------------------------ | ------------------------------------------------------------------ |
+| 用户中心订单状态                                       | 显示剩余自动确认收货倒计时，超时后进入交易完成                     |
+| 后台订单列表整理                                       | `shipping_status=1` 时刷新 `shipping_receipt_over_time` 或改为 `2` |
+| 任意调用 `zib_shop_get_order_shipping_status()` 的扩展 | 可能触发自动确认收货并发放买赠权益                                 |
+
+因此自定义订单列表、导出、后台筛选时要意识到：读取收货状态不是纯只读操作。它可能让订单从待收货变成已收货，并触发评价初始化和买赠权益兑现。需要完全只读的报表，不要在循环里随意调用这个函数；需要和主题一致的实时状态，则应接受这个副作用。
+
+## 售后状态机
+
+售后状态存在两个层级：
+
+| 字段                           | 说明                       |
+| ------------------------------ | -------------------------- |
+| `after_sale_status`            | 当前售后总状态             |
+| `after_sale_time`              | 当前售后状态的最近处理时间 |
+| `order_data.after_sale_data`   | 当前售后详情               |
+| `order_data.after_sale_record` | 历史售后记录               |
+
+`after_sale_status` 状态含义：
+
+| 值  | 含义     |
+| --- | -------- |
+| `1` | 待处理   |
+| `2` | 处理中   |
+| `3` | 处理完成 |
+| `4` | 用户取消 |
+| `5` | 商家驳回 |
+
+售后类型包括 `refund`、`refund_return`、`replacement`、`warranty`、`insured_price`。判断订单能不能申请售后时，不要自己拼条件，直接读：
+
+```php
+$after_sale_opt = zib_shop_get_order_after_sale_opt($order);
+```
+
+它会结合发货状态、确认收货时间、商品售后配置、历史售后记录判断 `can_apply`。例如未发货只能申请 `refund`，已收货后会按不同售后类型的最大天数判断。
+
+## 前台售后 Ajax
+
+前台售后入口使用子比主题的弹窗和 Ajax 写法：
+
+| 动作                              | 用途             |
+| --------------------------------- | ---------------- |
+| `order_after_sale_modal`          | 打开售后弹窗     |
+| `order_after_sale_apply`          | 用户提交售后申请 |
+| `order_after_sale_return_express` | 用户填写退货物流 |
+| `order_after_sale_cancel`         | 用户取消售后     |
+| `order_after_sale_record_modal`   | 查看售后记录     |
+| `order_after_sale_express_modal`  | 查看售后物流     |
+
+链接使用 `zib_get_refresh_modal_link()`，提交使用 `wp-ajax-submit` 和 nonce：
+
+```php
+function zib_child_shop_after_sale_link($order)
+{
+    if (empty($order['id'])) {
+        return '';
+    }
+
+    return zib_shop_get_order_after_sale_link($order, 'but c-yellow', __('售后服务', 'zib_language'));
+}
+```
+
+如果你要新增售后操作，保持这个结构：
+
+```php
+add_action('wp_ajax_order_after_sale_extra_note', 'zib_child_order_after_sale_extra_note');
+function zib_child_order_after_sale_extra_note()
+{
+    $order_id = !empty($_POST['order_id']) ? (int) $_POST['order_id'] : 0;
+    if (!$order_id) {
+        zib_send_json_error(__('订单参数错误', 'zib_language'));
+    }
+
+    if (!wp_verify_nonce($_POST['_wpnonce'] ?? '', 'order_after_sale_extra_note')) {
+        zib_send_json_error(__('安全验证失败，请刷新页面后重试', 'zib_language'));
+    }
+
+    $order = zibpay::get_order($order_id);
+    if (empty($order['id']) || (int) $order['user_id'] !== get_current_user_id()) {
+        zib_send_json_error(__('暂无权限操作此订单', 'zib_language'));
+    }
+
+    $order_data = zibpay::get_meta($order_id, 'order_data');
+    $order_data['after_sale_extra_note'] = sanitize_textarea_field($_POST['note'] ?? '');
+
+    zibpay::update_meta($order_id, 'order_data', $order_data);
+
+    zib_send_json_success(array(
+        'msg' => __('已保存', 'zib_language'),
+    ));
+}
+```
+
+这个示例只写附加备注。真正改变售后进度时，要调用主题现有的处理函数，例如 `zib_shop_user_apply_after_sale()`、`zib_shop_after_sale_return_express_handle()`、`zib_shop_after_sale_to_end()`，不要绕过状态机。
+
+## 后台售后处理
+
+后台售后处理同样在 `inc/functions/shop/admin/actions/ajax.php`。常用入口：
+
+| Action                                  | 用途                                         | 关键处理函数                                        |
+| --------------------------------------- | -------------------------------------------- | --------------------------------------------------- |
+| `admin_after_sale_handle_submit`        | 管理员同意或拒绝售后申请                     | `zib_shop_after_sale_author_handle()`               |
+| `admin_after_sale_refund_return_handle` | 退货退款场景下，用户已退货后由管理员最终退款 | `zib_shop_after_sale_refund_return_author_handle()` |
+| `after_sale_express_data`               | 查询售后退货或商家回寄物流                   | `zib_shop_get_after_sale_express_data()`            |
+
+`admin_after_sale_handle_submit` 会读取：
+
+| 字段             | 用途                                     |
+| ---------------- | ---------------------------------------- |
+| `id`             | 订单 ID                                  |
+| `handle_type`    | `agree` 表示同意，其它视为拒绝           |
+| `author_remark`  | 商家处理备注；拒绝时必填                 |
+| `refund_channel` | 退款渠道；非积分订单的一些售后类型必填   |
+| `return_address` | 退货地址；退货退款、换货、保修同意时必填 |
+
+校验规则来自源码，不要简化：
+
+| 场景                                            | 必填                                     |
+| ----------------------------------------------- | ---------------------------------------- |
+| 拒绝售后                                        | `author_remark`                          |
+| 同意 `refund`、`insured_price` 且不是积分订单   | `refund_channel`                         |
+| 同意 `refund_return`、`replacement`、`warranty` | `return_address`，并且地址里要有 `phone` |
+
+同意售后后，主题按售后类型决定下一步：
+
+| 售后类型        | 后台同意后的状态                                                |
+| --------------- | --------------------------------------------------------------- |
+| `refund`        | 直接进入 `zib_shop_after_sale_to_end()`，状态为处理完成         |
+| `insured_price` | 直接进入 `zib_shop_after_sale_to_end()`，状态为处理完成         |
+| `refund_return` | 写入退货地址，`after_sale_status=2`，`progress=1`，等待用户发货 |
+| `replacement`   | 写入退货地址，`after_sale_status=2`，`progress=1`，等待用户发货 |
+| `warranty`      | 写入退货地址，`after_sale_status=2`，`progress=1`，等待用户发货 |
+
+拒绝售后会把 `after_sale_data.status` 设为 `5`，再通过 `zib_shop_after_sale_to_end()` 结束流程。结束流程会写入 `after_sale_time`、`after_sale_record`，并通知用户。
+
+退货退款的最终退款不是在第一次同意时完成。第一次同意只会让用户寄回商品；用户填写退货物流后，售后进度进入“等待商家处理”。后台再调用：
+
+```php
+add_action('wp_ajax_admin_after_sale_refund_return_handle', 'zib_shop_ajax_admin_after_sale_refund_return_handle');
+```
+
+这个入口只允许 `after_sale_data.type == 'refund_return'` 且 `after_sale_data.status == 2`。非积分订单必须选择 `refund_channel`，然后调用：
+
+```php
+zib_shop_after_sale_refund_return_author_handle($order, array(
+    'author_remark'  => $author_remark,
+    'refund_channel' => $refund_channel,
+));
+```
+
+它会把售后状态改为 `3`，记录 `refund_return_author_remark` 和 `refund_channel`，最终交给 `zib_shop_after_sale_to_end()` 做退款、销量回退、评价状态调整、售后记录写入和用户通知。
+
+`after_sale_express_data` 可以被订单用户、商品作者或管理员调用。它按 `type` 读取 `order_data.after_sale_data.user_return_data` 或 `author_return_data`，并使用收件电话刷新物流缓存。展示售后物流时只输出必要轨迹，不要把退货地址、电话和远程接口原始响应整包公开。
+
+后台售后列表本身不在商城 admin actions 文件里，而是在 `zibpay/functions/admin/admin-ajax.php`：
+
+```php
+function zibpay_ajax_admin_after_sale_table_list()
+{
+    if (!current_user_can('administrator')) {
+        zib_send_json_error(__('您没有权限访问此页面', 'zib_language'));
+    }
+
+    $db_data = zibpay_ajax_get_order_lits_data(array(
+        'status'            => array(-2, 1),
+        'after_sale_status' => array(1, 2, 3, 4, 5),
+        'order_type'        => zib_shop_get_order_type(),
+    ));
+}
+add_action('wp_ajax_admin_after_sale_table_list', 'zibpay_ajax_admin_after_sale_table_list');
+```
+
+列表返回时还会附带待处理和处理中的数量：
+
+```php
+'status_count' => array(
+    '1' => zib_shop_get_after_sale_status_count('1'),
+    '2' => zib_shop_get_after_sale_status_count('2'),
+)
+```
+
+售后记录弹窗同样走 Zibpay 后台 Ajax，但 HTML 来自商城售后函数：
+
+```php
+function zibpay_ajax_admin_after_sale_record_html()
+{
+    if (!_pz('shop_s')) {
+        zib_send_json_error(__('商城系统已关闭', 'zib_language'));
+    }
+
+    if (!current_user_can('administrator')) {
+        zib_send_json_error(__('权限不足', 'zib_language'));
+    }
+
+    $record_html = zib_shop_get_after_sale_record_lists($order_id);
+    zib_send_json_success(array('html' => $record_html));
+}
+```
+
+因此后台售后页有三类动作要分清：
+
+| 动作                                    | 所在文件                                    | 作用                         |
+| --------------------------------------- | ------------------------------------------- | ---------------------------- |
+| `admin_after_sale_table_list`           | `zibpay/functions/admin/admin-ajax.php`     | 查询售后订单列表             |
+| `admin_after_sale_record_html`          | `zibpay/functions/admin/admin-ajax.php`     | 返回售后历史记录 HTML        |
+| `admin_after_sale_handle_submit`        | `inc/functions/shop/admin/actions/ajax.php` | 首次同意或拒绝售后申请       |
+| `admin_after_sale_refund_return_handle` | `inc/functions/shop/admin/actions/ajax.php` | 用户退货后，后台完成退货退款 |
+| `after_sale_express_data`               | `inc/functions/shop/admin/actions/ajax.php` | 查询用户退货或商家回寄物流   |
+
+`admin_after_sale_handle_submit` 使用 `zib_ajax_verify_nonce('admin_order_page_ajax_submit')`，并要求管理员权限。它不会直接信任前端按钮文案，而是读取 `handle_type` 判断是否同意：
+
+```php
+$is_agreed = $handle_type === 'agree';
+```
+
+同意后按售后类型拼 `$handle_data`。`refund` 和 `insured_price` 只带 `refund_channel`；`refund_return`、`replacement`、`warranty` 只带 `return_address`：
+
+```php
+switch ($after_sale_type) {
+    case 'refund':
+    case 'insured_price':
+        $handle_data['refund_channel'] = $refund_channel;
+        break;
+
+    case 'refund_return':
+    case 'replacement':
+    case 'warranty':
+        $handle_data['return_address'] = $return_address;
+        break;
+}
+```
+
+这里的含义是：第一次同意 `refund_return` 时不会退款，只会给用户退货地址并把售后推进到 `progress=1`；第一次同意 `replacement` 或 `warranty` 也只是要求用户先寄回商品。真正结束流程要看后续动作。
+
+`admin_after_sale_refund_return_handle` 是退货退款的二次后台动作。源码只允许 `type=refund_return` 且 `status=2`：
+
+```php
+if ($after_sale_data['type'] != 'refund_return') {
+    zib_send_json_error(__('当前售后类型不支持退货退款', 'zib_language'));
+}
+
+if ($after_sale_data['status'] != 2) {
+    zib_send_json_error(__('当前售后状态不支持退货退款', 'zib_language'));
+}
+```
+
+非积分订单还必须选择退款渠道。通过后调用 `zib_shop_after_sale_refund_return_author_handle()`，它只写入 `refund_return_author_remark`、`refund_channel` 和 `status=3`，最终仍由 `zib_shop_after_sale_to_end()` 完成退款、订单状态、销量、评价状态、售后记录和消息通知。
+
+当前源码里没有看到等价的 `admin_after_sale_replacement_return_handle` 或 `admin_after_sale_warranty_return_handle`。所以换货和保修在主源码可见范围内已经有“同意后等待用户发货”和“物流展示结构”，但缺少“商家回寄商品、用户确认收到、售后结束”的完整后台写入链路。二开补齐时应新增后台 action 写入 `author_return_data`，并补用户确认回寄收货后的结束动作，最后仍调用 `zib_shop_after_sale_to_end()`。
+
+### 售后回寄流程
+
+`refund_return`、`replacement`、`warranty` 在商家同意后都会进入同一段“等待用户发货”流程。核心状态写在 `order_data.after_sale_data`：
+
+| 字段                 | 含义                     |
+| -------------------- | ------------------------ |
+| `status=2`           | 售后处理中               |
+| `progress=1`         | 商家已同意，等待用户发货 |
+| `return_address`     | 商家提供的退货地址       |
+| `author_handle_time` | 商家同意时间             |
+
+用户侧弹窗会显示售后类型、申请信息、商家备注、商家同意时间和退货地址。`progress=1` 时输出退货地址复制按钮，并展示快递公司、快递单号、发货备注输入框：
+
+```php
+$input_box .= '<input type="hidden" name="action" value="order_after_sale_return_express">';
+$input_box .= wp_nonce_field('order_after_sale_return_express', '_wpnonce', false, false);
+```
+
+提交入口是：
+
+```php
+add_action('wp_ajax_order_after_sale_return_express', 'zib_shop_ajax_order_after_sale_return_express');
+```
+
+它会校验：
+
+1. nonce。
+2. 订单存在。
+3. 当前用户是订单用户或管理员。
+4. `after_sale_status === 2`。
+5. `progress === 1`。
+6. 必须填写快递单号和快递公司。
+
+通过后调用：
+
+```php
+zib_shop_after_sale_return_express_handle($order, array(
+    'express_number'       => $express_number,
+    'express_company_name' => $express_company_name,
+    'return_remark'        => $return_remark,
+));
+```
+
+这个函数会写入：
+
+| 字段                                    | 内容                                      |
+| --------------------------------------- | ----------------------------------------- |
+| `user_return_time`                      | 用户退货发货时间                          |
+| `progress=2`                            | 用户已发货，等待商家收货                  |
+| `user_return_data.express_number`       | 用户退货快递单号                          |
+| `user_return_data.express_company_name` | 用户退货快递公司                          |
+| `user_return_data.consignee_phone`      | 来自 `return_address.phone`，用于查询物流 |
+| `user_return_data.return_remark`        | 用户退货备注                              |
+
+随后会通知商家：
+
+```php
+zib_shop_after_sale_user_returned_to_author($order, $order_data);
+```
+
+`progress=2` 时，用户侧弹窗会显示已提交的退货物流，并通过 `zib_shop_get_order_after_sale_return_express_link()` 查看轨迹。这个物流查询仍走 `order_after_sale_express_modal`，默认 `type=user_return`。
+
+等待用户退货不是无限期挂起。主题会用 `zib_shop_get_order_after_sale_return_express_over_time()` 判断是否超时：
+
+```php
+$max_time  = _pz('order_after_sale_return_express_max_day', 7) ?: 7;
+$last_time = strtotime('+' . $max_time . ' day', strtotime($after_sale_data['author_handle_time']));
+if (strtotime(current_time('Y-m-d H:i:s')) > $last_time) {
+    $after_sale_data['progress']      = 4;
+    $after_sale_data['status']        = 4;
+    $after_sale_data['cancel_remark'] = __('退货超时自动取消', 'zib_language');
+
+    zib_shop_after_sale_to_end($order, $after_sale_data);
+}
+```
+
+这个判断会在用户中心订单列表、订单详情弹窗和售后详情里被触发。扩展售后列表或自定义用户中心时，不要只读 `after_sale_status` 后直接渲染按钮；应复用这个超时判断，否则过期售后会继续显示“等待退货”，后台和用户侧状态会不一致。
+
+退货物流轨迹读取统一走 `zib_shop_get_after_sale_express_data($order_id, $type)`。它按 `type` 拼出 meta key：
+
+```php
+$meta_key = 'order_data.after_sale_data.' . ($type === 'user_return' ? 'user_return' : 'author_return') . '_data';
+```
+
+随后读取 `express_number`、`consignee_phone` 和已有 `express_data`。如果最近一次 `query_time` 仍在 `_pz('shop_express_query_interval')` 分钟内，就直接返回缓存；否则调用 `zib_shop_remote_query_express_data($express_number, $phone)`，成功后把去掉 `error` 和 `sdk` 的结果写回 `express_data`。所以自定义售后物流弹窗时，不要绕过这个函数直接请求远程物流接口，否则会丢失主题的查询间隔、缓存和手机号脱敏处理边界。
+
+源码里也预留了 `author_return` 物流读取：
+
+```php
+$type = $type === 'user_return' ? 'user_return' : 'author_return';
+$express_data = zib_shop_get_after_sale_express_data($order_id, $type);
+```
+
+当 `type=author_return` 时，弹窗会读取：
+
+| 字段     | 来源                                                      |
+| -------- | --------------------------------------------------------- |
+| 快递公司 | `after_sale_data.author_return_data.express_company_name` |
+| 快递单号 | `after_sale_data.author_return_data.express_number`       |
+| 收件地址 | `after_sale_data.author_return_data.address`              |
+
+不过当前主源码没有看到 `order_after_sale_confirm` 的 Ajax 注册，也没有看到写入 `author_return_data` 的完整后台 action。文档和二开实现都应把这里当作“预留展示结构”，不要假设换货/保修的商家回寄已经自动闭环。如果要补全换货或保修回寄，需要新增后台写入 `author_return_data` 的处理，并补用户确认收到回寄商品后结束售后的 action。
+
+### 商家退货地址
+
+后台同意 `refund_return`、`replacement`、`warranty` 时，`return_address` 必须传入，并且至少要有 `phone`。这不是普通收货地址字段，而是写入售后数据的商家退货地址：
+
+```php
+$return_address  = !empty($_REQUEST['return_address']) ? $_REQUEST['return_address'] : array();
+$consignee_phone = $return_address['phone'] ?? '';
+
+if ($is_agreed && (!$return_address || !$consignee_phone) && in_array($after_sale_type, array('refund_return', 'replacement', 'warranty'))) {
+    zib_send_json_error(__('请选择退货地址', 'zib_language'));
+}
+```
+
+同意后，主题会把地址放进 `$handle_data['return_address']`，再进入 `zib_shop_after_sale_author_handle()`。售后状态进入 `after_sale_status=2`、`progress=1` 后，用户侧才能看到退货地址并填写退货物流。
+
+商家退货地址本身和买家收货地址使用同一套地址读写函数，但保存位置不同：
+
+| 场景         | Meta key           | 用途                                 |
+| ------------ | ------------------ | ------------------------------------ |
+| 买家收货地址 | `shop_addresses`   | 下单、订单地址修改                   |
+| 商家退货地址 | `author_addresses` | 售后退货、换货、保修时给用户寄回商品 |
+
+地址管理细节见 [商城购物车与确认下单](/docs/api/shop-cart-checkout) 的“收货地址管理”。售后处理里不要临时拼接一个未保存、未校验的退货地址，更不要把买家 `shop_addresses` 当成商家退货地址。
+
+## 售后退款
+
+售后结束入口是：
+
+```php
+zib_shop_after_sale_to_end($order, $after_sale_data);
+```
+
+处理完成且类型为 `refund`、`insured_price`、`refund_return` 时，它会更新退款金额：
+
+| 场景                   | 行为                                   |
+| ---------------------- | -------------------------------------- |
+| 退款到余额             | 调用 `zibpay_update_user_balance()`    |
+| 积分订单退款           | 调用 `zibpay_update_user_points()`     |
+| 未发货仅退款或退货退款 | 调用 `zibpay::refund_order($order_id)` |
+| 退货退款               | 回退商品销量                           |
+| 评价状态已生成         | 可能把评价状态改为不可评价             |
+
+退款字段会进入 `order_data.prices.refund` 和订单 meta `refund_price`。不要只给用户加余额或积分就结束售后，否则订单仍可能显示处理中，后台待办和用户中心计数也不会清掉。
+
+源码里的退款不是单一动作，而是“退款金额记录、资产返还、订单退单、销量和评价状态”几步组合。核心逻辑在 `zib_shop_after_sale_to_end()`：
+
+```php
+if ($after_sale_status == 3 && in_array($after_sale_data['type'], array('refund', 'insured_price', 'refund_return'))) {
+    $price_data = $order_data['prices'];
+    $refund     = $price_data['refund'] ?? 0;
+    $refund += $after_sale_data['price'];
+    $price_data['refund'] = zib_floatval_round($refund);
+
+    if ($after_sale_data['type'] == 'refund_return') {
+        $refund_return_price      = $price_data['pay_price'];
+        $price_data['refund']     = zib_floatval_round($refund_return_price);
+        $after_sale_data['price'] = $refund_return_price;
+    }
+}
+```
+
+退款渠道要按支付模式拆开看：
+
+| 支付模式   | 退款渠道                         | 资产返还                                                  |
+| ---------- | -------------------------------- | --------------------------------------------------------- |
+| 非积分订单 | `refund_channel=balance`         | 调用 `zibpay_update_user_balance()` 把金额退入余额        |
+| 非积分订单 | 其它退款渠道                     | 只记录售后退款渠道和退款金额，外部退款由对应渠道/人工处理 |
+| 积分订单   | 自动写成 `refund_channel=points` | 调用 `zibpay_update_user_points()` 退回积分               |
+
+非积分订单只有在 `refund_channel === 'balance'` 时才会直接写用户余额：
+
+```php
+if ($refund_channel === 'balance' && $after_sale_data['price'] > 0 && !$is_points) {
+    $user_balance_args = array(
+        'order_num' => $order['order_num'],
+        'value'     => $after_sale_data['price'],
+        'type'      => $type_name[$after_sale_data['type']],
+        'desc'      => __('商品[', 'zib_language') . $product_title . ']' . str_replace('商品', '', $type_name[$after_sale_data['type']]),
+    );
+
+    zibpay_update_user_balance($order['user_id'], $user_balance_args);
+}
+```
+
+积分订单不要求后台选择退款渠道，后台 Ajax 里也会跳过 `refund_channel` 必填校验。结束售后时主题强制把退款渠道写成 `points` 并退积分：
+
+```php
+if ($is_points && $after_sale_data['price'] > 0) {
+    $after_sale_data['refund_channel'] = 'points';
+    $user_points_args = array(
+        'order_num' => $order['order_num'],
+        'value'     => $after_sale_data['price'],
+        'type'      => $type_name[$after_sale_data['type']],
+        'desc'      => __('商品[', 'zib_language') . $product_title . ']' . str_replace('商品', '', $type_name[$after_sale_data['type']]),
+    );
+    zibpay_update_user_points($order['user_id'], $user_points_args);
+}
+```
+
+`zibpay::refund_order($order_id)` 只在两类场景触发：未发货的 `refund`，以及 `refund_return`。它会把 Zibpay 主订单状态改为 `-2` 并触发 `order_refunded`；库存恢复、销量回退等监听依赖这个状态变化。已发货后的普通保价退款不会把主订单改成退单，它只记录退款金额并结束售后。
+
+### 原路退款扩展点
+
+Zibpay 里有官方接口原路退款预留文件 `zibpay/functions/zibpay-refund.php`，但当前源码默认不直接实现微信、支付宝、PayPal、Stripe 的退款适配器。统一入口是：
+
+```php
+function zibpay_refund_request(array $args)
+{
+    $order = $args['order'] ?? array();
+    $sdk   = zibpay_get_order_pay_sdk($order);
+    $error = array(
+        'success'   => false,
+        'refund_no' => '',
+        'msg'       => __('退款功能尚未启用', 'zib_language'),
+        'raw'       => array(),
+    );
+
+    return apply_filters('zibpay_refund_' . $sdk, $error, $args);
+}
+```
+
+`zibpay_get_order_pay_sdk()` 会按订单支付方式解析 SDK：
+
+| `pay_type`          | SDK 来源                        |
+| ------------------- | ------------------------------- |
+| `weixin` / `wechat` | `_pz('pay_wechat_sdk_options')` |
+| `alipay`            | `_pz('pay_alipay_sdk_options')` |
+| `paypal`            | `paypal`                        |
+| `stripe`            | `stripe`                        |
+| 其它                | 空字符串                        |
+
+也就是说，售后退款当前主要还是主题自己的售后状态、余额退款、积分退款和人工渠道记录；官方渠道原路退款要由扩展挂对应过滤器实现：
+
+```php
+add_filter('zibpay_refund_official_alipay', 'zib_docs_alipay_refund_request', 10, 2);
+
+function zib_docs_alipay_refund_request($result, $args)
+{
+    if (empty($args['order']['order_num']) || empty($args['refund_price'])) {
+        return $result;
+    }
+
+    return array(
+        'success'   => false,
+        'refund_no' => '',
+        'msg'       => __('请接入支付宝退款接口后返回真实结果', 'zib_language'),
+        'raw'       => array(
+            'order_num'    => $args['order']['order_num'],
+            'refund_price' => $args['refund_price'],
+        ),
+    );
+}
+```
+
+扩展原路退款时不要只在过滤器里请求渠道接口，还要决定它和售后状态的关系：渠道退款成功后，仍应让售后流程写入 `refund_price`、`order_data.prices.refund`、`after_sale_record`，并在需要退单时调用 `zibpay::refund_order()` 触发 `order_refunded`。如果第三方退款失败，应该返回明确错误并阻止售后进入完成态，避免后台显示已退款但资金没有真正退回。
+
+排查退款异常时按这张表看：
+
+| 现象                   | 重点检查                                                                                                               |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| 用户余额没增加         | 是否选择了 `refund_channel=balance`，订单是否不是积分订单，售后是否真正进入 `status=3`                                 |
+| 用户积分没退回         | `order_data.pay_modo` 是否为 `points`，`after_sale_data.price` 是否大于 0                                              |
+| 订单仍显示售后中       | `after_sale_status`、`after_sale_time`、`order_data.after_sale_data.status` 是否由 `zib_shop_after_sale_to_end()` 写入 |
+| 后台订单不是退款状态   | 是否属于未发货仅退款或退货退款；其它售后类型不会调用 `zibpay::refund_order()`                                          |
+| 退款金额重复           | `order_data.prices.refund` 会累加，退货退款会强制设为 `prices.pay_price`，不要重复调用结束函数                         |
+| 售后记录看不到退款渠道 | 检查 `after_sale_record` 里当前售后记录的 `refund_channel`                                                             |
+| 原路退款没有执行       | 是否真的挂了 `zibpay_refund_{sdk}` 过滤器，默认入口只返回“退款功能尚未启用”                                            |
+
+## 买赠兑现
+
+买赠优惠不是支付成功就立即发放。主题会在确认收货统一入口 `zib_shop_order_receive_confirm()` 中读取 `order_data.gift_data`，然后按赠品类型处理：
+
+```php
+$gift_data = $order_meta_data['gift_data'] ?? array();
+if ($gift_data && $order_user_id) {
+    foreach ($gift_data as $gift) {
+        switch ($gift['gift_type']) {
+            case 'vip_1':
+            case 'vip_2':
+                // 更新会员
+                break;
+            case 'auth':
+                // 添加认证资格
+                break;
+            case 'level_integral':
+                // 添加经验值
+                break;
+            case 'points':
+                // 添加积分
+                break;
+        }
+    }
+}
+```
+
+具体兑现边界：
+
+| 赠品类型          | 确认收货时行为                                                          |
+| ----------------- | ----------------------------------------------------------------------- |
+| `vip_1` / `vip_2` | 调用 `zibpay_update_user_vip()`，写入“购买商品赠送”和订单号             |
+| `auth`            | 用户没有认证资格时调用 `zib_add_user_auth()`                            |
+| `level_integral`  | 调用 `zib_add_user_level_integral($user_id, $value, 'shop_gift', true)` |
+| `points`          | 调用 `zibpay_update_user_points()`，写入“购买商品赠送”和订单号          |
+| `product`         | 源码标注“暂未启用”，只展示，不自动创建新订单或发货                      |
+| `other`           | 无需自动处理，通常用于人工履约或说明                                    |
+
+会员赠品还有两个保护：
+
+1. 用户已有更高等级会员时，不会因为赠送低等级会员而降级。
+2. 用户已经是永久会员时，不会重复改有效期。
+
+非永久会员会从当前会员到期时间继续顺延：
+
+```php
+$user_vip_exp_date = $vip_level ? get_user_meta($order_user_id, 'vip_exp_date', true) : current_time('Y-m-d h:i:s');
+$new_vip_exp_date  = $gift['vip_time'] == 'Permanent' ? 'Permanent' : date('Y-m-d 23:59:59', strtotime('+ ' . $gift['vip_time'] . ' days', strtotime($user_vip_exp_date)));
+```
+
+订单详情里会把赠品汇总展示给用户。入口是 `zib_shop_get_order_gift_link()`，点击后打开 `order_gift_modal`：
+
+```php
+add_action('wp_ajax_order_gift_modal', 'zib_shop_ajax_order_gift_modal');
+```
+
+弹窗只允许订单所属用户或管理员查看，会从 `order_data.discount_hit` 中筛选 `discount_type=gift` 且有 `gift_data` 的优惠，再展示会员、认证资格、经验值、积分、商品和其它赠品明细。
+
+扩展赠品时要分清三层：
+
+| 阶段     | 说明                                                                                |
+| -------- | ----------------------------------------------------------------------------------- |
+| 后台配置 | `shop_discount_config.gift_config` 保存原始赠品配置                                 |
+| 确认下单 | 过滤后的 `gift_config` 写入 `opt_data.gift_data`、`discount_hit` 和订单 `gift_data` |
+| 确认收货 | `zib_shop_order_receive_confirm()` 发放真正会自动兑现的权益                         |
+
+如果要新增一种可自动兑现的赠品类型，至少要补齐后台配置过滤、确认下单展示、订单赠品弹窗展示和确认收货发放逻辑。只在前端 `giftModal()` 里显示，用户实际不会获得权益。
+
+## 商品优惠与优惠码的区别
+
+商城里有两类优惠：
+
+| 类型          | 主要入口                                                          | 使用场景                             |
+| ------------- | ----------------------------------------------------------------- | ------------------------------------ |
+| 商品优惠政策  | `shop_discount` 分类法、`zib_shop_get_product_discount()`         | 商品、商家、整单、用户条件等自动命中 |
+| Zibpay 优惠码 | `zibpay_is_coupon_available()`、`zibpay_get_coupon_order_price()` | 用户输入优惠码，订单创建时抵扣       |
+
+商品优惠在确认下单数据里计算。运费先按商品维度计算，再按商品优惠政策计算折扣：
+
+```php
+if ($item_discount) {
+    foreach ($item_discount as $discount_item_args) {
+        if (!$discount_item_args['is_valid']) {
+            continue;
+        }
+
+        if (!zib_shop_discount_price_limit_check($discount_item_args, $item_discount_data_dependency)) {
+            continue;
+        }
+    }
+}
+```
+
+优惠政策支持金额门槛、用户限制、时间限制、优先级、作用范围和立减/折扣/赠品等策略。
+
+优惠活动的后台字段、`shop_discount_config` 保存结构、有效性判断、买赠过滤、商品快速/批量编辑挂载活动，以及旧订单价格兼容细节见 [商城后台与订单排查](/docs/api/shop-admin-diagnostics)。
+
+优惠码在 Zibpay 创建订单时处理：
+
+```php
+$coupon_code = !empty($_REQUEST['coupon']) ? esc_sql($_REQUEST['coupon']) : '';
+if ($coupon_code && zibpay_is_allow_coupon($order_type, $post_id) && $payment_method !== 'card_pass') {
+    $coupon_data = zibpay_is_coupon_available($coupon_code, $order_type, $post_id);
+
+    if (!empty($coupon_data['error'])) {
+        zib_send_json_error(array('error_code' => 'coupon_error', 'msg' => $coupon_data['msg'], 'type' => 'warning'));
+    }
+
+    $old_pay_price         = $_pay_price;
+    $_pay_price            = zibpay_get_coupon_order_price($_pay_price, $coupon_data);
+    $_pay_detail['coupon'] = zib_floatval_round($old_pay_price - $_pay_price);
+
+    $__mate_order_data['coupon_id']        = $coupon_data['id'];
+    $__mate_order_data['coupon_data']      = array(
+        'id'       => $coupon_data['id'],
+        'password' => $coupon_data['password'],
+        'discount' => $coupon_data['discount'],
+    );
+    $__mate_order_data['prices']['coupon'] = $_pay_detail['coupon'];
+}
+```
+
+优惠码支付成功后会在 `payment_order_success` 里更新使用次数：
+
+```php
+add_action('payment_order_success', 'zibpay_payment_order_use_coupon', 10);
+```
+
+所以不要在下单前就把优惠码标记为已用。订单可能未支付、关闭、切换支付方式或校验失败。
+
+### 优惠码数据结构与使用时机
+
+优惠码和资产卡密、邀请码、自动发货卡密共用 `ZibCardPass` 表，但它不是“卡密支付”。优惠码本质是订单创建阶段的价格抵扣数据，支付方式仍然是微信、支付宝、余额等真实支付方式。源码里明确禁止卡密支付叠加优惠码：
+
+```php
+if ($coupon_code && zibpay_is_allow_coupon($order_type, $post_id) && $payment_method !== 'card_pass') {
+    $coupon_data = zibpay_is_coupon_available($coupon_code, $order_type, $post_id);
+}
+```
+
+允许使用优惠码的入口是 `zibpay_is_allow_coupon($pay_type, $post_id)`。默认禁止这些订单类型：
+
+| `order_type` | 含义     | 原因                           |
+| ------------ | -------- | ------------------------------ |
+| `4`          | 购买会员 | 使用 `vip_coupon` 类型单独处理 |
+| `8`          | 余额充值 | 避免用优惠码给资产充值做折扣   |
+| `9`          | 购买积分 | 避免用优惠码给积分资产做折扣   |
+
+是否允许普通内容或商品使用优惠码有两层开关：
+
+| 开关                    | 说明                             |
+| ----------------------- | -------------------------------- |
+| `_pz('coupon_post_s')`  | 全局允许付费内容或商品使用优惠码 |
+| `posts_zibpay.coupon_s` | 单个文章、资源或商品开启优惠码   |
+
+优惠码描述也有同样的覆盖顺序。`zibpay_get_coupon_desc()` 会先读 `posts_zibpay.coupon_desc`，为空时再使用全局 `_pz('coupon_desc')`。因此二开商品页或支付弹窗时，不要只显示全局说明，否则单个商品设置的优惠码说明会丢失。
+
+后台生成优惠码最终会调用 `zibpay_generate_coupon()`，写入 `ZibCardPass`：
+
+```php
+function zibpay_generate_coupon($type = 'coupon', $num = 20, $post_id = 0, $meta = array(), $rand_password = 35, $other = '')
+{
+    $time = current_time('mysql');
+
+    for ($i = 1; $i <= $num; $i++) {
+        ZibCardPass::add(array(
+            'password'      => ZibCardPass::rand_password($rand_password),
+            'type'          => $type,
+            'post_id'       => $post_id,
+            'create_time'   => $time,
+            'modified_time' => $time,
+            'status'        => '0',
+            'meta'          => $meta,
+            'other'         => $other,
+        ));
+    }
+
+    return true;
+}
+```
+
+优惠码常见字段：
+
+| 字段                  | 来源                    | 说明                                           |
+| --------------------- | ----------------------- | ---------------------------------------------- |
+| `password`            | `ZibCardPass` 主字段    | 用户输入的优惠码                               |
+| `type`                | `coupon` / `vip_coupon` | 普通优惠码或会员优惠码                         |
+| `post_id`             | `ZibCardPass` 主字段    | `0` 表示通用，指定 ID 表示仅当前内容或商品可用 |
+| `status`              | `0` / `used`            | `0` 可用，`used` 不再可用                      |
+| `meta.discount.type`  | `multiply` 或其它       | `multiply` 为折扣，其它按立减处理              |
+| `meta.discount.val`   | 数字                    | 折扣倍率或立减金额                             |
+| `meta.title`          | 字符串                  | 优惠码名称                                     |
+| `meta.reuse`          | 数字                    | 可使用次数，达到次数后标记为 `used`            |
+| `meta.used_count`     | 数字                    | 已使用次数                                     |
+| `meta.used_order_num` | 数组                    | 已使用订单号                                   |
+| `meta.expire_time`    | 时间字符串              | 过期时间                                       |
+| `other`               | 字符串                  | 备注或分组标识                                 |
+
+`zibpay_filter_coupon_data()` 会把 `meta` 展开成业务字段，并生成 `discount_text`。如果优惠码已经过期且状态还不是 `used`，它会顺手更新数据库：
+
+```php
+if ($coupon['expire_time'] && current_time('timestamp') > strtotime($coupon['expire_time']) && $coupon['status'] !== 'used') {
+    ZibCardPass::update(array('id' => $coupon['id'], 'status' => 'used'));
+    $coupon['status'] = 'used';
+}
+```
+
+这意味着“读取优惠码”可能带来状态修正副作用。后台列表、导出或自定义检查工具如果调用了 `zibpay_filter_coupon_data()`，过期优惠码会被标记为已用状态。需要只读预览时，要先明确是否接受这个副作用。
+
+前端 Ajax 校验入口是 `coupon_submit`：
+
+```php
+function zibpay_ajax_coupon_submit()
+{
+    $coupon     = !empty($_REQUEST['coupon']) ? esc_sql($_REQUEST['coupon']) : '';
+    $post_id    = !empty($_REQUEST['post_id']) ? (int) $_REQUEST['post_id'] : 0;
+    $order_type = !empty($_REQUEST['order_type']) ? (int) $_REQUEST['order_type'] : 0;
+
+    if (!$coupon) {
+        zib_send_json_error(__('请输入优惠码', 'zib_language'));
+    }
+
+    $coupon_data = zibpay_is_coupon_available($coupon, $order_type, $post_id);
+    if (!empty($coupon_data['error'])) {
+        zib_send_json_error($coupon_data['msg']);
+    }
+
+    $coupon_data['msg'] = __('优惠码可用，请尽快使用，以免被抢用或过期', 'zib_language');
+    zib_send_json_success($coupon_data);
+}
+```
+
+这个接口只做“当前看起来可用”的提示，不会锁券，也不会占用次数。真正扣减仍在订单支付成功后由 `zibpay_payment_order_use_coupon()` 完成：
+
+| 阶段           | 做什么                                                                                          |
+| -------------- | ----------------------------------------------------------------------------------------------- |
+| 前端 Ajax 校验 | 检查优惠码是否存在、是否适配商品、是否超过次数、是否过期                                        |
+| 创建订单       | 重新校验优惠码，计算抵扣金额，写入 `other.coupon_id`、`order_data.coupon_data`、`prices.coupon` |
+| 支付成功       | `payment_order_success` 更新 `used_count`、`used_order_num`，必要时把 `status` 改为 `used`      |
+
+导出优惠码时，`wp_ajax_card_pass_export` 会在 `type=coupon` 时使用 `zib_card_pass_export_coupon_map()`。导出字段包括优惠码、商品 ID、优惠折扣、可使用次数、已使用次数、名称和备注。扩展导出时优先复用这个 map，不要自己解析 `meta` 后遗漏复用次数或过期状态。
+
+如果要做自定义优惠码用途，建议新增清晰的 `type` 或 `other` 标识，并继续复用 `zibpay_is_coupon_available()`、`zibpay_get_coupon_order_price()` 和 `payment_order_success` 的状态更新时机。不要在 `coupon_submit` 里提前占用优惠码，也不要把 `ZibCardPass` 中的 `coupon` 当成可以直接发货给用户的普通卡密。
+
+## 风险清单
+
+- 不要绕过 `zib_shop_get_order_type()`，商城订单逻辑只处理商城订单。
+- 不要直接改 `shipping_status`，确认收货、评价、后台列表和用户中心计数都依赖它。
+- 不要把自动发货失败的空内容当成已发货。
+- 不要在公开页面展示完整收件人、手机号、物流原始响应或售后备注。
+- 不要在订单未支付前把优惠码标记为已用。
+- 不要把商品优惠和 Zibpay 优惠码混成同一套数据结构。
+- 不要把优惠码当成卡密支付，`payment_method=card_pass` 不允许叠加优惠码。
+- 不要忽略优惠码读取时的过期状态修正，`zibpay_filter_coupon_data()` 可能把过期券标记为 `used`。
+- 不要把买赠权益放到支付成功时发放；主题是在确认收货时发放可自动兑现的赠品。
+- 不要把 `product`、`other` 赠品当成自动履约能力，它们当前只展示或需要人工处理。
+- 不要只退余额/积分而不结束售后状态。
+- 不要在售后处理中重复退货、重复退款或重复恢复库存。
+- 不要把买家收货地址当成商家退货地址，售后退货地址来自商家侧 `author_addresses` 或后台处理时选择的 `return_address`。
+- 不要把后台 `admin_shipping_table_list`、`admin_after_sale_table_list` 返回的数据直接暴露给普通用户。
+- 不要给售后 Ajax 省略 nonce、用户归属校验和订单状态校验。
+- 不要假设 `replacement`、`warranty` 的商家回寄已经自动闭环；当前可见源码主要提供用户退货、商家处理和 `author_return` 物流展示结构。
+
+后台商品列表、商品评价后台展示、后台订单查询参数、用户中心计数缓存和异常订单排查清单见 [商城后台与订单排查](/docs/api/shop-admin-diagnostics)。
+
+用户中心订单卡片、订单详情弹窗、联系商家、收货地址修改申请，以及发货和售后通知矩阵见 [商城用户中心与消息通知](/docs/api/shop-user-center-messages)。

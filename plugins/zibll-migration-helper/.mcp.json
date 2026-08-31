@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "zibll-migration-helper": {
+      "command": "npx",
+      "args": ["-y", "zibll-docs-mcp"]
+    }
+  }
+}

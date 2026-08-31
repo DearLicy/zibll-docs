@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "zibll-wp-ai-dev": {
+      "command": "npx",
+      "args": ["-y", "zibll-docs-mcp"]
+    }
+  }
+}

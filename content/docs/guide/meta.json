@@ -1,0 +1,21 @@
+{
+  "title": "使用指南",
+  "description": "站点介绍、源码结构、常见问题与开发资料入口",
+  "icon": "BookOpen",
+  "root": true,
+  "pages": [
+    "---介绍---",
+    "../index",
+    "learning-path",
+    "../source-structure",
+    "site-settings",
+    "account-verification",
+    "media-lightbox",
+    "official-knowledge-base",
+    "distillation-roadmap",
+    "../faq",
+    "---制作---",
+    "plugin-making",
+    "subtheme-making"
+  ]
+}

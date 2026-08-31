@@ -1,0 +1,216 @@
+---
+title: 前台投稿与编辑
+description: 梳理子比主题前台投稿、草稿、审核、付费内容、特色封面、删除文章与扩展 Hook。
+---
+
+## 它负责什么
+
+子比主题的前台投稿不是简单的 `wp_insert_post()` 表单。它把登录态、投稿开关、用户权限、内容审核、草稿、付费内容、特色封面、专题、高级筛选和媒体归属串成了一条完整流程。
+
+做投稿相关二次开发时，优先沿用主题已有入口，只在确认过的 Hook、Filter、Meta 或 Ajax 节点上扩展。这样可以保留主题原本的审核、权限、通知、附件归属和付费校验。
+
+## 核心文件
+
+```txt
+pages/newposts.php
+action/new_posts.php
+inc/functions/zib-frontend-set.php
+inc/functions/zib-attachment.php
+```
+
+| 文件                                 | 作用                                                   |
+| ------------------------------------ | ------------------------------------------------------ |
+| `pages/newposts.php`                 | 前台投稿页模板、按钮、分类、标签、封面、付费内容输入区 |
+| `action/new_posts.php`               | 投稿保存、草稿、删除、付费 Meta、特色封面保存          |
+| `inc/functions/zib-frontend-set.php` | 登录用户在前台快速编辑文章、分类法、版块等对象         |
+| `inc/functions/zib-attachment.php`   | 投稿后附件归属、媒体关系整理                           |
+
+## Ajax 动作
+
+| Action              | 回调                         | 游客 | 用途                 |
+| ------------------- | ---------------------------- | ---- | -------------------- |
+| `posts_save`        | `zib_ajax_new_posts`         | 是   | 提交发布或提交审核   |
+| `posts_draft`       | `zib_ajax_new_posts`         | 是   | 保存草稿             |
+| `new_post_delete`   | `zib_ajax_new_post_delete`   | 否   | 删除用户可管理的文章 |
+| `frontend_set_save` | `zib_frontend_set_save_ajax` | 否   | 前台快速设置保存     |
+
+`posts_save` 与 `posts_draft` 共用同一个回调，主题通过请求里的 `action` 决定是走发布校验还是草稿保存。
+
+## 投稿页开关
+
+常见开关和权限来自主题配置与用户能力：
+
+| 项                                                 | 含义                         |
+| -------------------------------------------------- | ---------------------------- |
+| `_pz('post_article_s')`                            | 是否启用前台投稿             |
+| `zib_is_close_sign()`                              | 站点是否关闭登录注册相关入口 |
+| `zib_current_user_can('new_post_add')`             | 是否允许新建文章             |
+| `zib_current_user_can('new_post_edit', $posts_id)` | 是否允许编辑文章             |
+| `zib_current_user_can('new_post_delete', $post)`   | 是否允许删除文章             |
+| `zib_current_user_can('new_post_upload_img')`      | 投稿编辑器是否允许上传图片   |
+| `zib_current_user_can('new_post_upload_video')`    | 投稿编辑器是否允许上传视频   |
+| `zib_current_user_can('new_post_upload_file')`     | 投稿编辑器是否允许上传附件   |
+| `zib_current_user_can('new_post_iframe_video')`    | 是否允许嵌入 iframe 视频     |
+| `zib_current_user_can('new_post_hide')`            | 是否允许隐藏内容能力         |
+| `zib_current_user_can('new_post_pay')`             | 是否允许设置付费阅读         |
+| `zib_current_user_can('new_post_pay_download')`    | 是否允许设置付费资源         |
+
+扩展投稿能力时，不要只检查当前用户是否登录。主题实际判断的是“用户是否能对这个动作和这个对象执行操作”。
+
+## 保存流程
+
+投稿保存的大致顺序：
+
+1. 判断是否需要人机验证：`_pz('verification_newposts_s')`。
+2. 读取 `posts_id`，判断新增或编辑。
+3. 使用 `zib_current_user_can()` 校验新增、编辑权限。
+4. 校验标题、内容、分类。
+5. 对 `posts_save` 进行标题长度、内容长度、分类必填等发布校验。
+6. 根据 `audit_new_post`、`ZibAudit::is_audit()` 和用户免审能力决定 `post_status`。
+7. 未登录投稿使用 `_pz('post_article_user', 1)` 作为作者，并把投稿人信息拼入标题。
+8. 触发 `zib_pre_insert_post`。
+9. 调用 `wp_insert_post($postarr, 1)`。
+10. 保存付费内容：`zib_ajax_newpost_save_pay($in_id, false)`。
+11. 保存特色封面：`zib_ajax_newpost_save_featured($in_id, false)`。
+12. 保存专题和高级筛选字段。
+13. 触发新增、编辑或待审核 Hook。
+14. 返回子比统一 JSON 响应。
+
+## 关键 Hook
+
+| Hook                    | 触发时机              | 适合做什么                                        |
+| ----------------------- | --------------------- | ------------------------------------------------- |
+| `zib_pre_insert_post`   | `wp_insert_post()` 前 | 最后调整 `$postarr`、记录前置日志、做额外校验     |
+| `new_add_posts`         | 新文章保存成功后      | 处理附件归属、通知、同步搜索索引、初始化业务 Meta |
+| `new_edit_posts`        | 编辑文章保存成功后    | 刷新扩展数据、同步索引、记录编辑日志              |
+| `new_posts_pending`     | 投稿进入待审核后      | 给站长或审核人发送通知                            |
+| `zib_frontend_set_save` | 前台设置保存时        | 保存额外前台设置字段                              |
+
+示例结构：
+
+```php
+add_action('new_add_posts', 'zib_docs_after_new_post', 10, 1);
+
+function zib_docs_after_new_post($post)
+{
+    if (empty($post->ID) || 'post' !== $post->post_type) {
+        return;
+    }
+
+    update_post_meta($post->ID, 'custom_review_flag', 1);
+}
+```
+
+这类扩展只保存自己的数据，不接管主题原有保存流程。
+
+## 付费内容
+
+投稿页使用 `posts_zibpay` 作为文章付费配置的 Meta。保存函数是：
+
+```php
+zib_ajax_newpost_save_pay($post_id, false);
+```
+
+常见字段：
+
+| 字段                            | 含义                                          |
+| ------------------------------- | --------------------------------------------- |
+| `pay_type`                      | `no` 为不启用，`1` 为付费阅读，`2` 为付费资源 |
+| `pay_modo`                      | `0` 为现金，`points` 为积分                   |
+| `pay_price`                     | 普通现金价格                                  |
+| `points_price`                  | 普通积分价格                                  |
+| `vip_1_price` / `vip_2_price`   | 会员现金价格                                  |
+| `vip_1_points` / `vip_2_points` | 会员积分价格                                  |
+| `pay_doc`                       | 付费内容摘要                                  |
+| `pay_download`                  | 付费资源列表                                  |
+
+主题会重新校验价格、积分、会员价和资源字段。新增付费类型时，不要只改前端表单，也要确认 Zibpay 阅读、下载、订单和权限判断链路是否识别新数据。视频投稿、视频封面、编辑器视频按钮、iframe 嵌入、剧集切换和付费视频字段见 [视频资源与播放器](/docs/api/video-resources-player)。
+
+## 特色封面
+
+特色封面通过 `featured_data` 保存：
+
+```php
+zib_ajax_newpost_save_featured($post_id, false);
+```
+
+支持类型：
+
+| `featured_data[type]` | 保存结果                                  |
+| --------------------- | ----------------------------------------- |
+| `image`               | 保存 `cover_image` 与 `thumbnail_url`     |
+| `video`               | 保存 `featured_video`，可同时保存视频封面 |
+| `slide`               | 保存 `featured_slide`                     |
+| `close`               | 清空封面、视频、幻灯片相关字段            |
+
+如果扩展投稿页的封面能力，建议继续提交 `featured_data`，让主题函数处理 Meta 写入，不要在 Ajax 外另写一套封面保存逻辑。
+
+## 前台快速设置
+
+`inc/functions/zib-frontend-set.php` 提供前台编辑对象设置的统一弹窗和保存入口。主题先生成输入项，再用 Filter 允许模块补充字段：
+
+```php
+add_filter('zib_frontend_set_input_array', 'zib_docs_frontend_set_input', 10, 5);
+
+function zib_docs_frontend_set_input($page_input, $post_id, $type, $taxonomy, $post_type)
+{
+    if ('post' !== $type) {
+        return $page_input;
+    }
+
+    $page_input[] = array(
+        'id'    => 'custom_notice',
+        'type'  => 'text',
+        'title' => '补充说明',
+    );
+
+    return $page_input;
+}
+```
+
+保存时使用：
+
+```php
+add_action('zib_frontend_set_save', 'zib_docs_frontend_set_save', 10, 2);
+
+function zib_docs_frontend_set_save($object_data, $type)
+{
+    if ('post' !== $type || empty($object_data['id'])) {
+        return;
+    }
+
+    $value = !empty($_POST['custom_notice']) ? sanitize_text_field($_POST['custom_notice']) : '';
+    zib_update_post_meta($object_data['id'], 'custom_notice', $value);
+}
+```
+
+这个模式适合给前台设置弹窗增加字段。保存时仍要检查对象类型、对象 ID、用户权限和字段来源。
+
+## 删除文章
+
+删除入口先生成确认弹窗，再走 `new_post_delete` Ajax。主题会检查：
+
+```php
+zib_current_user_can('new_post_delete', $post);
+```
+
+扩展删除逻辑时，不要在前端隐藏按钮后就认为安全。服务端必须重新判断文章是否存在、是否属于当前流程、当前用户是否有删除能力、文章状态是否允许删除。
+
+## 扩展建议
+
+- 增加投稿字段时，优先使用主题前台设置 Filter、投稿表单扩展点或保存 Hook。
+- 保存扩展字段时使用 `sanitize_text_field()`、`wp_kses_post()`、`absint()`、`zib_update_post_meta()` 等合适的清洗和封装。
+- 付费、下载、余额、积分、订单相关字段必须回到 Zibpay 权限链路里验证。
+- 媒体上传和附件归属交给主题已有上传、合并、归属 Hook 处理。
+- 自动发布、自动审核、同步索引这类动作适合放到保存后的 Action，不要直接绕过 `zib_ajax_new_posts()`。
+
+## 常见风险
+
+| 风险                          | 说明                                         |
+| ----------------------------- | -------------------------------------------- |
+| 绕过 `zib_current_user_can()` | 会让用户编辑或删除不该操作的文章             |
+| 绕过审核状态                  | 会破坏人工审核、API 审核和通知流程           |
+| 直接信任前端价格              | 付费内容可能被提交成异常金额或异常积分       |
+| 单独保存附件                  | 容易导致媒体库归属、权限隔离、清理逻辑失效   |
+| 覆盖 `posts_zibpay`           | 可能丢失原有 VIP、下载、分佣、购买统计等字段 |
+| 把草稿当发布                  | `posts_draft` 校验更宽，不能用它代替正式发布 |

@@ -1,0 +1,104 @@
+---
+title: Provider 与 Connector
+description: 梳理 OpenAI、Anthropic Provider、API Key 来源、模型能力和后台连接配置。
+---
+
+## Provider 做什么
+
+Provider 插件负责把具体模型平台接入 WordPress AI Client。业务代码调用 `wp_ai_client_prompt()`，Provider 负责把请求转换成平台接口格式。
+
+OpenAI 和 Anthropic Provider 的关键规则已经由本站文档整理。用户只提供子比主题源码时，AI 不应该因为看不到 Provider 源码就停下来；只要运行站点安装并配置了 Provider，就可以按本页规则开发上层功能。
+
+OpenAI 和 Anthropic Provider 的主入口都很轻：
+
+```php
+add_action( 'init', __NAMESPACE__ . '\\register_provider', 5 );
+```
+
+注册逻辑通常是：
+
+1. 检查 `WordPress\AiClient\AiClient` 类是否存在。
+2. 获取 `AiClient::defaultRegistry()`。
+3. 如果 provider 尚未注册，就 `registerProvider()`。
+
+## OpenAI Provider
+
+| 项          | 值                                                   |
+| ----------- | ---------------------------------------------------- |
+| Provider ID | `openai`                                             |
+| Base URL    | `https://api.openai.com/v1`                          |
+| 鉴权        | API Key                                              |
+| 文本接口    | Responses API，路径 `responses`                      |
+| 图片接口    | Images API                                           |
+| 能力        | 文本生成、聊天历史、部分模型支持多模态输入、图片生成 |
+
+OpenAI provider 会把 AI Client 的请求整理成 Responses API 需要的结构。结构化输出时，会尽量使用 JSON schema 参数。
+
+## Anthropic Provider
+
+| 项          | 值                                                   |
+| ----------- | ---------------------------------------------------- |
+| Provider ID | `anthropic`                                          |
+| Base URL    | `https://api.anthropic.com/v1`                       |
+| 鉴权        | API Key                                              |
+| 文本接口    | Messages API，路径 `messages`                        |
+| 能力        | 文本生成、聊天历史、工具调用、部分模型支持多模态输入 |
+
+Anthropic Messages API 需要 `max_tokens`。Provider 通常会做兜底，但开发时仍建议你在重要功能里显式设置 `using_max_tokens()`。
+
+## API Key 来源
+
+Connector API 会把 provider 转成后台连接信息，并给 API Key 生成默认配置。
+
+| Provider  | Option                            | 常量                | 环境变量            |
+| --------- | --------------------------------- | ------------------- | ------------------- |
+| OpenAI    | `connectors_ai_openai_api_key`    | `OPENAI_API_KEY`    | `OPENAI_API_KEY`    |
+| Anthropic | `connectors_ai_anthropic_api_key` | `ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY` |
+
+常量示例：
+
+```php
+define( 'OPENAI_API_KEY', 'sk-...' );
+define( 'ANTHROPIC_API_KEY', 'sk-ant-...' );
+```
+
+生产环境更推荐放在环境变量或主机密钥管理里，不要写进插件代码、主题文件、前端 JS、文档截图或错误日志。
+
+## 后台设置
+
+REST 设置返回时会遮罩密钥，只显示末尾几位。更新密钥时，Provider 会尝试校验；不合法的密钥会被清空或提示失败。
+
+面向用户的后台文案建议写清楚：
+
+- 这个连接用于什么 AI 功能。
+- API Key 从哪里获取。
+- Key 不会展示给普通用户。
+- Key 错误时哪些功能会不可用。
+- 是否由站点统一付费，还是用户自己提供 Key。
+
+## 模型能力
+
+不同 Provider 和模型能力不同。开发时不要只判断“有 provider”，还要判断 capability。
+
+| 能力               | 常见用途                       |
+| ------------------ | ------------------------------ |
+| `text_generation`  | 摘要、标题、SEO、审核建议      |
+| `image_generation` | 生成图片、封面、素材           |
+| 多模态输入         | 根据图片生成 alt、识别截图内容 |
+| 工具调用           | 让模型先读取站点上下文再回答   |
+
+AI 插件提供的模型发现接口：
+
+```txt
+GET /wp-json/ai/v1/providers?capability=text_generation
+```
+
+后台下拉模型时，应优先使用这个接口，而不是写死模型 ID。
+
+## 开发建议
+
+- 业务代码优先依赖 AI Client，不直接写 OpenAI 或 Anthropic HTTP 请求。
+- 只有确实需要固定模型时，才使用 `using_provider()` 和 `using_model()`。
+- 用户后台允许选择模型时，先按 capability 拉取可用 Provider。
+- 保存设置时不要把完整 API Key 返回到浏览器。
+- 错误提示给用户看“连接不可用”，详细响应写日志。

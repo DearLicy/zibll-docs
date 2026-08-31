@@ -1,0 +1,367 @@
+---
+title: Hook 与过滤器
+description: 子比主题 Action、Filter、动态 Hook、业务流程 Hook 的真实分布、参数约定与使用边界。
+---
+
+## Hook 使用原则
+
+子比主题源码大量保留 WordPress 的 Action/Filter 风格。阅读 Hook 时先分清：
+
+| 类型              | 适合做什么                                                  |
+| ----------------- | ----------------------------------------------------------- |
+| `do_action()`     | 在流程节点追加通知、日志、同步、统计、发放权益              |
+| `apply_filters()` | 修改查询参数、按钮列表、标题、HTML 片段、权限判断、配置数组 |
+| 动态 Hook         | 按类型、页面、订单类型、标签页生成扩展点                    |
+
+不要为了修改一个返回值去改主题核心文件。主题已经把很多前台页面、用户中心、论坛、商城、支付、消息的关键节点暴露出来。
+
+## 加载完成 Hook
+
+主题入口链路末尾在 `inc/inc.php` 执行：
+
+```php
+do_action('zib_require_end');
+```
+
+这个 Hook 表示主题主要模块已经 require 完成。适合在主题内部后置逻辑里做依赖主题函数的初始化。
+
+常见判断方式：
+
+```php
+add_action('zib_require_end', 'zib_custom_after_require');
+
+function zib_custom_after_require()
+{
+    if (!function_exists('zib_get_user_center_url')) {
+        return;
+    }
+
+    // 依赖主题函数的逻辑放在这里。
+}
+```
+
+如果只是注册后台字段、小工具或 post type 相关逻辑，通常也可以挂在 `after_setup_theme`、`init`、`widgets_init` 等 WordPress 原生 Hook 上。
+
+## 本地 Hook 追踪方式
+
+本地源码校准时不要只搜完整 Hook 名。子比主题里既有固定 Hook，也有按类型拼接的动态 Hook。推荐按下面顺序追踪：
+
+```bash
+rg -n "do_action\\('zib_require_end|apply_filters\\('zib_locale_frontend_ajax" 主题插件子主题/zibll
+rg -n "do_action\\('bbs_'|apply_filters\\('main_search_tab_content_'" 主题插件子主题/zibll/inc/functions
+rg -n "add_action\\('wp_ajax|add_action\\('wp_ajax_nopriv" 主题插件子主题/zibll/action 主题插件子主题/zibll/zibpay/functions
+```
+
+当前本地证据里有几个需要优先记住的边界：
+
+- `zib_require_end` 在 `inc/inc.php` 末尾触发，是主题主要模块加载完的标志。
+- `inc/dependent.php` 通过 `zib_locale_frontend_ajax_prefixes` 和 `zib_locale_frontend_ajax_actions` 暴露前台 Ajax 语言上下文白名单。
+- 论坛、商城、搜索大量使用动态 Hook，例如 `bbs_{$page_type}_page_content`、`shop_{$type}_page_content`、`main_search_tab_content_{$type}`，添加扩展前要先确认当前 `$page_type` 或 `$type`。
+- 样本插件 `zibll-security-guard` 用 `plugins_loaded` 做通用防护，再用 `zib_require_end` 注册依赖子比函数的后台设置。
+- 样本插件 `zib-sponsor` 用 `plugins_loaded` 加载前台函数、API 和小工具，再用 `zib_require_end` 加载后台 CSF 设置。
+
+如果要写给多站复用的插件，优先用唯一前缀的函数名、option key 和 Ajax action；不要沿用旧样本里的通用常量或同名函数。
+
+## 用户流程 Hook
+
+登录注册文件：
+
+```txt
+action/sign_register.php
+```
+
+用户资料文件：
+
+```txt
+action/user.php
+inc/functions/user/
+```
+
+常见 Hook：
+
+| Hook                         | 类型   | 参数                                     |
+| ---------------------------- | ------ | ---------------------------------------- |
+| `wp_login`                   | Action | `$user_login, $user`                     |
+| `registration_errors`        | Filter | `$errors, $sanitized_user_login, $email` |
+| `allow_password_reset`       | Filter | `$allow, $user_id`                       |
+| `zib_user_bind_email`        | Action | `$cuid, $captcha_val, $email`            |
+| `zib_user_bind_phone`        | Action | `$cuid, $captcha_val, $old_phone`        |
+| `zib_user_update_bind_phone` | Action | `$cuid, $captcha_val, $old_phone`        |
+| `user_save_custom_avatar`    | Action | `$cuid, $img_id, $image_url`             |
+| `updata_user_ban`            | Action | `$user_id, $type, $info`                 |
+| `user_checkined`             | Action | `$user_id, $the_data`                    |
+| `zib_user_can`               | Filter | `$is_can, $user_id, $capability, $args`  |
+
+示例：邮箱绑定后同步用户状态：
+
+```php
+add_action('zib_user_bind_email', 'zib_sync_user_email_bound', 20, 3);
+
+function zib_sync_user_email_bound($cuid, $captcha_val, $email)
+{
+    if (!$cuid || !is_email($email)) {
+        return;
+    }
+
+    // 这里只处理绑定后的同步逻辑，不重新写 user_email。
+}
+```
+
+## 展示与页面 Hook
+
+文章页面和内容区域：
+
+```txt
+inc/functions/zib-single.php
+inc/functions/zib-theme.php
+inc/functions/zib-footer.php
+```
+
+常见 Hook：
+
+| Hook                            | 类型   | 说明                     |
+| ------------------------------- | ------ | ------------------------ |
+| `zib_single_before`             | Action | 单篇页面主体前           |
+| `zib_single_after`              | Action | 单篇页面主体后           |
+| `zib_single_box_content_before` | Action | 单篇内容盒子前           |
+| `zib_single_box_content_after`  | Action | 单篇内容盒子后           |
+| `zib_posts_content_before`      | Action | 文章内容前，参数 `$post` |
+| `zib_posts_content_after`       | Action | 文章内容后，参数 `$post` |
+| `zib_article_content_after`     | Action | 文章正文后，参数 `$post` |
+| `zib_is_show_sidebar`           | Filter | 是否显示侧栏             |
+| `zib_theme_mode`                | Filter | 当前主题模式             |
+| `zib_add_bodyclass`             | Filter | body class               |
+| `zib_float_right`               | Filter | 右侧悬浮按钮             |
+| `footer_tabbar`                 | Filter | 手机底部 Tab             |
+
+Filter 示例：追加 body class：
+
+```php
+add_filter('zib_add_bodyclass', 'zib_add_custom_body_class');
+
+function zib_add_custom_body_class($class)
+{
+    if (is_singular('post')) {
+        $class .= ' single-post-custom';
+    }
+
+    return trim($class);
+}
+```
+
+## 用户展示 Filter
+
+用户信息展示相关：
+
+```txt
+inc/functions/zib-user.php
+inc/functions/user/page.php
+```
+
+常见 Filter：
+
+| Hook                        | 参数                     | 用途                |
+| --------------------------- | ------------------------ | ------------------- |
+| `user_show_name`            | `$html, $user_id`        | 修改用户显示名 HTML |
+| `user_name_badge`           | `$badge, $user_id`       | 修改用户名旁徽章    |
+| `user_avatar_badge`         | `$badge, $user_id`       | 修改头像徽章        |
+| `user_count_badges`         | `$html, $user_id`        | 用户统计徽章        |
+| `author_main_tabs_array`    | `$tabs_args, $author_id` | 作者页主 Tab        |
+| `user_center_page_sidebar`  | `$html`                  | 用户中心侧栏        |
+| `user_center_account_setup` | `$html, $user_id, $user` | 用户账户设置区      |
+| `user_page_header_desc`     | `$desc, $user_id`        | 用户主页描述        |
+
+Filter 必须返回原类型。修改 HTML 时保留主题原结构，避免破坏前端事件和样式。
+
+## 搜索 Hook
+
+文件：
+
+```txt
+inc/functions/zib-search.php
+```
+
+常见 Filter：
+
+| Hook                             | 用途               |
+| -------------------------------- | ------------------ |
+| `search_types`                   | 修改搜索类型       |
+| `search_main_tabs_array`         | 修改搜索页 Tab     |
+| `main_search_tab_content_{type}` | 为搜索类型输出内容 |
+| `search_facets_datas`            | 修改筛选数据       |
+| `search_orderby_array`           | 修改排序项         |
+
+动态 Hook 示例：
+
+```php
+$tab_content = apply_filters('main_search_tab_content_' . $type, '');
+```
+
+添加搜索类型时，要同时处理类型注册、Tab 内容、查询逻辑和前端筛选显示。
+
+## 投稿与评论 Hook
+
+投稿：
+
+```txt
+action/new_posts.php
+```
+
+评论：
+
+```txt
+action/comment.php
+inc/functions/zib-comments-list.php
+```
+
+常见 Hook：
+
+| Hook                               | 类型   | 参数                      |
+| ---------------------------------- | ------ | ------------------------- |
+| `zib_pre_insert_post`              | Action | `$postarr`                |
+| `new_add_posts` / `new_edit_posts` | Action | `$new_post_obj`           |
+| `new_posts_pending`                | Action | `$new_post_obj`           |
+| `comment_is_topping`               | Action | `$comment`                |
+| `comment_header`                   | Filter | `$html, $comment`         |
+| `comment_footer_info`              | Filter | `$info, $comment, $depth` |
+| `comments_action_lists`            | Filter | `$lists, $comment`        |
+| `comments_user_name_badge`         | Filter | `$badge, $comment`        |
+
+投稿保存前后会牵涉审核、付费内容、封面、专题、标签、用户权限和通知，不要只改 `$postarr` 后忽略后续流程。
+
+## 论坛 Hook
+
+论坛源码分布：
+
+```txt
+inc/functions/bbs/action/
+inc/functions/bbs/inc/
+```
+
+常见 Hook：
+
+| Hook                               | 类型   | 参数/用途               |
+| ---------------------------------- | ------ | ----------------------- |
+| `bbs_add_posts` / `bbs_edit_posts` | Action | 论坛帖子保存后          |
+| `bbs_follow_plate`                 | Action | `$id, $user_id`         |
+| `bbs_favorite_posts`               | Action | `$id, $user_id, $type`  |
+| `bbs_posts_topping_set`            | Action | `$post_id, $topping`    |
+| `bbs_posts_essence_set`            | Action | `$post_id, $val`        |
+| `posts_plate_move`                 | Action | `$id, $new_id, $old_id` |
+| `answer_adopted`                   | Action | `$comment, $desc`       |
+| `bbs_posts_order_options`          | Filter | 帖子排序项              |
+| `bbs_plate_order_options`          | Filter | 板块排序项              |
+| `bbs_home_tab_options`             | Filter | 论坛首页 Tab            |
+| `bbs_plate_tab_options`            | Filter | 板块页 Tab              |
+| `bbs_single_fixed_btns`            | Filter | 帖子固定按钮            |
+
+论坛模块大量使用动态页面 Hook：
+
+```php
+do_action('bbs_' . $page_type . '_page_header');
+do_action('bbs_' . $page_type . '_page_content');
+do_action('bbs_' . $page_type . '_page_sidebar');
+do_action('bbs_' . $page_type . '_page_footer');
+```
+
+扩展论坛页面时要先确认 `$page_type`，不要把首页、板块页、发帖页、帖子页混在一起。
+
+## 商城 Hook
+
+商城源码分布：
+
+```txt
+inc/functions/shop/
+```
+
+常见 Hook：
+
+| Hook                              | 类型   | 用途             |
+| --------------------------------- | ------ | ---------------- |
+| `zib_shop_init`                   | Action | 商城模块初始化   |
+| `shop_favorite_product`           | Action | 商品收藏后       |
+| `shop_locate_template`            | Action | 商城模板加载     |
+| `shop_locate_template_{type}`     | Action | 指定商城页面模板 |
+| `shop_{type}_page_content`        | Action | 页面内容区域     |
+| `shop_product_page_content_after` | Action | 商品内容后       |
+| `shop_auto_delivery_content`      | Filter | 自动发货内容     |
+| `is_shop_cart_page`               | Filter | 是否购物车页面   |
+
+商城页面同样大量使用动态 Hook。处理商品、购物车、订单、售后时要先确认订单和商品状态，不要只靠前端参数。
+
+## Zibpay Hook
+
+Zibpay 核心 Hook：
+
+| Hook                                    | 类型   | 参数                                                |
+| --------------------------------------- | ------ | --------------------------------------------------- |
+| `pre_order_create_data`                 | Filter | `$order_data`                                       |
+| `initiate_order_data_type_{order_type}` | Filter | `$__data, $post_data`                               |
+| `order_created`                         | Action | `$order_data`                                       |
+| `payment_order_success`                 | Action | `$order`                                            |
+| `order_closed`                          | Action | `$order_id, $type, $reason`                         |
+| `order_refunded`                        | Action | `$order_id`                                         |
+| `zibpay_payment_methods`                | Filter | `$methods, $pay_type`                               |
+| `zibpay_order_title`                    | Filter | `$_title, $order`                                   |
+| `zibpay_download_before`                | Action | `$post_id, $down_id, $paid, $file_url, $file_local` |
+| `zibpay_download_file_local`            | Filter | `$file_local, $file_url, $post_id, $down_id, $paid` |
+| `user_order_card_btns`                  | Filter | `$_btns, $order`                                    |
+
+支付成功示例：
+
+```php
+add_action('payment_order_success', 'zib_order_success_record_log', 20, 1);
+
+function zib_order_success_record_log($order)
+{
+    if (empty($order->id)) {
+        return;
+    }
+
+    // 只记录或同步。发放权益前必须判断订单是否已处理过。
+}
+```
+
+`payment_order_success` 的 `$order` 是对象，源码注释也强调“不能为数组”。
+
+## 消息 Hook
+
+消息类：
+
+```txt
+inc/functions/message/class/message-class.php
+```
+
+常见 Hook：
+
+| Hook                           | 类型   | 用途           |
+| ------------------------------ | ------ | -------------- |
+| `zib_add_message_values`       | Filter | 消息写入前过滤 |
+| `zib_add_message`              | Action | 新增消息后     |
+| `zib_update_message`           | Action | 更新消息后     |
+| `zib_message_set_status`       | Action | 单条状态变化   |
+| `zib_message_set_status_batch` | Action | 批量状态变化   |
+| `zib_message_readed`           | Action | 单条已读       |
+| `zib_message_all_readed`       | Action | 全部已读       |
+| `message_cats`                 | Filter | 消息分类       |
+
+消息数据通常要包含用户、类型、关联对象、内容和状态。不要只写一段 HTML，忽略消息分类和已读逻辑。
+
+## 写回调的规则
+
+- Filter 必须返回值，且类型尽量不变。
+- Action 不要直接输出，除非当前 Hook 明确处于模板输出区域。
+- 高频 Hook 里不要同步请求远程 API。
+- 支付、积分、余额、下载、库存相关回调必须幂等。
+- 用户输入要清洗，输出 HTML 要按上下文转义。
+- 使用主题函数前判断功能模块是否加载。
+
+## 排查 Hook
+
+1. 用 `rg -n "hook_name" zibll -g "*.php"` 找真实定义。
+2. 确认 Hook 是 Action 还是 Filter。
+3. 确认参数数量和顺序。
+4. 确认模块开关是否启用。
+5. 确认回调文件是否加载。
+6. 调整优先级，例如 `20`、`99`。
+7. 写受控日志，不要把调试文本直接输出到页面或 Ajax 响应。

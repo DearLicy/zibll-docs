@@ -1,0 +1,177 @@
+---
+title: 生命周期与加载顺序
+description: 从 functions.php 到 CSF 字段渲染，按子比主题源码梳理 Codestar Framework 的初始化、注册、渲染和保存时机。
+---
+
+## 总览
+
+子比主题里的 Codestar Framework 不是一个孤立后台页面。它先被主题加载，再由 `inc/options/options.php` 挂载主题设置、Meta、用户资料、小工具、导航菜单和模块字段。
+
+核心链路可以按四层看：
+
+| 阶段     | 入口                                                        | 做什么                                                          |
+| -------- | ----------------------------------------------------------- | --------------------------------------------------------------- |
+| 主题启动 | `functions.php`、`inc/inc.php`                              | 加载主题常量、公共函数、功能模块                                |
+| CSF 准备 | `inc/codestar-framework/`、`inc/csf-framework/`             | 加载原始 Codestar 和子比覆盖类、字段、资源                      |
+| 字段注册 | `inc/options/*`、`inc/functions/*/admin/*`、`inc/widgets/*` | 注册 options、metabox、taxonomy、profile、nav menu、widget 字段 |
+| 值读取   | `inc/dependent.php`、前台模板和业务函数                     | 使用 `_pz()`、`zib_get_*_meta()`、`zib_menu_pz()` 等封装读取    |
+
+如果一个字段不显示、读不到或保存后没有效果，排查也按这四层往回走。
+
+## 文件加载入口
+
+子比主题把后台配置入口集中到 `inc/options/options.php`：
+
+```php
+zib_require(array(
+    'inc/options/options-module',
+    'inc/options/upgrade',
+));
+
+if (is_admin()) {
+    zib_require(array(
+        'admin-options',
+        'metabox-options',
+        'profile-options',
+        'action',
+    ), false, 'inc/options/');
+}
+
+add_filter('csf_fa4', '__return_true');
+```
+
+这里有三个细节：
+
+| 代码             | 影响                                                           |
+| ---------------- | -------------------------------------------------------------- |
+| `options-module` | 提供复用字段模块，例如显示规则、视频背景、颜色、排序等组合配置 |
+| `is_admin()`     | 主题设置页、文章 Meta、用户 profile 只在后台加载               |
+| `csf_fa4`        | 子比后台字段图标使用 Font Awesome 4，和主题既有图标类保持一致  |
+
+因此，新增后台字段时优先放到对应 admin/options 文件中，前台读取逻辑放到业务函数或模板，不要把渲染、保存、展示揉进同一个入口文件。
+
+## 后台设置页生命周期
+
+`inc/options/admin-options.php` 的入口函数是：
+
+```php
+function zib_csf_admin_options()
+```
+
+函数内部先做后台判断，再创建 `zibll_options`：
+
+```php
+if (!is_admin()) {
+    return;
+}
+
+$prefix = 'zibll_options';
+$no_create = (
+    (wp_doing_ajax() && (empty($_POST['action']) || !strstr($_POST['action'], 'csf_' . $prefix))) ||
+    (!wp_doing_ajax() && (empty($_GET['page']) || $_GET['page'] !== $prefix))
+);
+
+CSF::createOptions($prefix, array(
+    'menu_slug'     => 'zibll_options',
+    'save_defaults' => !$no_create,
+));
+```
+
+`$no_create` 是性能保护：
+
+- 访问其他后台页面时，只注册一级菜单需要的基础结构。
+- 不是 `csf_zibll_options` 相关 Ajax 时，不构建所有字段。
+- 真正进入主题设置页或保存主题设置时，才完整创建子 section 和字段。
+
+这也是为什么新增字段不能只看 `createOptions()`，还要确认它写在 `$no_create` 判断之后还是之前。
+
+## Section 注册顺序
+
+主题先注册一级 section：
+
+```php
+CSF::createSection($prefix, array(
+    'id'    => 'basic',
+    'title' => __('全局&功能', 'zib_language'),
+    'icon'  => 'fa fa-fw fa-bullseye',
+));
+```
+
+然后才注册子 section：
+
+```php
+CSF::createSection($prefix, array(
+    'parent' => 'basic',
+    'title'  => __('LOGO图像', 'zib_language'),
+    'fields' => array(
+        // fields...
+    ),
+));
+```
+
+一级 section 负责后台左侧业务域，子 section 才负责字段。子比源码里少数 section 会带 `id`，多数子 section 只靠 `parent + title` 生成标签锚点。
+
+## Meta 字段生命周期
+
+文章、页面、论坛帖子、商品、分类、用户资料等字段不走 `zibll_options`，而是单独注册：
+
+| 类型          | 注册方式                                        | 典型 prefix                                         | 保存位置                          |
+| ------------- | ----------------------------------------------- | --------------------------------------------------- | --------------------------------- |
+| 文章/页面字段 | `ZCSF::instance('post_meta', $csf_args)`        | `post_meta`                                         | `wp_postmeta` 或 `zib_other_data` |
+| 独立 metabox  | `CSF::createMetabox()`                          | `page_config`、`product_config`                     | 对应 post meta                    |
+| 分类字段      | `CSF::createTaxonomyOptions()`                  | `term_baidu_resource_submission`、`shop_cat_config` | `wp_termmeta` 或 `zib_other_data` |
+| 用户资料      | `ZCSF::instance('profile_options', $csf_args)`  | `profile_options`                                   | `wp_usermeta` 或 `zib_other_data` |
+| 菜单项        | `CSF::createNavMenuOptions('zib_menu_options')` | `zib_menu_options`                                  | 菜单项 post meta                  |
+| 小工具        | `CSF::createWidget()`                           | widget id                                           | widget instance                   |
+
+读写这些字段时不要套用 `_pz()`。`_pz()` 只读主题全局设置，Meta 字段要用对应的主题封装函数。
+
+## ZCSF 的渲染时机
+
+`ZCSF::instance()` 是子比自定义渲染器，适合已有表单里的字段片段：
+
+```php
+ZCSF::instance('profile_options', array(
+    'value'  => $value,
+    'form'   => false,
+    'nonce'  => false,
+    'fields' => $fields,
+));
+```
+
+它会：
+
+1. 加载媒体库、颜色选择器、CSF 样式脚本和字段资源。
+2. 按 `fields` 调用 `CSF::field()` 输出字段。
+3. 从 `value` 数组读取字段当前值。
+4. 可选输出 `<form>`、nonce 和 hidden input。
+
+它不会自动决定业务保存位置。保存仍然要由 `profile-options.php`、`metabox-options.php` 或对应模块函数处理。
+
+## 保存后的副作用
+
+主题设置保存并不是结束。`csf_zibll_options_save_after` 和 `csf_zibll_options_saved` 还会触发：
+
+| Hook                                     | 子比用途                                                          |
+| ---------------------------------------- | ----------------------------------------------------------------- |
+| `csf_zibll_options_reset_before`         | 重置全部前自动备份                                                |
+| `csf_zibll_options_reset_section_before` | 重置分区前自动备份                                                |
+| `csf_zibll_options_saved`                | 定期备份设置、刷新搜索筛选缓存、刷新徽章参数缓存                  |
+| `csf_zibll_options_save_after`           | 首次安装写入必要 WordPress 设置、记录主题版本、刷新 rewrite rules |
+
+所以改设置字段时要考虑两件事：
+
+- 字段保存后是否需要清缓存或同步派生数据。
+- 字段是否会影响链接结构、登录、支付、短信、邮件、SEO 这类跨模块行为。
+
+## 排查顺序
+
+字段异常时按这个顺序查：
+
+1. 字段文件是否被当前请求加载。
+2. 当前页面是否被 `$no_create` 提前返回。
+3. section 的 `parent` 是否存在，字段是否在正确 `fields` 数组内。
+4. 字段 `id` 是否和已有字段冲突。
+5. 保存位置是 options、post meta、term meta、user meta、menu item 还是 widget instance。
+6. 读取函数是否匹配保存位置。
+7. 保存后是否有缓存、rewrite、聚合 meta 或业务状态没有同步。

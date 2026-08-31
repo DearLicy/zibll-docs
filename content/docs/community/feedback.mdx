@@ -1,0 +1,48 @@
+---
+title: 问题反馈
+description: 通过文档反馈表和 GitHub Bot 报告文档错误、缺失内容和功能建议。
+---
+
+我们优先处理可以复现、可以定位、可以引用源码依据的问题。提交前请先搜索文档和已有 Issue，避免同一个问题被拆成多条无法关联的记录。
+
+## 选择正确的反馈入口
+
+- **文档错误或补充**：标题、代码、路径、版本说明、链接或示例不正确。
+- **功能建议**：搜索、MCP、Codex 插件、静态站交互或协作流程需要改进。
+- **友情链接申请**：请使用 [友情链接申请](/docs/community/friend-links) 页面，或直接使用对应的 Issue 模板。
+- **源码修复**：如果已经完成修改，直接提交 Pull Request，并在描述中关联 Issue。
+
+文档页面底部的反馈按钮会把页面地址和说明发送给独立 GitHub App Bot，由 Bot 创建带有页面上下文的公开 Issue。本站 Pages 不保存你填写的内容；Bot 只在提交时调用 GitHub API，成功后返回 Issue 地址。需要提交非文档类问题时，再前往 [GitHub Issues](https://github.com/DearLicy/zibll-docs/issues/new/choose) 选择模板。
+
+## GitHub Bot
+
+文档反馈的目标是让用户只描述问题，不需要手动拼接 Issue 标题、页面链接或模板。实际链路如下：
+
+1. 页面把当前文档地址、页面标题、评价和反馈内容发送到独立 Worker。
+2. Worker 校验来源、页面是否属于本站、请求大小和文本长度。
+3. Worker 使用 GitHub App 的短期 installation token 创建 Issue。
+4. 页面只在收到 GitHub 返回的 Issue URL 后显示成功链接。
+
+如果页面提示“GitHub Bot 尚未配置”，说明部署者还没有在 Pages 构建变量中设置 `FEEDBACK_ENDPOINT`。这时页面不会退回到手动 `issues/new`，也不会伪造提交成功。维护者创建 GitHub App 后，可通过仓库的 `Deploy feedback GitHub App Worker` 工作流部署，再用 `npm run github:setup -- --feedback-endpoint <HTTPS 地址>/feedback` 连接 Pages。完整配置见 [GitHub 社区](/docs/community/github-community) 和仓库中的 [`workers/README.md`](https://github.com/DearLicy/zibll-docs/blob/main/workers/README.md)。
+
+## 文档问题应包含什么
+
+```text
+页面地址或 slug：
+当前看到的内容：
+建议改成的内容：
+源码依据或版本：
+复现步骤（如果是功能问题）：
+相关截图或日志（请先删除密钥、Cookie 和个人信息）：
+```
+
+如果问题涉及主题版本、插件版本、PHP 版本、部署方式或浏览器，请一并写明。不要在公开 Issue 中粘贴 API Key、登录 Cookie、数据库密码、完整 `wp-config.php` 或未脱敏的服务器日志。
+
+## 提交后的处理方式
+
+1. 维护者先确认问题范围、是否重复以及是否需要补充信息。
+2. 可以直接修复的内容会进入 Pull Request，并在合并前重新构建静态站和 MCP 数据。
+3. 需要源码验证的内容会标记为待核对，结论以当前可复现的源码和运行行为为准。
+4. 已解决的问题会在 Issue 中留下关联提交或页面，方便后续追踪。
+
+不符合模板不代表问题没有价值，但缺少页面、版本和复现信息会显著增加定位成本。请保持标题具体、描述完整，并及时回复维护者的追问。

@@ -1,0 +1,1067 @@
+---
+title: 用户成长与权限体系
+description: 扩展子比主题签到、等级经验、认证、徽章、邀请码、用户能力和禁封申诉流程。
+---
+
+## 模块边界
+
+子比主题的用户成长体系不是一个单独页面，而是一组围绕用户状态运转的能力：
+
+| 能力       | 主要文件                                                             | 关键数据                                                                             |
+| ---------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| 签到       | `inc/functions/user/user-checkin.php`、`inc/functions/user/ajax.php` | `checkin_detail`、`checkin_all_day`、`checkin_continuous_day`、`checkin_reward_days` |
+| 等级经验   | `inc/functions/user/user-level.php`                                  | `level_integral`、`level_integral_detail`、`level_integral_date_detail`、`level`     |
+| 用户能力   | `inc/functions/user/user-cap.php`                                    | `_pz('user_cap')`、VIP、等级、认证、版主等角色条件                                   |
+| 认证       | `inc/functions/user/user-auth.php`、`inc/functions/user/ajax.php`    | `auth`、`auth_info`、`auth_apply` 消息                                               |
+| 徽章       | `inc/functions/user/user_medal.php`、`inc/functions/user/ajax.php`   | `medal_details`、`wear_medal`、`user_medal_args`                                     |
+| 邀请码     | `inc/functions/user/invit-code.php`                                  | `ZibCardPass`、`invit_code`、奖励配置                                                |
+| 禁封与申诉 | `inc/functions/user/user-ban.php`、`inc/functions/user/ajax.php`     | `banned`、`banned_time`、`banned_log`、申诉消息                                      |
+
+二次开发时不要把这些能力写成独立的孤岛。它们已经和用户中心、作者页、评论、论坛、商城、消息通知、邮件通知、微信模板消息、Ajax 弹窗和权限判断连在一起。
+
+## 签到流程
+
+签到按钮由 `zib_get_user_checkin_btn()` 输出，前端通过 `form-action="user_checkin"` 提交到 Ajax 动作：
+
+```php
+add_action('wp_ajax_user_checkin', 'zib_ajax_user_checkin');
+```
+
+服务端核心入口是：
+
+```php
+zib_user_checkin($user_id);
+```
+
+这个函数会做几件事：
+
+1. 检查 `_pz('checkin_s')` 是否开启。
+2. 检查用户今天是否已经签到。
+3. 检查用户是否处于禁封限制状态。
+4. 计算本次积分和经验奖励。
+5. 写入签到明细、累计签到天数、连续签到天数、连续奖励天数。
+6. 触发 `user_checkined`。
+
+签到详情最多保存多少条由 Filter 控制：
+
+```php
+$max = apply_filters('user_checkin_detail_maximum', 30);
+```
+
+修改签到明细保留数量：
+
+```php
+function zib_docs_checkin_detail_maximum($max)
+{
+    return 60;
+}
+add_filter('user_checkin_detail_maximum', 'zib_docs_checkin_detail_maximum');
+```
+
+签到完成后的业务扩展应监听 `user_checkined`，不要改 Ajax 回调：
+
+```php
+function zib_docs_after_user_checkined($user_id, $the_data)
+{
+    if (!$user_id || empty($the_data['time'])) {
+        return;
+    }
+
+    zib_update_user_meta($user_id, 'docs_last_checkin_notice', current_time('mysql'));
+}
+add_action('user_checkined', 'zib_docs_after_user_checkined', 20, 2);
+```
+
+`$the_data` 包含本次签到奖励：
+
+| 字段       | 说明           |
+| ---------- | -------------- |
+| `integral` | 本次经验值奖励 |
+| `points`   | 本次积分奖励   |
+| `time`     | 签到时间       |
+
+后台签到配置主要集中在用户互动的签到 section：
+
+| 字段                               | 作用                              |
+| ---------------------------------- | --------------------------------- |
+| `checkin_s`                        | 启用签到功能                      |
+| `checkin_header_user_show`         | 是否在菜单栏用户卡片显示签到按钮  |
+| `checkin_header_user_option.text`  | 菜单栏签到按钮文字                |
+| `checkin_header_user_option.class` | 菜单栏签到按钮颜色                |
+| `checkin_reward_points`            | 单次签到积分奖励                  |
+| `checkin_reward_integral`          | 单次签到经验值奖励                |
+| `continuous_checkin_reward`        | 连续签到第 2-7 天的积分和经验奖励 |
+
+奖励计算由 `zib_get_user_checkin_should_reward()` 完成。它先读取基础奖励，再用 `zib_get_user_checkin_reward_continuous_day($user_id) + 1` 判断今天是连续奖励周期中的第几天。如果连续奖励天数超过 `zib_get_user_checkin_reward_continuous_max_day()`，会回到第 1 天。源码固定最大连续奖励周期为 7 天：
+
+```php
+function zib_get_user_checkin_reward_continuous_max_day()
+{
+    return 7;
+}
+```
+
+签到数据分三类保存：
+
+| 数据                     | 保存方式                 | 说明                                  |
+| ------------------------ | ------------------------ | ------------------------------------- |
+| `checkin_detail`         | `zib_update_user_meta()` | 最近签到明细，按 `Y-m-d` 作为数组 key |
+| `checkin_all_day`        | `update_user_meta()`     | 累计签到天数                          |
+| `checkin_continuous_day` | `update_user_meta()`     | 当前连续签到天数                      |
+| `checkin_reward_days`    | `zib_update_user_meta()` | 连续奖励周期内已签到日期              |
+
+前台按钮统一用 `zib_get_user_checkin_btn()` 输出。未登录用户会追加 `signin-loader`，已签到用户会切换为签到详情入口，未签到用户会追加 `initiate-checkin` 并提交 `form-action="user_checkin"`。不要自己拼一个只改 meta 的按钮，否则会绕过禁封、重复签到、防抖、积分和经验联动。
+
+Ajax 写入入口是：
+
+```php
+add_action('wp_ajax_user_checkin', 'zib_ajax_user_checkin');
+```
+
+它会依次检查登录态、`checkin_s`、小黑屋禁封、`zib_ajax_debounce('user_checkin', $user_id)`、今日是否已签到，然后才调用 `zib_user_checkin()`。详情弹窗走：
+
+```php
+add_action('wp_ajax_checkin_details_modal', 'zib_ajax_checkin_details_modal');
+```
+
+签到小工具和用户排行也会读取 `checkin_all_day`、`checkin_continuous_day`、`zib_get_user_last_checkin_time()`。如果你要做排行榜、任务系统或活动统计，优先读这些封装函数，不要直接解析 `checkin_detail` 的数组结构。
+
+### 连续签到奖励周期
+
+`checkin_continuous_day` 和 `checkin_reward_days` 不是同一个概念：
+
+| 字段                     | 用途                 | 重置规则               |
+| ------------------------ | -------------------- | ---------------------- |
+| `checkin_continuous_day` | 展示当前连续签到天数 | 昨天未签到时重置为 `1` |
+| `checkin_reward_days`    | 判断连续奖励第几天   | 超过 7 天或断签时重置  |
+
+连续天数展示由 `zib_update_checkin_continuous_day()` 更新。它只关心昨天是否签到：
+
+```php
+if (isset($detail[$yesterday_date])) {
+    $new_day = zib_get_user_checkin_continuous_day($user_id) + 1;
+} else {
+    $new_day = 1;
+}
+
+update_user_meta($user_id, 'checkin_continuous_day', $new_day);
+```
+
+连续奖励周期由 `zib_update_checkin_reward_day()` 更新。源码固定最多 7 天，达到最大天数后会重新从第 1 天开始计算奖励：
+
+```php
+if (!$detail || !is_array($detail) || count($detail) >= $max) {
+    $detail = array();
+} else {
+    $yesterday = date('Y-m-d', strtotime('-1 day', strtotime($current_date)));
+    if (array_search($yesterday, $detail) === false) {
+        $detail = array();
+    }
+}
+$detail[] = $current_date;
+```
+
+因此做活动统计时不要把 `checkin_reward_days` 当成真实连续签到总天数。真实连续天数读 `zib_get_user_checkin_continuous_day()`；本轮奖励第几天读 `zib_get_user_checkin_reward_continuous_day()`；累计签到读 `zib_get_user_checkin_all_day()`。
+
+### 签到详情弹窗
+
+签到详情弹窗 Ajax 是登录用户专用入口：
+
+```php
+add_action('wp_ajax_checkin_details_modal', 'zib_ajax_checkin_details_modal');
+```
+
+`zib_ajax_checkin_details_modal()` 只做登录态和开关检查，真正 HTML 由 `zib_get_user_checkin_details_modal($user_id)` 生成。弹窗会组合三块数据：
+
+| 区块     | 数据来源                                                                                                              |
+| -------- | --------------------------------------------------------------------------------------------------------------------- |
+| 用户卡片 | `zibpay_get_user_points()`、`zib_get_user_level()`、`zib_get_user_integral()`、`zib_get_user_checkin_all_day()`       |
+| 今日签到 | `zib_get_user_the_checkin_details()` 或 `zib_get_user_checkin_btn()`                                                  |
+| 连续奖励 | `continuous_checkin_reward`、`zib_get_user_checkin_reward_continuous_day()`、`zib_get_checkin_continuous_mini_card()` |
+
+如果积分系统或等级系统关闭，对应卡片和奖励 badge 会自动不显示。扩展签到弹窗时要保留这个条件判断，不要在积分关闭时强行调用积分展示，也不要在等级关闭时展示经验奖励。
+
+用户中心头部也会在签到开启时显示签到按钮：
+
+```php
+if (_pz('checkin_s')) {
+    $btns = zib_get_user_checkin_btn('but c-blue ml10 pw-1em radius', '<i class="fa fa-calendar-check-o"></i>' . __('签到', 'zib_language'), '<i class="fa fa-calendar-check-o"></i>' . __('已签到', 'zib_language'));
+}
+```
+
+所以新增签到入口时优先复用 `zib_get_user_checkin_btn()` 或 `zib_get_user_checkin_details_link()`。这样前端会沿用 `signin-loader`、`initiate-checkin`、`RefreshModal`、移动端底部弹窗和签到完成后返回的 `details_link`。
+
+## 等级经验
+
+等级经验统一通过：
+
+```php
+zib_add_user_level_integral($user_id, $value, $key, $no_limit_day_max);
+```
+
+这个函数会：
+
+- 检查用户和经验值是否有效。
+- 检查当天经验上限，除非 `$no_limit_day_max` 为 `true`。
+- 检查禁封限制。
+- 写入经验明细 `level_integral_detail`。
+- 写入每日经验明细 `level_integral_date_detail`。
+- 更新 `level_integral`。
+
+等级升级不是由调用方直接写 `level`，而是监听用户 meta 更新：
+
+```php
+add_action('updated_user_meta', 'zib_update_user_level', 99, 4);
+add_action('added_user_meta', 'zib_update_user_level', 99, 4);
+```
+
+当 `level_integral` 变化时，主题会根据 `_pz('user_level_opt')` 和 `_pz('user_level_max')` 重新计算等级。
+
+给用户增加自定义经验值：
+
+```php
+function zib_docs_add_activity_integral($user_id, $activity_id)
+{
+    if (!$user_id || !$activity_id || !_pz('user_level_s', true)) {
+        return;
+    }
+
+    $value = 10;
+    zib_add_user_level_integral($user_id, $value, 'docs_activity');
+}
+```
+
+`$key` 会写入经验明细，应使用稳定的英文业务标识。不要把可变文案、用户输入或中文说明直接当成 `$key`。
+
+## 主题内置经验来源
+
+`zib_user_level_integral_add` 会在等级功能开启后注册一组 Hook：
+
+| Hook                             | 场景               |
+| -------------------------------- | ------------------ |
+| `user_checkined`                 | 用户签到           |
+| `user_register`                  | 新用户注册         |
+| `admin_init`                     | 登录后记录登录奖励 |
+| `save_post`                      | 发布文章           |
+| `like-posts`                     | 文章被点赞         |
+| `favorite-posts`                 | 文章被收藏         |
+| `comment_post`                   | 发表评论           |
+| `comment_unapproved_to_approved` | 评论审核通过       |
+| `like-comment`                   | 评论被点赞         |
+| `follow-user`                    | 用户被关注         |
+| `bbs_score_extra`                | 论坛帖子被加分     |
+| `bbs_posts_essence_set`          | 论坛帖子被设为精华 |
+| `posts_is_hot`                   | 帖子成为热门       |
+| `plate_is_hot`                   | 版块成为热门       |
+| `comment_is_hot`                 | 评论成为热门       |
+| `answer_adopted`                 | 回答被采纳         |
+
+扩展新的经验来源时，优先在你的业务完成后调用 `zib_add_user_level_integral()`。如果你的业务本身也会触发这些主题 Hook，要避免重复加经验。
+
+## 论坛经验联动
+
+论坛经验不是在前端按钮里直接增加，而是由 `zib_user_level_integral_add` 监听论坛业务 Hook。论坛模块还会通过 `integral_add_options` 给后台经验参数追加一组论坛项目：
+
+```php
+add_filter('integral_add_options', 'zib_bbs_integral_add_options_filter');
+```
+
+核心经验项和幂等字段：
+
+| 事件         | Hook / 触发点                                | 经验 key          | 防重复或上限                                          |
+| ------------ | -------------------------------------------- | ----------------- | ----------------------------------------------------- |
+| 发布论坛帖子 | `save_post`，`post_type=forum_post` 且已发布 | `bbs_posts_new`   | post meta `_user_integral_new`                        |
+| 创建版块     | `save_post`，`post_type=plate` 且已发布      | `bbs_plate_new`   | post meta `_user_integral_new`                        |
+| 帖子被加分   | `bbs_score_extra`                            | `bbs_score_extra` | post meta `_user_integral_score_extra`，每篇最多 5 次 |
+| 帖子设为精华 | `bbs_posts_essence_set` 且 `$val` 为真       | `bbs_essence`     | post meta `_user_integral_essence`                    |
+| 帖子成为热门 | `posts_is_hot`                               | `bbs_posts_hot`   | post meta `_user_integral_hot`                        |
+| 版块成为热门 | `plate_is_hot`                               | `bbs_plate_hot`   | post meta `_user_integral_hot`                        |
+| 评论成为热评 | `comment_is_hot`                             | `bbs_comment_hot` | comment meta `_user_integral_hot`                     |
+| 回答被采纳   | `answer_adopted`                             | `bbs_adopt`       | comment meta `_user_integral_adopt`                   |
+
+这些回调都会从 `_pz('user_integral_opt', 0, $key)` 读取配置值。配置值为 0 时不会加经验；因此二次开发不要只看 Hook 是否触发，还要检查后台经验项是否启用。
+
+论坛经验和论坛消息通知使用同一批业务 Hook，但各自有独立的防重复字段。例如 `answer_adopted` 会同时被消息系统、等级经验系统和可能的扩展监听；如果你要新增奖励，应该再写自己的 meta 防重复，不要复用 `_user_integral_adopt` 或 `is_adopted_notify`。
+
+示例：回答被采纳后给用户额外记录一次成长事件：
+
+```php
+add_action('answer_adopted', 'zib_docs_bbs_adopt_growth_record', 30, 2);
+
+function zib_docs_bbs_adopt_growth_record($comment, $desc = '')
+{
+    if (empty($comment->comment_ID) || empty($comment->user_id)) {
+        return;
+    }
+
+    if (zib_get_comment_meta($comment->comment_ID, '_docs_adopt_growth_recorded', true)) {
+        return;
+    }
+
+    zib_update_comment_meta($comment->comment_ID, '_docs_adopt_growth_recorded', true);
+    zib_update_user_meta($comment->user_id, '_docs_last_adopt_time', current_time('mysql'));
+}
+```
+
+涉及加分、热门、精华、采纳这类操作时，扩展层不要绕过论坛原有 Ajax 和 Hook。直接改 `score`、`essence`、`is_hot` 或 `adopted` 只会改变统计结果，可能不会触发经验、消息、徽章和缓存联动。
+
+## 用户能力判断
+
+主题能力判断统一走：
+
+```php
+zib_user_can($user_id, $capability, ...$args);
+zib_current_user_can($capability, ...$args);
+```
+
+能力角色来自 `_pz('user_cap')`，基础判断在 `zib_is_can_roles()`：
+
+| 条件           | 说明                  |
+| -------------- | --------------------- |
+| `all`          | 所有人可用            |
+| `logged`       | 当前登录用户可用      |
+| `vip`          | 用户 VIP 等级达到要求 |
+| `level`        | 用户等级达到要求      |
+| `auth`         | 已认证用户            |
+| `is_can_roles` | 自定义角色判断 Filter |
+| `zib_user_can` | 最终能力判断 Filter   |
+
+给自定义角色接入能力系统：
+
+```php
+function zib_docs_is_can_roles($is_can, $user_id, $cap_roles)
+{
+    if ($is_can || !$user_id || empty($cap_roles['docs_editor'])) {
+        return $is_can;
+    }
+
+    return (bool) zib_get_user_meta($user_id, 'docs_editor', true);
+}
+add_filter('is_can_roles', 'zib_docs_is_can_roles', 10, 3);
+```
+
+给某个能力做最终兜底：
+
+```php
+function zib_docs_user_can($is_can, $user_id, $capability, $args)
+{
+    if ($is_can || 'docs_manage_resource' !== $capability) {
+        return $is_can;
+    }
+
+    if (!$user_id || zib_user_is_ban($user_id)) {
+        return false;
+    }
+
+    return (bool) zib_get_user_meta($user_id, 'docs_manage_resource', true);
+}
+add_filter('zib_user_can', 'zib_docs_user_can', 10, 4);
+```
+
+写入动作前使用 `zib_current_user_can()`，展示按钮前也用同一个能力判断，避免按钮可见但提交失败。
+
+## 认证申请
+
+认证展示和申请入口在 `user-auth.php`。常用函数：
+
+| 函数                                            | 用途                   |
+| ----------------------------------------------- | ---------------------- |
+| `zib_is_user_auth($id)`                         | 判断是否认证           |
+| `zib_get_user_auth_badge($id, $class)`          | 输出认证图标           |
+| `zib_get_user_auth_name($id)`                   | 获取认证名称           |
+| `zib_get_user_auth_info_link($user_id, $class)` | 输出认证信息弹窗链接   |
+| `zib_get_user_auth_apply_link($class, $text)`   | 输出认证申请弹窗链接   |
+| `zib_add_user_auth($user_id, $args)`            | 写入认证状态和认证资料 |
+| `zib_user_auth_apply_process($args)`            | 处理认证申请           |
+
+认证信息会通过 `author_header_identity` 显示在作者头部，也会出现在用户中心认证 Tab。
+
+处理认证申请后，主题会创建站内消息、发送微信模板消息，并触发：
+
+```php
+do_action('user_auth_apply_process_newmsg', $msg_arge);
+```
+
+监听认证处理结果：
+
+```php
+function zib_docs_auth_apply_processed($msg_args)
+{
+    if (empty($msg_args['receive_user'])) {
+        return;
+    }
+
+    zib_update_user_meta((int) $msg_args['receive_user'], 'docs_auth_notice_time', current_time('mysql'));
+}
+add_action('user_auth_apply_process_newmsg', 'zib_docs_auth_apply_processed');
+```
+
+如果只是展示认证状态，用 `zib_is_user_auth()` 和 `zib_get_user_auth_badge()`；如果要改变认证状态，应走 `zib_add_user_auth()` 或后台审核流程，不要只更新一个 `auth` 字段。
+
+### 后台认证审核页
+
+认证后台页是 `inc/functions/user/admin/auth-page.php`，入口是：
+
+```txt
+users.php?page=user_auth
+```
+
+它查询的不是用户表，而是消息表中的认证申请：
+
+```php
+$WHERE = array('type' => 'auth_apply');
+
+if (isset($_REQUEST['status'])) {
+    $WHERE['status'] = $_REQUEST['status'];
+}
+if (isset($_REQUEST['send_user'])) {
+    $WHERE['send_user'] = $_REQUEST['send_user'];
+}
+if (isset($_REQUEST['id'])) {
+    $WHERE['id'] = $_REQUEST['id'];
+}
+
+$all_count = ZibMsg::get_count($WHERE);
+$list      = ZibMsg::get($WHERE, $order, $offset, $ice_perpage, $desc);
+```
+
+列表支持状态筛选、提交用户筛选、搜索、排序和分页。单条记录的 `meta` 中保存认证名称、简介、申请说明、申请时间和举证图片。点击“立即处理”后，页面会在当前记录下方展开处理表单，提交到同一页面：
+
+```php
+if ('process_submit' == $action) {
+    $process_submit = array(
+        'id'      => $_REQUEST['process_id'],
+        'user_id' => $_REQUEST['user_id'],
+        'status'  => $_REQUEST['process'],
+        'msg'     => $_REQUEST['msg'],
+        'name'    => $_REQUEST['name'],
+        'desc'    => $_REQUEST['desc'],
+    );
+
+    $result = zib_user_auth_apply_process($process_submit);
+}
+```
+
+因此扩展认证后台时，核心不是直接写 `auth` 和 `auth_info`，而是把后台处理动作交给 `zib_user_auth_apply_process()`。它会负责更新申请消息状态、写用户认证资料、创建处理结果消息，并触发 `user_auth_apply_process_newmsg`。
+
+如果要给认证审核增加一个内部备注字段，可以记录到申请消息的 meta，或在处理结果通知之后写独立日志；不要把后台审核备注直接展示到公开认证信息里：
+
+```php
+function zib_docs_auth_apply_processed_log($msg_args)
+{
+    if (empty($msg_args['receive_user'])) {
+        return;
+    }
+
+    zib_update_user_meta((int) $msg_args['receive_user'], 'docs_auth_processed_time', current_time('mysql'));
+}
+add_action('user_auth_apply_process_newmsg', 'zib_docs_auth_apply_processed_log');
+```
+
+后台页里的搜索和筛选来自 `$_REQUEST`。新增筛选项时要限制字段白名单，并对搜索词做清洗；不要把前端传入的字段名、排序字段或 SQL 片段直接拼进查询。
+
+## 徽章体系
+
+用户徽章由后台配置、用户 meta、前台展示和 Ajax 操作共同组成。后台入口在“用户设置 -> 用户徽章”，核心文件是 `inc/functions/user/user_medal.php`，Ajax 写入入口在 `inc/functions/user/ajax.php`。
+
+| 后台字段           | 作用                 | 源码边界                                           |
+| ------------------ | -------------------- | -------------------------------------------------- |
+| `user_medal_s`     | 是否启用徽章功能     | 关闭后 `zib_get_medal_args()` 直接返回 `false`     |
+| `user_medal_args`  | 徽章分类和徽章明细   | 保存后通过 `csf_zibll_options_saved` 刷新缓存      |
+| `reset_user_medal` | 重置全部用户徽章数据 | 后台 Ajax 动作，更新 `zib_other_data` 中的徽章字段 |
+
+`user_medal_args` 是一个分类数组。每个分类包含 `cat_name` 和 `items`，每个徽章至少需要这些字段：
+
+| 字段       | 说明                                                                                       |
+| ---------- | ------------------------------------------------------------------------------------------ |
+| `name`     | 徽章名称，也是授予、佩戴、索引和去重时使用的标识                                           |
+| `desc`     | 徽章说明，展示在徽章详情弹窗中                                                             |
+| `icon`     | 徽章图标，默认图标位于 `img/medal/`                                                        |
+| `get_type` | 获取方式，自动徽章必须对应 `zib_user_float_data` 内置静态方法，手动徽章可用 `manually_add` |
+| `get_val`  | 达成阈值，自动授予时会用用户数据和它比较                                                   |
+
+主题默认徽章分为成长、荣誉、成就、限定等类别。后台说明里也明确提示：徽章参数设定后不要随意修改，尤其不要改已经发放过的 `name`，否则用户已获得的徽章会和新配置对不上。
+
+徽章配置来自 `_pz('user_medal_args')`，主题会先交给过滤器：
+
+```php
+$args = apply_filters('user_medal_args', $args);
+```
+
+再整理为三种索引并写入对象缓存：
+
+| 索引   | 含义                                         |
+| ------ | -------------------------------------------- |
+| `cat`  | 按分类整理徽章，用于按分类展示徽章列表       |
+| `item` | 按徽章 `name` 索引，用于校验单个徽章是否存在 |
+| `get`  | 按 `get_type` 分组，用于自动授予批量检查     |
+
+保存主题配置后会刷新缓存：
+
+```php
+add_action('csf_zibll_options_saved', 'zib_medal_args_cache_set');
+```
+
+用户侧数据主要有两个字段：
+
+| 用户数据        | 说明                                                   |
+| --------------- | ------------------------------------------------------ |
+| `medal_details` | 用户已获得徽章列表，每项保存 `name`、`time`、`remarks` |
+| `wear_medal`    | 当前佩戴的徽章名称，未设置时默认取最新获得的徽章       |
+
+`zib_get_user_wear_medal_args()` 会先读取 `wear_medal`，只有该名称仍存在于用户 `medal_details` 时才返回固定佩戴徽章。如果用户从未设置过 `wear_medal`，但已经获得过徽章，就默认返回 `medal_details` 中的第一枚，也就是最新写入的徽章。若后台改名或收回徽章导致 `wear_medal` 指向不存在的名称，函数会返回 `false`，不会自动回退到其它旧徽章。
+
+所以扩展徽章迁移或批量收回时，除了处理 `medal_details`，也要检查 `wear_medal` 是否还有效。不要只删除徽章明细后留下一个失效的佩戴名称，否则作者页、用户中心和用户名旁徽章都会消失。
+
+`zib_add_user_medal()` 会先检查用户和徽章是否有效，再读取用户的 `medal_details` 防重复。授予成功后会触发：
+
+```php
+do_action('user_add_medal', $user_id, array_merge($new, $medal_args));
+```
+
+主题已经监听这个 Hook 给用户发送站内消息，消息类型是 `medal`。如果你要接入额外日志或通知，也应该监听 `user_add_medal`，不要改写授予函数。
+
+扩展徽章配置时，建议优先使用主题已有 `get_type`：
+
+| `get_type`          | 用户数据来源                                 |
+| ------------------- | -------------------------------------------- |
+| `registration_time` | 注册天数                                     |
+| `new_post`          | 发布文章数                                   |
+| `like`              | 文章获赞数                                   |
+| `comment`           | 评论数                                       |
+| `comment_like`      | 评论获赞数                                   |
+| `followed`          | 粉丝数                                       |
+| `favorite`          | 文章被收藏数                                 |
+| `views`             | 文章浏览量                                   |
+| `bbs_post`          | 论坛发帖数                                   |
+| `bbs_post_hot`      | 热门帖子数                                   |
+| `bbs_essence`       | 精华帖子数                                   |
+| `bbs_score`         | 论坛积分                                     |
+| `bbs_plate`         | 创建版块数                                   |
+| `bbs_plate_hot`     | 热门版块数                                   |
+| `bbs_adopt`         | 回答被采纳数                                 |
+| `bbs_comment_hot`   | 热门评论数                                   |
+| `pay_income`        | 付费收入                                     |
+| `pay_rebate`        | 推广佣金                                     |
+| `checkin_all_day`   | 累计签到天数                                 |
+| `manually_add`      | 不参与自动授予，只允许手动授予或业务代码授予 |
+
+论坛相关徽章的统计来源在 `zib_user_float_data` 里：
+
+| get_type          | 统计函数                                                                | 依赖数据                |
+| ----------------- | ----------------------------------------------------------------------- | ----------------------- |
+| `bbs_post`        | `zib_get_user_post_count($user_id, 'publish', 'forum_post')`            | 用户已发布论坛帖子数    |
+| `bbs_post_hot`    | `zib_get_user_meta_query_post_count($user_id, 'is_hot', 'forum_post')`  | 用户帖子 `is_hot` meta  |
+| `bbs_essence`     | `zib_get_user_meta_query_post_count($user_id, 'essence', 'forum_post')` | 用户帖子 `essence` meta |
+| `bbs_score`       | `get_user_posts_meta_sum($user_id, 'score')`                            | 用户内容累计 `score`    |
+| `bbs_plate`       | `zib_get_user_post_count($user_id, 'publish', 'plate')`                 | 用户已发布版块数        |
+| `bbs_plate_hot`   | `zib_get_user_meta_query_post_count($user_id, 'is_hot', 'plate')`       | 用户版块 `is_hot` meta  |
+| `bbs_adopt`       | `zib_get_user_meta_query_comment_count($user_id, 'adopted')`            | 用户评论 `adopted` meta |
+| `bbs_comment_hot` | `zib_get_user_meta_query_comment_count($user_id, 'is_hot')`             | 用户评论 `is_hot` meta  |
+
+这些徽章不是监听 Hook 立即授予，而是在自动徽章检查时按当前数据重新统计。论坛批量维护如果直接改 meta，也许能让徽章统计变动，但会漏掉经验、消息、缓存和其他 Hook；因此仍然应走论坛业务函数和 Ajax 流程。
+
+给现有条件增加一个新徽章：
+
+```php
+function zib_docs_user_medal_args($args)
+{
+    if (!is_array($args)) {
+        $args = array();
+    }
+
+    $args[] = array(
+        'cat_name' => __('内容贡献', 'zib_language'),
+        'items'    => array(
+            array(
+                'name'     => __('内容作者', 'zib_language'),
+                'desc'     => __('发布文章达到 10 篇', 'zib_language'),
+                'icon'     => ZIB_TEMPLATE_DIRECTORY_URI . '/img/medal/medal-1.svg',
+                'get_type' => 'new_post',
+                'get_val'  => 10,
+            ),
+        ),
+    );
+
+    return $args;
+}
+add_filter('user_medal_args', 'zib_docs_user_medal_args');
+```
+
+如果徽章来自你的自定义业务，不要把一个不存在的 `get_type` 写进配置后期待自动授予生效。主题自动检查只会调用 `zib_user_float_data` 里存在的静态方法，扩展层无法在运行时给这个类补静态方法。更稳的做法是把徽章设为 `manually_add`，在业务完成时调用主题授予函数：
+
+```php
+function zib_docs_user_medal_args($args)
+{
+    if (!is_array($args)) {
+        $args = array();
+    }
+
+    $args[] = array(
+        'cat_name' => __('特别贡献', 'zib_language'),
+        'items'    => array(
+            array(
+                'name'     => __('专题贡献者', 'zib_language'),
+                'desc'     => __('完成专题贡献后获得', 'zib_language'),
+                'icon'     => ZIB_TEMPLATE_DIRECTORY_URI . '/img/medal/medal-2.svg',
+                'get_type' => 'manually_add',
+                'get_val'  => 0,
+            ),
+        ),
+    );
+
+    return $args;
+}
+add_filter('user_medal_args', 'zib_docs_user_medal_args');
+
+function zib_docs_after_special_contribution($user_id, $post_id)
+{
+    if (!$user_id || !$post_id || !_pz('user_medal_s')) {
+        return;
+    }
+
+    zib_add_user_medal($user_id, __('专题贡献者', 'zib_language'), __('完成专题贡献', 'zib_language'));
+}
+add_action('docs_special_contribution_done', 'zib_docs_after_special_contribution', 20, 2);
+```
+
+授予、收回和佩戴分别使用这些入口：
+
+| 入口                                                  | 说明                                |
+| ----------------------------------------------------- | ----------------------------------- |
+| `zib_add_user_medal($user_id, $medal_name, $remarks)` | 授予徽章，自动防重复并触发消息 Hook |
+| `zib_remove_user_medal($user_id, $medal_name)`        | 收回徽章                            |
+| `user_medal_wear`                                     | 登录用户佩戴自己已拥有的徽章        |
+| `user_medal_manually_add_modal`                       | 管理端打开手动授予弹窗              |
+| `user_medal_manually_add`                             | 管理端手动授予徽章                  |
+| `user_medal_manually_remove`                          | 管理端手动收回徽章                  |
+
+手动授予要求 `_pz('user_medal_s', true)` 开启，并且当前用户具备 `medal_manually_set` 能力。这个能力在后台用户能力配置里定义，默认给管理员角色。不要单独写一个绕过 `zib_current_user_can('medal_manually_set')` 的授予接口。
+
+`user_medal_manually_add_modal` 会先验证目标用户存在，再调用 `zib_get_user_medal_manually_add_modal($id)`。这个弹窗只列出 `get_type=manually_add` 的徽章；自动徽章不会出现在手动授予列表里。每个徽章同时输出“授予”和“收回”按钮，按钮仍会在提交时二次检查 `medal_manually_set`。
+
+公开展示弹窗和写入动作也要分清：
+
+| Ajax action                                             | 访问范围   | 边界                                         |
+| ------------------------------------------------------- | ---------- | -------------------------------------------- |
+| `user_medal_info_modal`                                 | 登录和游客 | 只展示某个用户的徽章列表                     |
+| `single_medal_info_modal`                               | 登录和游客 | 只展示单个徽章说明；本人拥有时才显示佩戴按钮 |
+| `user_medal_wear`                                       | 登录用户   | 只能佩戴自己已经拥有的徽章                   |
+| `user_medal_manually_add_modal`                         | 管理能力   | 只给有 `medal_manually_set` 能力的人打开     |
+| `user_medal_manually_add`、`user_medal_manually_remove` | 管理能力   | 授予或收回目标用户的手动徽章                 |
+
+如果要在业务完成时给用户授予徽章，优先调用 `zib_add_user_medal()`，让它处理徽章存在性、防重复、消息通知和 `user_add_medal` Hook。只有后台管理动作才应该走 `user_medal_manually_add` 这类 Ajax。
+
+主题会在当前用户 Ajax 中执行自动徽章检查：
+
+```php
+add_action('ajax_get_current_user', array('zib_auto_add_user_medal', 'init'));
+```
+
+执行过程是：读取 `zib_get_medal_args('get')`，移除 `manually_add`，然后逐个检查 `method_exists('zib_user_float_data', $get_type)`。用户数值大于等于 `get_val` 时调用 `zib_add_user_medal()`。因此自动条件必须保持轻量，因为用户中心、浮窗或前台刷新当前用户状态时都可能触发这段逻辑。
+
+徽章展示主要挂在两个位置：
+
+| 位置             | Hook                     |
+| ---------------- | ------------------------ |
+| 用户主页头部说明 | `user_page_header_desc`  |
+| 作者页头部身份区 | `author_header_identity` |
+
+前台弹窗和链接使用主题函数输出，例如 `zib_get_user_medal_info_link()`、`zib_get_single_medal_info_link()`、`zib_get_medal_wear_link()`、`zib_get_user_medal_info_modal()`。如果你要在新位置展示徽章，优先复用这些函数，这样 Ajax 弹窗、佩戴按钮和图标结构能保持一致。
+
+重置用户徽章数据只适合配置误改后的修复场景。后台 `reset_user_medal` 会批量处理用户 meta，且界面已提示“重置后不可恢复”。上线站点执行前应先备份数据库，并确认徽章配置已经稳定。
+
+## 邀请码
+
+邀请码使用 `ZibCardPass` 保存，类型是 `invit_code`。后台注册设置由 `invit_code_s` 控制：
+
+| 模式    | 说明                 | 表单表现                                 |
+| ------- | -------------------- | ---------------------------------------- |
+| `close` | 关闭邀请码注册       | 注册表单不显示邀请码                     |
+| `open`  | 选填邀请码           | 注册表单直接显示 `invit_code` 输入框     |
+| `must`  | 必须有邀请码才能注册 | 先显示邀请码验证页，通过后再进入注册表单 |
+
+说明文案分别来自 `invit_code_open_desc` 和 `invit_code_must_desc`。强制邀请码模式会先输出 `zib_get_user_invit_code_must_verify_from()`，表单里包含人机验证、`wp_nonce_field($action, '_wpnonce')` 和 `action=invit_code_must_verify`。
+
+强制模式的验证流程：
+
+```php
+add_action('wp_ajax_invit_code_must_verify', 'zib_ajax_invit_code_must_verify');
+add_action('wp_ajax_nopriv_invit_code_must_verify', 'zib_ajax_invit_code_must_verify');
+```
+
+`zib_ajax_invit_code_must_verify()` 会先执行：
+
+```php
+zib_ajax_man_machine_verification();
+zib_ajax_verify_nonce();
+```
+
+再调用 `zib_ajax_invit_code_verify()` 查询有效邀请码。真正注册时，`action/sign_register.php` 仍会再次执行 `zib_ajax_invit_code_verify()`，所以前端通过“继续”按钮不等于已经消耗邀请码。
+
+有效邀请码查询条件是：
+
+```php
+ZibCardPass::get_row(array(
+    'password' => $code,
+    'type'     => 'invit_code',
+    'status'   => '0',
+));
+```
+
+也就是说，邀请码本质是卡密表中的一种类型，`status = 0` 表示可用，使用后会更新为 `used`。注册成功后才会调用：
+
+```php
+zib_use_invit_code($user_id, $invit_code_obj);
+do_action('zib_use_invit_code', $user_id, $invit_code_obj);
+```
+
+`zib_use_invit_code()` 会把使用者写入邀请码 meta：
+
+```php
+$data = array(
+    'id'     => $invit_code_obj->id,
+    'status' => 'used',
+    'meta'   => array_merge(
+        $invit_code_obj->meta,
+        array(
+            'user_id' => $user_id,
+        )
+    ),
+);
+ZibCardPass::update($data);
+```
+
+主题内置的 `zib_use_invit_code_reward()` 会处理奖励：
+
+| 奖励 key         | 处理方式                             |
+| ---------------- | ------------------------------------ |
+| `level_integral` | 调用 `zib_add_user_level_integral()` |
+| `points`         | 调用 `zibpay_update_user_points()`   |
+| `balance`        | 调用 `zibpay_update_user_balance()`  |
+| `vip`            | 调用 `zibpay_update_user_vip()`      |
+
+奖励字段来自 `CFS_Module::invit_code_reward()`。展示奖励说明时使用：
+
+```php
+zib_get_invit_code_reward_text($reward, '、');
+```
+
+这里的 `reward` 是给“使用邀请码完成注册的新用户”的奖励。源码里后台列表曾预留读取 `meta.referrer_reward` 的变量，但列表列输出被注释，`zib_use_invit_code_reward()` 也不会处理 `referrer_reward`。如果要做邀请人奖励，不要只往邀请码 meta 里写 `referrer_reward` 后期待主题自动发放；应监听 `zib_use_invit_code`，自己找到邀请人并做幂等发放。
+
+示例：按邀请码创建者给邀请人奖励一次：
+
+```php
+function zib_docs_invit_referrer_reward($user_id, $invit_code_obj)
+{
+    if (!$user_id || empty($invit_code_obj->id)) {
+        return;
+    }
+
+    $meta = is_array($invit_code_obj->meta) ? $invit_code_obj->meta : array();
+    if (!empty($meta['docs_referrer_rewarded'])) {
+        return;
+    }
+
+    $referrer_id = !empty($meta['create_user_id']) ? (int) $meta['create_user_id'] : 0;
+    if (!$referrer_id || $referrer_id === (int) $user_id) {
+        return;
+    }
+
+    zibpay_update_user_points($referrer_id, array(
+        'order_num' => '',
+        'value'     => 20,
+        'type'      => __('邀请奖励', 'zib_language'),
+        'desc'      => __('邀请用户注册奖励', 'zib_language'),
+    ));
+
+    ZibCardPass::update(array(
+        'id'   => $invit_code_obj->id,
+        'meta' => array_merge($meta, array(
+            'docs_referrer_rewarded' => current_time('mysql'),
+        )),
+    ));
+}
+add_action('zib_use_invit_code', 'zib_docs_invit_referrer_reward', 20, 2);
+```
+
+这个例子只是说明挂载位置和幂等思路。实际邀请人来源要以你的业务为准，可以来自邀请码 meta、用户 `referrer_id`、推广链接保存的推荐人，或后台创建邀请码时写入的创建者字段。关键是不要重复奖励，也不要在注册前的 `invit_code_must_verify` 预检阶段发放奖励。
+
+批量创建邀请码用：
+
+```php
+zib_generate_invit_code($num, $rand_password, $reward, $remarks);
+```
+
+它会循环调用 `ZibCardPass::add()`，写入 `password`、`type=invit_code`、`status=0`、`meta.reward` 和 `other` 备注。后台邀请码管理页也复用这套能力。
+
+### 邀请码后台管理页
+
+邀请码后台页是：
+
+```txt
+users.php?page=invit_code
+```
+
+页面入口在 `inc/functions/user/admin/invit-code-page.php`，只有超级管理员可访问：
+
+```php
+if (!is_super_admin()) {
+    wp_die(__('您不能访问此页面', 'zib_language'), __('权限不足', 'zib_language'));
+    exit;
+}
+```
+
+即使邀请码功能未启用，后台菜单仍会注册，但页面顶部会提示去“用户互动/注册登录”开启 `invit_code_s`。这点很适合排查：后台能看到邀请码管理，不代表前台注册已经启用邀请码。
+
+后台添加邀请码有两种方式：
+
+| 方式         | 参数                                                                  | 处理                                |
+| ------------ | --------------------------------------------------------------------- | ----------------------------------- |
+| 系统自动生成 | `auto_num`、`auto_reward`、`auto_remarks`、`auto_rand_password_limit` | 调用 `zib_generate_invit_code()`    |
+| 导入邀请码   | `import_data`、`import_division`                                      | 按行拆分后调用 `ZibCardPass::add()` |
+
+导入时单行格式是：
+
+```txt
+邀请码 奖励 标识
+```
+
+默认用空格分割，也可以通过 `import_division` 自定义分隔符。奖励会用 `wp_parse_args()` 解析到 `meta.reward`，例如：
+
+```txt
+P86NpWki level_integral=100 奖励100经验值
+P86NpWki balance=10&points=20 奖励余额和积分
+auF9D2b4 balance=30&vip=1&vip_time=5 奖励余额和会员
+```
+
+导入写入的数据结构：
+
+```php
+ZibCardPass::add(array(
+    'password' => $v[0],
+    'type'     => 'invit_code',
+    'status'   => '0',
+    'meta'     => array('reward' => wp_parse_args($_reward)),
+    'other'    => !empty($v[2]) ? $v[2] : '',
+));
+```
+
+列表页查询同样走 `ZibCardPass` 表：
+
+```php
+$where = array(
+    'type' => 'invit_code',
+);
+
+if (isset($_GET['status'])) {
+    $where['status'] = $_GET['status'];
+}
+
+$db = ZibDB::name(ZibCardPass::$table_name);
+$db->where($where)->order($orderby, $desc)->page($paged, $ice_perpage);
+if ($s) {
+    $db->whereLike(array('card', 'password', 'other', 'meta'), $s);
+}
+```
+
+列表会展示邀请码、奖励、创建时间、更新时间、状态和标识。`status=0` 是未使用，`status=used` 是已使用。已使用记录会从 `meta.user_id` 显示使用者；如果 `meta.shipped_order_id` 或 `other` 中能解析出 `shipped_{order_id}`，还会显示“已售”并跳到商城发货订单。
+
+导出页使用后台 Ajax：
+
+```php
+'action' => 'card_pass_export',
+'type'   => 'invit_code',
+```
+
+它支持按 `status=all|0|used` 导出，并支持文本或 Excel 格式。扩展导出时不要另写一套读取逻辑，优先复用卡密导出链路，这样余额卡、积分卡、邀请码和商城自动发货使用的卡密结构能保持一致。
+
+批量删除只删除 `type=invit_code`：
+
+```php
+ZibCardPass::delete(array(
+    'id'   => $delete_ids,
+    'type' => 'invit_code',
+));
+```
+
+不要直接按 ID 删除整张卡密表记录，否则可能误删余额充值卡、积分兑换卡或商城自动发货卡密。删除前也要注意：已经售出或已使用的邀请码可能被订单、注册记录或奖励日志引用，生产站点应优先停用或导出备份，而不是直接批量删除。
+
+扩展邀请码使用后的业务：
+
+```php
+function zib_docs_use_invit_code($user_id, $invit_code_obj)
+{
+    if (!$user_id || empty($invit_code_obj->id)) {
+        return;
+    }
+
+    zib_update_user_meta($user_id, 'docs_registered_with_invite', current_time('mysql'));
+}
+add_action('zib_use_invit_code', 'zib_docs_use_invit_code', 20, 2);
+```
+
+如果要在商城里销售邀请码，不需要另建一套库存表。商城自动发货支持 `auto_delivery_type = invit_code`，可以选择从已有邀请码库存中取，也可以按商品配置自动创建邀请码。扩展商品发货时要继续走 `ZibCardPass` 和商城发货链路，避免用户买到的码和注册验证读取的不是同一批数据。
+
+邀请码验证包含人机验证和 nonce 检查，不要另写一个无校验的验证码查询接口。邀请码只有在用户创建成功后才应被置为已使用，注册前的验证步骤只能检查有效性，不能提前消耗库存。
+
+## 禁封与申诉
+
+用户禁封状态由：
+
+```php
+zib_updata_user_ban($user_id, $type, $info);
+```
+
+写入。注意源码函数名是 `updata`，扩展时要使用主题现有拼写。
+
+状态字段：
+
+| 字段          | 说明                           |
+| ------------- | ------------------------------ |
+| `banned`      | 禁封类型，`0` 为未禁封         |
+| `banned_time` | 到期时间，空值通常表示长期有效 |
+| `banned_log`  | 当前记录和历史记录             |
+
+禁封状态变化后触发：
+
+```php
+do_action('updata_user_ban', $user_id, $type, $info);
+```
+
+主题默认会通过这个 Hook 给用户发送站内消息和邮件通知。
+
+监听禁封变化：
+
+```php
+function zib_docs_user_ban_changed($user_id, $type, $info)
+{
+    if (!$user_id) {
+        return;
+    }
+
+    zib_update_user_meta($user_id, 'docs_ban_changed_time', current_time('mysql'));
+}
+add_action('updata_user_ban', 'zib_docs_user_ban_changed', 20, 3);
+```
+
+禁封会影响多个位置：
+
+- `zib_user_can` 最终能力判断。
+- 头像和用户名标识。
+- 作者头部身份标识。
+- 用户中心头部说明。
+- 登录限制。
+- 签到和经验获取。
+
+因此不要只在某个表单提交前检查禁封；需要统一走 `zib_user_can()`、`zib_current_user_can()`、`zib_user_is_ban()`。
+
+### 后台申诉与举报处理页
+
+禁封申诉和用户举报共用后台页 `inc/functions/user/admin/ban-page.php`，入口是：
+
+```txt
+users.php?page=user_ban
+```
+
+它默认查询两类消息：
+
+```php
+$WHERE = array('type' => array('user_report', 'ban_appeal'));
+```
+
+页面支持按类型切换：
+
+| 参数          | 消息 type     | 含义         |
+| ------------- | ------------- | ------------ |
+| `type=ban`    | `ban_appeal`  | 用户禁封申诉 |
+| `type=report` | `user_report` | 用户举报     |
+
+也支持 `status`、`send_user`、`id`、`report_user` 和搜索词筛选。`report_user` 会查询消息 meta 中的 `report_user_id_` 标记，用于查看某个用户被举报的记录。
+
+提交处理时通过隐藏字段区分处理类型：
+
+```php
+if ('process_submit' === $action && $process_type) {
+    $process_user_id = !empty($_REQUEST['user_id']) ? (int) $_REQUEST['user_id'] : 0;
+    $process         = !empty($_REQUEST['process']) ? (int) $_REQUEST['process'] : 0;
+    $desc            = isset($_REQUEST['desc']) ? trim(strip_tags($_REQUEST['desc'])) : '';
+    $process_id      = !empty($_REQUEST['process_id']) ? (int) $_REQUEST['process_id'] : 0;
+
+    if ('user_report' === $process_type) {
+        $send_user = !empty($_REQUEST['send_user']) ? $_REQUEST['send_user'] : 0;
+        zib_user_report_process($process_id, $send_user, $desc);
+    } else {
+        zib_user_ban_appeal_process($process_id, $process_user_id, $process, $desc);
+    }
+}
+```
+
+举报处理只把举报消息标记为处理完成，并把处理说明反馈给举报人；是否禁封被举报用户，需要管理员根据页面中展示的用户状态另行进入用户主页或禁封弹窗处理。申诉处理则可能解封用户：通过时走 `zib_user_ban_appeal_process()`，拒绝时保留原禁封状态并回写处理留言。
+
+扩展这类后台流程时要保留“两段式”边界：
+
+1. 举报是举报消息处理，不自动等于禁封。
+2. 禁封申诉是对既有禁封状态的复核，不应重新生成一条无来源的禁封记录。
+3. 页面展示可读取 `zib_get_user_ban_info()`，写入必须走 `zib_user_report_process()`、`zib_user_ban_appeal_process()` 或 `zib_updata_user_ban()`。
+
+例如在举报处理完成后补一条审计记录，可以监听处理函数创建的 `user_report_reply` 消息。不要把举报人的举证图片、违规链接和后台处理说明输出到公开作者页：
+
+```php
+function zib_docs_user_report_reply_message($values)
+{
+    if (empty($values['type']) || 'user_report_reply' !== $values['type']) {
+        return;
+    }
+
+    update_option('docs_last_user_report_process_time', current_time('mysql'), false);
+}
+add_action('zib_add_message', 'zib_docs_user_report_reply_message');
+```
+
+## Ajax 动作清单
+
+| Ajax action                     | 登录要求       | 用途             |
+| ------------------------------- | -------------- | ---------------- |
+| `user_checkin`                  | 登录           | 当前用户签到     |
+| `checkin_details_modal`         | 登录           | 签到详情弹窗     |
+| `user_auth_info_modal`          | 可公开         | 用户认证信息弹窗 |
+| `user_auth_apply_modal`         | 登录           | 认证申请弹窗     |
+| `user_auth_apply`               | 登录           | 提交认证申请     |
+| `user_medal_info_modal`         | 可公开         | 用户徽章明细弹窗 |
+| `single_medal_info_modal`       | 可公开         | 单个徽章说明弹窗 |
+| `user_medal_wear`               | 登录           | 佩戴徽章         |
+| `user_medal_manually_add_modal` | 管理能力       | 手动授予徽章弹窗 |
+| `user_medal_manually_add`       | 管理能力       | 手动授予徽章     |
+| `user_medal_manually_remove`    | 管理能力       | 手动收回徽章     |
+| `set_user_ban_modal`            | 管理能力       | 禁封设置弹窗     |
+| `set_user_ban`                  | 管理能力       | 更新禁封状态     |
+| `user_ban_info_modal`           | 本人或管理能力 | 禁封信息弹窗     |
+| `user_ban_appeal_modal`         | 本人           | 禁封申诉弹窗     |
+| `user_ban_appeal`               | 本人或游客场景 | 提交申诉         |
+| `invit_code_must_verify`        | 可公开         | 注册时验证邀请码 |
+
+公开弹窗只应展示公开资料。涉及写入的 Ajax 必须校验 nonce、登录态、能力和目标用户。
+
+## 扩展建议
+
+| 需求                     | 推荐入口                                       |
+| ------------------------ | ---------------------------------------------- |
+| 签到后同步外部系统       | `user_checkined`                               |
+| 增加自定义经验来源       | 业务完成后调用 `zib_add_user_level_integral()` |
+| 扩展能力角色             | `is_can_roles`                                 |
+| 最终拦截某个能力         | `zib_user_can`                                 |
+| 认证处理后发送额外通知   | `user_auth_apply_process_newmsg`               |
+| 增加徽章配置             | `user_medal_args`                              |
+| 邀请码使用后记录业务数据 | `zib_use_invit_code`                           |
+| 禁封状态变化后同步审计   | `updata_user_ban`                              |
+
+## 风险清单
+
+- 不要直接更新 `level`，应更新 `level_integral` 或调用等级经验函数。
+- 不要把经验 `$key` 写成用户可控内容。
+- 不要给禁封用户绕过 `zib_user_can()` 的写入入口。
+- 不要在公开 Ajax 中泄露手机号、邮箱、余额、订单、申诉详情或后台处理备注。
+- 不要在当前用户 Ajax 自动徽章检查里做重型查询。
+- 不要自行生成无状态的邀请码，主题的邀请码依赖 `ZibCardPass` 状态和奖励 meta。
+- 不要只做前端隐藏按钮，敏感操作必须在服务端再次判断能力。

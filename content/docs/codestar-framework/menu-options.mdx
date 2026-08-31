@@ -1,0 +1,333 @@
+---
+title: 导航菜单项配置
+description: 拆解子比主题导航菜单项的 CSF 配置、zib_menu_options 保存结构、zib_menu_pz 读取和高级子菜单字段。
+---
+
+## 文件位置
+
+导航菜单项配置在：
+
+```txt
+inc/options/metabox-options.php
+```
+
+注册函数：
+
+```php
+function zib_admin_widgets_register_menu_options()
+```
+
+挂载点：
+
+```php
+add_action('after_setup_theme', 'zib_admin_widgets_register_menu_options', 20);
+```
+
+前台读取和渲染主要在：
+
+```txt
+inc/functions/zib-header.php
+```
+
+## Prefix
+
+菜单项配置的 prefix 是固定的：
+
+```php
+$prefix = 'zib_menu_options';
+```
+
+注册：
+
+```php
+CSF::createNavMenuOptions($prefix, array(
+    'data_type' => 'serialize',
+));
+```
+
+这意味着每个菜单项都会把配置保存到当前菜单项的 post meta：
+
+```txt
+wp_postmeta.post_id = 菜单项 ID
+wp_postmeta.meta_key = zib_menu_options
+```
+
+读取时必须传菜单项 ID，不是分类 ID，也不是文章 ID。
+
+## 读取函数
+
+`zib_menu_pz()` 在 `inc/functions/zib-header.php`：
+
+```php
+function zib_menu_pz($id, $key = '', $default = '')
+{
+    static $options = [];
+    if (!isset($options[$id])) {
+        $options[$id] = get_post_meta($id, 'zib_menu_options', true);
+    }
+
+    return zib_get_array_value($options[$id], $key, $default);
+}
+```
+
+使用示例：
+
+```php
+$icon  = zib_menu_pz($item->ID, 'icon');
+$badge = zib_menu_pz($item->ID, 'badge');
+```
+
+读取嵌套字段：
+
+```php
+$items = zib_menu_pz($item->ID, 'graphic_card_opts.items', array());
+```
+
+如果 `zib_get_array_value()` 支持点路径，就可以读取嵌套键；否则先取父数组再读子键：
+
+```php
+$opts  = zib_menu_pz($item->ID, 'graphic_card_opts', array());
+$items = !empty($opts['items']) ? $opts['items'] : array();
+```
+
+## 基础字段
+
+主题菜单项默认字段包括：
+
+```php
+array(
+    'id'    => 'icon',
+    'title' => __('图标', 'zib_language'),
+    'type'  => 'icon',
+),
+array(
+    'id'    => 'badge',
+    'type'  => 'text',
+    'title' => __('徽章', 'zib_language'),
+),
+array(
+    'dependency' => array('badge', '!=', ''),
+    'title'      => __('徽章背景色', 'zib_language'),
+    'class'      => 'compact skin-color',
+    'id'         => 'badge_class',
+    'default'    => 'jb-red',
+    'type'       => 'palette',
+    'options'    => CFS_Module::zib_palette(),
+),
+```
+
+前台常见输出逻辑：
+
+```php
+$icon = zib_menu_pz($item->ID, 'icon');
+if ($icon) {
+    echo zib_get_cfs_icon($icon, 'mr6');
+}
+
+$badge = zib_menu_pz($item->ID, 'badge');
+if ($badge) {
+    $badge_class = zib_menu_pz($item->ID, 'badge_class', 'jb-red');
+    echo '<badge class="' . esc_attr($badge_class) . '">' . esc_html($badge) . '</badge>';
+}
+```
+
+## 高级子菜单开关
+
+高级子菜单由 `submenu_s` 控制：
+
+```php
+array(
+    'title'   => __('高级子菜单', 'zib_language'),
+    'type'    => 'switcher',
+    'id'      => 'submenu_s',
+    'label'   => __('使用UI更丰富、功能更强大的子菜单', 'zib_language'),
+    'default' => false,
+),
+```
+
+说明文案强调三个限制：
+
+- 仅在当前菜单为一级菜单时生效。
+- 当前菜单下的默认子项目会失效。
+- 高级子菜单内容较多，要考虑移动端。
+
+子菜单类型：
+
+```php
+array(
+    'dependency' => array('submenu_s', '!=', ''),
+    'title'      => __('子菜单类型', 'zib_language'),
+    'id'         => 'submenu_type',
+    'type'       => 'radio',
+    'inline'     => true,
+    'default'    => 'graphic_card',
+    'options'    => array(
+        'graphic_card'       => __('图文卡片', 'zib_language'),
+        'multi_column_links' => __('多栏目链接', 'zib_language'),
+    ),
+),
+```
+
+## 图文卡片结构
+
+图文卡片字段在 `graphic_card_opts` 中：
+
+```php
+array(
+    'dependency' => array('submenu_s|submenu_type', '!=|==', '|graphic_card'),
+    'id'         => 'graphic_card_opts',
+    'type'       => 'fieldset',
+    'fields'     => array(
+        array(
+            'id'                     => 'items',
+            'type'                   => 'group',
+            'accordion_title_number' => '1',
+            'sanitize'               => false,
+            'button_title'           => __('添加图文卡片', 'zib_language'),
+            'fields'                 => array(
+                array(
+                    'placeholder' => __('请输入标题', 'zib_language'),
+                    'id'          => 'title',
+                    'type'        => 'text',
+                ),
+                array(
+                    'id'          => 'img',
+                    'preview'     => true,
+                    'library'     => 'image',
+                    'class'       => 'compact',
+                    'placeholder' => __('图片', 'zib_language'),
+                    'type'        => 'upload',
+                ),
+                array(
+                    'id'           => 'link',
+                    'type'         => 'link',
+                    'add_title'    => __('添加链接', 'zib_language'),
+                    'edit_title'   => __('编辑链接', 'zib_language'),
+                    'remove_title' => __('删除链接', 'zib_language'),
+                ),
+            ),
+        ),
+    ),
+);
+```
+
+读取：
+
+```php
+$opts  = zib_menu_pz($item->ID, 'graphic_card_opts', array());
+$cards = !empty($opts['items']) ? $opts['items'] : array();
+
+foreach ($cards as $card) {
+    $title = !empty($card['title']) ? $card['title'] : '';
+    $img   = !empty($card['img']) ? $card['img'] : '';
+    $link  = !empty($card['link']['url']) ? $card['link']['url'] : '';
+}
+```
+
+## 多栏目链接结构
+
+多栏目链接类型使用另一个字段组。它适合做类似“产品、资源、帮助”这样的多列菜单。
+
+读取时先判断类型：
+
+```php
+if (!zib_menu_pz($item->ID, 'submenu_s')) {
+    return;
+}
+
+$type = zib_menu_pz($item->ID, 'submenu_type', 'graphic_card');
+
+if ($type === 'multi_column_links') {
+    $opts = zib_menu_pz($item->ID, 'multi_column_links_opts', array());
+}
+```
+
+处理 group 字段时始终先判断数组：
+
+```php
+$columns = !empty($opts['items']) && is_array($opts['items']) ? $opts['items'] : array();
+```
+
+## 菜单项 ID
+
+`zib_menu_pz()` 的第一个参数必须是菜单项 ID：
+
+```php
+zib_menu_pz($item->ID, 'icon');
+```
+
+不要传：
+
+```php
+zib_menu_pz($item->object_id, 'icon');
+```
+
+`$item->object_id` 是菜单项指向的文章、分类或页面 ID，不是菜单项自身 ID。
+
+## 输出安全
+
+菜单字段会直接影响前台导航，输出时按类型转义：
+
+```php
+echo esc_html($title);
+echo esc_url($url);
+echo esc_attr($class);
+echo wp_kses_post($desc);
+```
+
+图标字段建议走主题函数：
+
+```php
+echo zib_get_cfs_icon($icon, 'fa-fw');
+```
+
+链接字段通常是数组：
+
+```php
+$url    = !empty($link['url']) ? $link['url'] : '';
+$target = !empty($link['target']) && $link['target'] === '_blank' ? ' target="_blank"' : '';
+```
+
+## 常见错误
+
+### 重新创建了错误 prefix
+
+错误：
+
+```php
+CSF::createNavMenuOptions('custom_menu_options', array(
+    'data_type' => 'serialize',
+));
+```
+
+如果想让 `zib_menu_pz()` 读到字段，必须使用 `zib_menu_options`。
+
+### 在子菜单项开启高级子菜单
+
+高级子菜单仅适合一级菜单项。对子菜单项开启后，前台结构可能不会按预期显示。
+
+### 字段 id 冲突
+
+主题已经使用：
+
+```txt
+icon
+badge
+badge_class
+submenu_s
+submenu_type
+graphic_card_opts
+multi_column_links_opts
+```
+
+新增字段时先搜索源码，避免覆盖主题字段。
+
+### 移动端溢出
+
+高级子菜单字段允许配置大量图片、链接和徽章。移动端渲染前要考虑：
+
+- 图片数量。
+- 标题长度。
+- 列数。
+- 默认子菜单是否被替换。
+- PC 和移动菜单是否应该分开配置。

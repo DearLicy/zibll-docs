@@ -1,0 +1,144 @@
+---
+title: GitHub 社区
+description: 说明子比主题开发文档的仓库、Issue、Discussions、Pull Request 和自动化协作流程。
+icon: Github
+---
+
+本站的 GitHub 仓库不只是源码下载地址，也是文档纠错、源码核对、功能讨论、版本追踪和工具发布的公开社区。整体信息架构参考 [New API 文档仓库](https://github.com/QuantumNous/new-api-docs-v1)：文档负责沉淀结论，Issue 负责追踪问题，Discussion 负责交流方案，Pull Request 负责合并可复核的修改。
+
+## 社区入口
+
+<Cards>
+  <Card
+    title="GitHub 仓库"
+    description="查看 MDX、MCP 包、Codex 插件和自动化配置。"
+    href="https://github.com/DearLicy/zibll-docs"
+  />
+  <Card
+    title="Issues"
+    description="提交可复现问题、文档错误、功能建议和友情链接申请。"
+    href="https://github.com/DearLicy/zibll-docs/issues"
+  />
+  <Card
+    title="Discussions"
+    description="讨论架构、源码研究、实践案例和长期方向。"
+    href="https://github.com/DearLicy/zibll-docs/discussions"
+  />
+  <Card
+    title="Pull Requests"
+    description="提交经过检查的文档、组件、测试和工作流修改。"
+    href="https://github.com/DearLicy/zibll-docs/pulls"
+  />
+</Cards>
+
+## 仓库组成
+
+| 目录或文件                                     | 职责                                     |
+| ---------------------------------------------- | ---------------------------------------- |
+| `content/docs`                                 | Fumadocs MDX 内容、分类元数据和侧栏顺序  |
+| `data/friends.json`                            | 已审核的友情链接卡片数据                 |
+| `packages/zibll-docs-mcp`                      | 本地只读 stdio MCP npm 包                |
+| `plugins`                                      | Codex 插件和 Skill                       |
+| `workers`                                      | GitHub App feedback Bot 的独立动态适配层 |
+| `.github/workflows/pages.yml`                  | 构建并发布 GitHub Pages                  |
+| `.github/workflows/quality.yml`                | 类型、格式、导航、MCP 和社区配置检查     |
+| `.github/workflows/friend-link-bot.yml`        | 友情链接格式校验和待审核 PR              |
+| `.github/workflows/deploy-feedback-worker.yml` | 手动部署 GitHub App feedback Worker      |
+| `.github/workflows/sync-labels.yml`            | 同步统一标签定义                         |
+| `.github/workflows/publish-mcp.yml`            | 发布 `zibll-docs-mcp` npm 包             |
+
+本地 `主题插件子主题/` 目录只作为源码参考，不进入 GitHub Pages 或公开 npm 包。MCP 只有在用户主动挂载目录时才读取源码，而且始终只读。
+
+## 选择正确的入口
+
+| 场景                             | 推荐入口                             | 处理方式                                                          |
+| -------------------------------- | ------------------------------------ | ----------------------------------------------------------------- |
+| 页面内容错误、链接失效、示例缺失 | 文档页底部反馈                       | 页面把当前 URL 和说明发送给 GitHub App Bot，由 Bot 自动创建 Issue |
+| 可复现的主题或插件问题           | `可复现问题` Issue Form              | 填写版本、源码路径、复现步骤、实际结果和期望结果                  |
+| 新增文档或修正文案               | Pull Request                         | 修改 `content/docs`，通过构建、类型、导航和 MCP 检查后合并        |
+| 新功能或架构建议                 | `功能建议` Issue Form 或 Discussions | 先说明问题和使用场景，再讨论实现边界                              |
+| 友情链接申请                     | `申请友情链接` Issue Form            | 自动校验字段并生成待维护者审核的 PR，最终由人工确认               |
+| 安全漏洞或敏感信息               | Security 私下报告                    | 不要在公开 Issue 粘贴密钥、Cookie、密码、生产日志或未修复漏洞细节 |
+
+## 文档反馈的实际链路
+
+文档页的“有帮助 / 没帮助”不是普通的 `issues/new` 链接。它经过独立 Worker 写入 GitHub：
+
+1. 浏览器校验评价和说明，并发送当前页面地址。
+2. Worker 校验 Origin、Pages 路径、输入大小和文本长度。
+3. Worker 使用 GitHub App 的短期 installation token 创建 Issue。
+4. 前端只有在收到 GitHub 返回的 Issue URL 后，才显示成功状态和查看链接。
+
+Pages 不保存反馈内容，Worker 也不保存长期业务数据。未配置 `FEEDBACK_ENDPOINT` 时，页面会明确显示 Bot 尚未启用，不会伪造提交成功。部署和密钥配置见 [GitHub feedback bot](/docs/community/feedback#github-bot)。
+
+友情链接是另一条链路：申请表会打开公开 GitHub Issue，Actions 负责格式校验并生成待审核 PR；维护者需要实际访问网站、检查回链和内容后再合并。邮箱和回链只保留在公开申请记录中，不会写入 `data/friends.json`。
+
+## Pages 发布
+
+`.github/workflows/pages.yml` 使用 GitHub 官方 Pages artifact 流程：
+
+1. `actions/configure-pages` 计算仓库项目路径和公共 origin。
+2. Fumadocs 生成 source，Next.js 导出 `out/`。
+3. `actions/upload-pages-artifact` 上传静态文件。
+4. `actions/deploy-pages` 发布到 Pages。
+
+工作流自动注入 `NEXT_PUBLIC_BASE_PATH` 和 `NEXT_PUBLIC_SITE_URL`，所以文档、canonical、sitemap、Markdown 和 MCP 清单都能使用实际公共地址。页面层保持静态，动态反馈由独立 Worker 按需运行；两者不共享数据库或登录态。
+
+## Issue、Discussion 与 Pull Request
+
+仓库关闭空白 Issue，用户从 `.github/ISSUE_TEMPLATE/` 选择模板。模板已经要求填写版本、复现步骤和敏感信息脱敏，提交前应先搜索现有 Issue 和文档。
+
+Discussions 适合以下内容：
+
+- 子比主题源码结构和版本差异的研究记录。
+- 插件、子主题、Codestar Framework 或 WordPress AI 的设计方案。
+- MCP、Skill、Codex 插件的使用案例。
+- 还没有形成明确修复任务的长期方向讨论。
+
+已经可以复现、需要明确修复或需要关联提交的问题，应回到 Issue 和 Pull Request 中，避免只留在群聊里。
+
+仓库标签由 `.github/labels.json` 统一定义，并由 `sync-labels.yml` 自动同步；Pull Request 会根据修改路径自动标记为文档、前端、MCP、插件、Worker 或 GitHub Actions。这样维护者不需要依赖手工记忆来分流新内容。
+
+项目角色、决策方式、内容证据和发布规则见 [社区治理](/docs/community/governance)。
+
+## MCP 包发布
+
+`zibll-docs-mcp` 是独立的本地工具，不是 Pages 的在线接口。维护者修改 `packages/zibll-docs-mcp/package.json` 的版本后创建 `mcp-v<版本>` 标签，发布工作流会：
+
+1. 安装依赖并重新生成文档数据。
+2. 运行 MCP 协议检查。
+3. 检查 npm tarball 是否携带 `data/docs.json`。
+4. 使用仓库 `NPM_TOKEN` 发布公开包。
+
+`prepack` 会从 `content/docs` 生成随包数据，因此不需要把构建产物提交到仓库。详细命令见 [参与共建](/docs/community/contributing) 和 [`packages/zibll-docs-mcp/README.md`](https://github.com/DearLicy/zibll-docs/blob/main/packages/zibll-docs-mcp/README.md)。
+
+## 维护者初始化清单
+
+仓库首次推送 `main` 后，完成 GitHub CLI 授权并执行：
+
+```bash
+npm run github:setup
+```
+
+该命令会幂等更新并回读验证仓库描述、主页、Topics、Issues、Discussions、合并策略、Actions 权限、标签、Pages 构建类型和 `main` 分支的 `Validate and build` 门禁。它不会创建提交、推送代码、写入 Actions secret，也不会修改其他仓库。
+
+随后完成需要人工授权的部分：
+
+1. 检查 GitHub 自动创建的 Discussion 分类，并按社区需要调整公告、问答、案例和源码研究分类。
+2. 阅读 [GitHub feedback bot](/docs/community/feedback#github-bot)，创建只安装到本仓库的 GitHub App。
+3. 在 Actions secrets 写入 Cloudflare 和 GitHub App 凭据，手动运行 `Deploy feedback GitHub App Worker`。
+4. 部署成功后运行 `npm run github:setup -- --feedback-endpoint https://<worker>.workers.dev/feedback`，由脚本写入 `FEEDBACK_ENDPOINT` Actions Variable。
+5. 配置 `NPM_TOKEN`，再用 `mcp-v<版本>` 标签发布 MCP 包。
+
+GitHub App 私钥、Cloudflare token 和 npm token 必须放在 secrets 中。仓库文件、Issue、Discussion、Actions Variable 和 Pages 前端都不能保存这些凭据。
+
+如果仓库以后迁移到 GitHub 组织，需要同步更新 `lib/project-config.ts`、Pages 公共地址、Worker 的仓库变量、插件市场源地址和本文中的入口链接。
+
+## 相关链接
+
+- [问题反馈](/docs/community/feedback)
+- [参与共建](/docs/community/contributing)
+- [社区治理](/docs/community/governance)
+- [社区交流](/docs/community/community-rules)
+- [友情链接](/docs/community/friend-links)
+- [项目公告](https://www.zibll.top/forum-post/51202.html)

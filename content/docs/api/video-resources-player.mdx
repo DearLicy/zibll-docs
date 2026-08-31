@@ -1,0 +1,551 @@
+---
+title: 视频资源与播放器
+description: 梳理子比主题视频封面、DPlayer、剧集切换、iframe 嵌入、古腾堡视频块、前台投稿视频权限和 Zibpay 付费视频链路。
+---
+
+## 模块边界
+
+子比主题的视频能力分两条线：
+
+| 类型       | 负责内容                                                                  | 典型入口                                            |
+| ---------- | ------------------------------------------------------------------------- | --------------------------------------------------- |
+| 展示型视频 | 文章视频封面、列表悬停预览、小工具视频、正文视频块、iframe 嵌入、剧集切换 | `featured_video`、`zib_new_dplayer()`、古腾堡视频块 |
+| 付费型视频 | 购买权限、价格、会员价、订单、已购买后播放、付费视频剧集                  | `posts_zibpay.pay_type = 6`                         |
+
+二次开发时要先判断需求属于哪一条线。展示型视频只解决播放与切换；付费型视频必须走 Zibpay 的付费内容、订单和权限判断，不能只用前端隐藏视频地址。
+
+核心源码：
+
+| 文件                                               | 作用                                                                           |
+| -------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `inc/functions/functions.php`                      | `zib_get_dplayer()`、`zib_new_dplayer()` 和幻灯片视频背景                      |
+| `js/main.js`                                       | `new_dplayer()`、DPlayer 初始化、HLS/DASH/FLV 依赖加载、剧集切换、列表视频预览 |
+| `inc/functions/zib-single.php`                     | 文章顶部视频封面与剧集渲染                                                     |
+| `inc/options/metabox-options.php`                  | 文章 `featured_video`、`featured_video_title`、`featured_video_episode` 字段   |
+| `inc/functions/shop/admin/options/meta-option.php` | 商品 `cover_images`、`cover_videos`、`main_image` 字段                         |
+| `inc/functions/shop/inc/single.php`                | 商品封面轮播 `zib_shop_get_product_cover()`                                    |
+| `pages/newposts.php`                               | 前台投稿视频按钮、视频封面权限开关                                             |
+| `inc/functions/zib-theme.php`                      | TinyMCE 视频按钮和 iframe 白名单                                               |
+| `js/editextend.js`                                 | 编辑器插入视频、嵌入视频和特色封面编辑器                                       |
+| `js/gutenberg-extend.js`                           | 视频、视频剧集、超级嵌入、剧集嵌入等古腾堡块                                   |
+| `inc/widgets/widget-more.php`                      | 视频小工具、超级嵌入小工具、图文视频封面卡片                                   |
+| `zibpay/functions/admin/admin.php`                 | 付费视频字段：视频地址、封面、标题、剧集、比例                                 |
+| `zibpay/functions/zibpay-post.php`                 | 付费视频购买盒子和已购买播放区域                                               |
+
+## DPlayer 封装
+
+最底层的播放器输出入口是：
+
+```php
+zib_get_dplayer($url, $pic = '', $scale_height = 0);
+```
+
+它会把参数转交给：
+
+```php
+zib_new_dplayer($args, false);
+```
+
+`zib_new_dplayer()` 不会在服务端直接生成完整播放器，而是输出一个待初始化容器：
+
+```html
+<div
+  class="new-dplayer"
+  video-url="..."
+  video-pic="..."
+  video-type="auto"
+></div>
+```
+
+前端 `new_dplayer()` 会扫描：
+
+```js
+'.new-dplayer:not(.dplayer-initialized),[data-dplayer]:not(.dplayer-initialized)';
+```
+
+然后调用 `get_new_dplayer()` 创建 DPlayer 实例。开发时要保留 `new-dplayer`、`video-url`、`video-pic`、`video-type`、`video-option` 这些约定，不要把它们改成不被主题 JS 识别的字段。
+
+服务端生成视频的推荐写法：
+
+```php
+function mytheme_get_video_box($url, $pic = '')
+{
+    if (!$url) {
+        return '';
+    }
+
+    $args = array(
+        'url'             => esc_url($url),
+        'pic'             => esc_url($pic),
+        'scale_height'    => 56,
+        'preload'         => 'metadata',
+        'hide_controller' => false,
+        'mutex'           => true,
+        'type'            => 'auto',
+    );
+
+    return zib_new_dplayer($args, false);
+}
+```
+
+`zib_new_dplayer()` 支持的常用参数：
+
+| 参数              | 说明                                     |
+| ----------------- | ---------------------------------------- |
+| `url`             | 视频地址，必填                           |
+| `pic`             | 视频封面                                 |
+| `scale_height`    | 固定比例，写入 CSS 变量 `--scale-height` |
+| `autoplay`        | 自动播放                                 |
+| `loop`            | 循环播放                                 |
+| `hide_controller` | 隐藏控制条                               |
+| `preload`         | `none`、`metadata`、`auto`               |
+| `volume`          | 初始音量，`1` 为默认                     |
+| `mutex`           | 播放时是否互斥暂停其他播放器             |
+| `type`            | DPlayer 视频类型，默认 `auto`            |
+
+## 前端初始化
+
+播放器初始化在 `js/main.js`：
+
+1. `auto_fun()` 每次动态内容加载后都会调用 `new_dplayer()`。
+2. `new_dplayer()` 找到未初始化的 `.new-dplayer`。
+3. `get_new_dplayer()` 读取 `video-url`、`video-pic`、`video-type`、`data-volume`、`video-option`。
+4. 根据 URL 后缀追加依赖：`.m3u` 加载 `hls`，`.mpd` 加载 `dash`，`.flv` 加载 `flv`。
+5. 通过 `tbquire()` 加载依赖。
+6. 创建 `new DPlayer(option)`。
+7. 把实例保存到元素 data 和 `_win.dplayer.obj`。
+
+如果你通过 Ajax 插入视频 HTML，插入完成后调用：
+
+```js
+auto_fun();
+```
+
+不要只追加 HTML 后期待浏览器自己识别。主题的视频、轮播、上传、弹窗、代码高亮等前端能力都是通过 `auto_fun()` 做二次初始化。
+
+## 视频剧集
+
+主题的剧集切换依赖 `.new-dplayer` 和同级 `.dplayer-featured .switch-video`。
+
+服务端结构大致是：
+
+```html
+<div class="new-dplayer" video-url="第一集地址"></div>
+<div class="dplayer-featured">
+  <a class="switch-video active" video-url="第一集地址">第1集</a>
+  <a class="switch-video" video-url="第二集地址">第2集</a>
+</div>
+```
+
+初始化时，`new_dplayer()` 会：
+
+1. 找到播放器同级的 `.dplayer-featured .switch-video`。
+2. 把 `video-url` 和 `video-pic` 保存到 jQuery data。
+3. 给每个剧集按钮写入当前播放器的 `dplayer-id`。
+4. 移除按钮上的原始 `video-url` 和 `video-pic` 属性。
+
+点击 `.switch-video` 时，主题会读取 `dplayer-id` 找到播放器实例，并调用：
+
+```js
+dplayer.switchVideo({
+  url: video_url,
+  type: 'auto',
+  pic: video_pic,
+});
+```
+
+所以扩展剧集时，不要在点击时销毁并重建播放器。保持 `.switch-video` 结构，让主题 JS 接管切源即可。
+
+## 文章视频封面
+
+文章顶部视频封面由 `zib_single_cover()` 渲染。它的启用条件是：
+
+```php
+_pz('article_video_cover')
+```
+
+文章 meta 字段：
+
+| 字段                     | 说明                                  |
+| ------------------------ | ------------------------------------- |
+| `featured_video`         | 主视频地址                            |
+| `featured_video_title`   | 第一集标题                            |
+| `featured_video_episode` | 更多剧集，数组项包含 `title` 和 `url` |
+| `cover_image`            | 视频封面图，缺省时回退到文章缩略图    |
+
+后台字段由 `inc/options/metabox-options.php` 注册。前台投稿页在用户有权限时也会启用视频封面编辑：
+
+```php
+if (zib_current_user_can('new_post_video_cover')) {
+    add_filter('featured_video_edit', '__return_true');
+}
+```
+
+自定义保存视频封面时，不要只写 `featured_video`，还要考虑封面图和剧集：
+
+```php
+function mytheme_update_featured_video($post_id, $video_url, $pic_url = '')
+{
+    $post_id = (int) $post_id;
+    if (!$post_id || !$video_url) {
+        return false;
+    }
+
+    zib_update_post_meta($post_id, 'featured_video', esc_url_raw($video_url));
+
+    if ($pic_url) {
+        zib_update_post_meta($post_id, 'cover_image', esc_url_raw($pic_url));
+    }
+
+    return true;
+}
+```
+
+如果是前台投稿保存，应优先复用主题的 `featured_data` 提交流程，让 `zib_ajax_newpost_save_featured()` 处理权限、数据结构和保存结果。
+
+前台特色媒体从上传到显示的端到端排查见 [媒体上传](/docs/api/media-upload#特色媒体保存与显示排查)。那里区分了文章投稿和论坛发帖的保存字段：文章图片封面会同时写 `cover_image`、`thumbnail_url`，论坛帖子封面主要写 `cover_image`，不要把两个链路混在一起排查。
+
+## 商城商品封面视频
+
+商城商品封面视频不是文章 `featured_video`，也不是 Zibpay 付费视频字段。它属于商品配置 `product_config`：
+
+| 字段           | 说明                                   |
+| -------------- | -------------------------------------- |
+| `cover_images` | 商品封面图片，gallery 保存附件 ID 列表 |
+| `cover_videos` | 商品封面视频，repeater 项里保存 `url`  |
+| `main_image`   | 自定义商品主图                         |
+
+后台字段在 `inc/functions/shop/admin/options/meta-option.php`。源码说明要求先设置封面图片，再设置封面视频，因为前台会按图片索引去找同位置视频。渲染入口是 `inc/functions/shop/inc/single.php`：
+
+```php
+$cover_images = explode(',', ($product_configs['cover_images'] ?? ''));
+$cover_videos = $product_configs['cover_videos'] ?? array();
+
+foreach ($cover_images as $index => $cover_id) {
+    $img_url = zib_get_attachment_image_src((int) $cover_id, 'full');
+    if (!empty($img_url[0])) {
+        $slides[] = array(
+            'video'      => $cover_videos[$index]['url'] ?? '',
+            'background' => $img_url[0],
+        );
+    }
+}
+```
+
+如果没有封面图片，商品页会回退到商品缩略图或主题占位图，并只读取 `cover_videos[0].url`。然后规格选项图片会继续追加到轮播，使用 `product-opt-index` 和规格切换联动。
+
+所以商品封面视频的扩展边界是：
+
+| 需求                     | 应写入                                                             |
+| ------------------------ | ------------------------------------------------------------------ |
+| 商品详情页头部轮播视频   | `product_config.cover_videos`                                      |
+| 商品头部轮播图片         | `product_config.cover_images`                                      |
+| 文章顶部视频封面         | `featured_video`、`featured_video_title`、`featured_video_episode` |
+| 付费后才能播放的视频内容 | `posts_zibpay.video_url`、`video_pic`、`video_episode`             |
+
+商品封面视频只负责展示，不负责购买权限。不要把需要购买后播放的视频地址放到 `cover_videos`，因为封面轮播会直接输出给可访问商品页的用户。
+
+## 列表视频预览
+
+文章列表缩略图视频来自 `inc/functions/zib-posts-list.php`。当 `list_thumb_video_s` 开启且文章有 `featured_video` 时，列表会输出：
+
+```html
+<div class="video-thumb-box" video-url="..." data-volume="none">
+  <div class="img-thumb"></div>
+  <div class="video-thumb"></div>
+</div>
+```
+
+前端通过 `thumb_dplayer()` 在悬停或触摸时懒创建播放器，并在离开时暂停。扩展列表卡片时要保留 `.video-thumb-box[video-url]`，不要直接在列表里生成完整 DPlayer。
+
+论坛列表视频预览同样复用这套机制，只是封面来源和比例来自论坛配置。
+
+### 列表预览性能
+
+列表页的视频预览是“封面先渲染，播放器后创建”。源码会先输出普通图片缩略图和空 `.video-thumb` 容器：
+
+```php
+$video = zib_get_post_meta($post->ID, 'featured_video', true);
+if ($video && _pz('list_thumb_video_s')) {
+    $img_thumb = zib_post_thumbnail('', 'fit-cover radius8');
+    $mute_attr = _pz('list_thumb_video_mute_s', true) ? ' data-volume="none"' : ' data-volume="100"';
+
+    $_thumb = '<div class="video-thumb-box" video-url="' . esc_url($video) . '"' . $mute_attr . '>'
+        . '<div class="img-thumb">' . $img_thumb . '</div><div class="video-thumb"></div>'
+        . '</div>';
+}
+```
+
+页面底部再按屏幕宽度绑定触发区域：
+
+```js
+thumb_dplayer(
+  _wid > 640
+    ? '.posts-item .item-thumbnail,.forum-lists-cover'
+    : '.posts-item,.forum-posts',
+  '.video-thumb-box[video-url]',
+);
+```
+
+PC 端通常是缩略图区域触发，移动端扩大到整张卡片触发。第一次触发时，`thumb_dplayer()` 才创建隐藏的 `.new-dplayer.dplayer-thumb`，并调用 `get_new_dplayer()`。创建后会把原容器的 `video-url` 清空，避免重复创建播放器。
+
+```js
+var _dplayer = $(
+  '<div class="dplayer-thumb-hide new-dplayer dplayer-thumb controller-hide" data-loop="true" data-volume="' +
+    video_volume +
+    '" data-hide="true" video-url="' +
+    video_url +
+    '" video-type="auto"></div>',
+);
+_this.find('.video-thumb').html(_dplayer);
+_this.attr('video-url', '');
+get_new_dplayer(_dplayer, dplayer_init);
+```
+
+所以扩展列表卡片时要遵守三个性能边界：
+
+| 边界                                    | 原因                                                                 |
+| --------------------------------------- | -------------------------------------------------------------------- |
+| 列表初始 HTML 只输出 `.video-thumb-box` | 避免一页几十个 DPlayer、HLS、DASH、FLV 实例同时初始化                |
+| 保留 `video-url` 到第一次触发           | `thumb_dplayer()` 依赖它读取视频地址并清空，防止重复创建             |
+| 保留普通图片缩略图                      | 视频未加载、移动端无法播放、网络慢或浏览器禁止自动播放时仍有可读封面 |
+
+如果一个页面天然会展示大量视频，例如视频分类、论坛列表、搜索结果或瀑布流，建议：
+
+- 保留 `list_thumb_video_s` 给内容密度低的列表使用。
+- 大流量归档页优先只展示封面和播放角标，点击后进入详情页播放。
+- 短视频或预览片段单独准备压缩版 URL，不要直接使用付费正片或大体积原片。
+- 如果接入对象存储/CDN，给预览视频设置合适的跨域、Range 请求和缓存头。
+- Ajax 分页追加列表后不要手动逐个初始化 DPlayer，主题底部绑定已经覆盖动态触发场景。
+
+### 移动端兜底
+
+子比主题多个视频背景模块都会在字段说明里提示：移动端多数浏览器不支持视频背景，移动端只显示图片。比如图文视频封面和幻灯片组合模块的字段同时要求图片背景和视频背景，且说明“PC 端视频优先，移动端只显示图片”。
+
+这不是简单的样式取舍，而是移动端浏览器的自动播放、静音、流量和省电策略都会影响视频背景。二开时不要把视频背景当成唯一内容来源，应把图片作为真实兜底资源。
+
+| 场景               | PC 端                             | 移动端建议                                          |
+| ------------------ | --------------------------------- | --------------------------------------------------- |
+| 幻灯片视频背景     | 可优先显示视频，失败时显示图片    | 直接显示图片背景                                    |
+| 图文视频封面小工具 | 可输出视频卡片                    | 保证 `image` 有值，必要时设置 `hide=m` 或换轻量图片 |
+| 文章列表视频缩略图 | 悬停创建预览播放器                | 触摸触发但可能被浏览器限制，必须保留封面图          |
+| 论坛列表视频封面   | 按 `bbs_posts_cover_opt` 输出预览 | 使用 `video_spare_pic` 或 `cover_image` 兜底        |
+| 付费视频详情       | 用户主动点击播放                  | 可以保留播放器，但不要自动播放正片                  |
+
+后台配置视频背景时，最低要求是：每条视频背景都配一张可独立展示的图片。源码渲染小工具时会把 `image` 和 `video` 一起传给 `zib_graphic_card()`，并根据 `hide` 判断 PC/移动端显示规则：
+
+```php
+if (isset($cover['hide'])) {
+    $is_mobile = wp_is_mobile();
+    if ((!$is_mobile && $cover['hide'] === 'pc') || ($is_mobile && $cover['hide'] === 'm')) {
+        continue;
+    }
+}
+
+$card = array(
+    'img'   => isset($cover['image']) ? $cover['image'] : '',
+    'video' => isset($cover['video']) ? $cover['video'] : '',
+);
+```
+
+扩展新的视频背景模块时，也应该沿用这个结构：图片、视频、显示规则分开保存。不要只保存一个 `video_url` 后在移动端临时截图，截图生成慢、失败率高，也会让页面首屏在弱网下空白。
+
+移动端排查顺序：
+
+| 现象                     | 优先检查                                                          |
+| ------------------------ | ----------------------------------------------------------------- |
+| 移动端视频背景不播放     | 这是预期兜底，检查图片背景是否存在                                |
+| 移动端列表预览点了没声音 | `list_thumb_video_mute_s`、浏览器自动播放限制、是否主动点击播放器 |
+| 列表滚动卡顿             | 是否提前创建了完整 DPlayer，是否一页视频过多                      |
+| 视频封面空白             | `cover_image`、备用缩略图、`video_spare_pic`、CDN 图片跨域        |
+| HLS/FLV 预览失败         | 视频地址后缀、Range、跨域、浏览器兼容性和主题依赖是否加载         |
+
+## 编辑器视频
+
+TinyMCE 视频按钮由 `inc/functions/zib-theme.php` 注册。前台投稿页按能力启用按钮：
+
+```php
+if (zib_current_user_can('new_post_upload_video')) {
+    add_filter('tinymce_upload_video', '__return_true');
+}
+
+if (zib_current_user_can('new_post_iframe_video')) {
+    add_filter('tinymce_iframe_video', '__return_true');
+}
+```
+
+编辑器插入本地或外链视频时，`js/editextend.js` 会保存：
+
+```html
+<div
+  contenteditable="false"
+  data-video-url="..."
+  class="new-dplayer post-dplayer dplayer"
+></div>
+```
+
+插入 iframe 嵌入时，保存：
+
+```html
+<div class="wp-block-embed is-type-video mb20">
+  <div class="iframe-absbox">
+    <iframe src="..." allowfullscreen="allowfullscreen"></iframe>
+  </div>
+</div>
+```
+
+主题对 iframe 属性做了白名单扩展：
+
+```php
+add_filter('wp_kses_allowed_html', 'zib_allow_html_iframe_attributes', 99, 2);
+```
+
+如果允许用户输入 iframe，一定要走主题已有白名单和权限开关。不要直接把未经处理的 iframe 字符串写入正文。
+
+## 古腾堡视频块
+
+古腾堡视频相关块在 `js/gutenberg-extend.js`：
+
+| 区块     | slug                         | 保存结构                            |
+| -------- | ---------------------------- | ----------------------------------- |
+| 视频     | `zibllblock/dplayer`         | `.new-dplayer.post-dplayer`         |
+| 视频剧集 | `zibllblock/dplayerfeatured` | `.new-dplayer` + `.switch-video`    |
+| 超级嵌入 | `zibllblock/iframe`          | `.wp-block-embed iframe`            |
+| 剧集嵌入 | `zibllblock/iframeseries`    | `.iframe-series` + `.switch-iframe` |
+
+视频块保存的关键属性包括 `video-url`、`video-pic`、`video-type`、`data-loop`、`data-autoplay`、`data-volume` 和 `video-option`。区块保存的是前台可直接解析的静态 HTML。新增视频块时，要同时考虑编辑器预览、保存结构和前台 `auto_fun()` 初始化。
+
+## 小工具视频
+
+小工具里的视频模块是 `zib_widget_ui_dplayer`。它支持：
+
+| 字段              | 说明         |
+| ----------------- | ------------ |
+| `url`             | 视频地址     |
+| `pic`             | 视频封面     |
+| `autoplay`        | 自动播放     |
+| `loop`            | 循环播放     |
+| `volume`          | 初始音量     |
+| `hide_controller` | 隐藏控制按钮 |
+| `scale_height`    | 固定比例     |
+
+小工具渲染时仍然调用 `zib_new_dplayer()`。超级嵌入小工具是 `zib_widget_ui_iframe`，既支持直接填写 URL，也支持粘贴完整 iframe 代码。自定义类似小工具时，推荐复用这两个小工具的字段结构，不要另造一套播放器属性。
+
+## 付费视频字段
+
+付费视频属于 Zibpay 文章付费类型：
+
+```php
+posts_zibpay['pay_type'] = 6;
+```
+
+后台字段：
+
+| 字段                 | 说明                                  |
+| -------------------- | ------------------------------------- |
+| `video_url`          | 付费后播放的视频地址                  |
+| `video_pic`          | 付费视频封面                          |
+| `video_title`        | 第一集标题                            |
+| `video_episode`      | 更多剧集，数组项包含 `title` 和 `url` |
+| `video_scale_height` | 播放器固定比例                        |
+
+这些字段都保存在 `posts_zibpay` 里。扩展付费视频时，不要把视频地址单独保存到另一个 meta 后只改展示层，否则 Zibpay 的购买盒子、已购买盒子和订单逻辑读不到同一份数据。
+
+## 付费视频展示
+
+未购买时，`zibpay_posts_pay_box()` 会把 `video_pic` 或文章缩略图作为左侧封面，并叠加播放图标。如果存在 `video_episode`，标题前会显示“共 X 集”。
+
+已购买或免费可见时，`zibpay_posts_paid_box()` 的 `case 6` 会：
+
+1. 读取 `video_url` 和 `video_pic`。
+2. 用 `zib_get_dplayer($video_url, $video_pic, $scale_height)` 输出播放器。
+3. 读取 `video_episode`。
+4. 生成 `.featured-video-episode` 和 `.switch-video` 剧集列表。
+5. 把剧集列表追加到 `pay_doc`。
+
+缺少 `video_url` 时，已购买区域会显示“暂无视频内容”的提示。业务扩展不要在没有视频地址时继续创建空播放器。
+
+## 付费权限
+
+付费视频下单仍走 Zibpay 文章付费链路：
+
+| 环节       | 说明                                               |
+| ---------- | -------------------------------------------------- |
+| 购买盒子   | `zibpay_get_pay_form_but()`                        |
+| 收银台弹窗 | `pay_cashier_modal`                                |
+| 订单类型   | `order_type = 6`                                   |
+| 权限判断   | `zibpay_is_paid($post_id)`                         |
+| 会员价     | `vip_1_price`、`vip_2_price` 或积分会员价          |
+| 订单创建   | `zibpay/functions/zibpay-order.php` 的文章付费分支 |
+
+如果要给某个用户临时放行视频，应该扩展 `zibpay_is_paid()` 相关授权结构，而不是把视频 URL 直接输出给未授权用户。
+
+## 扩展示例
+
+在文章内容后追加一个公开视频片段：
+
+```php
+function mytheme_append_public_video($content)
+{
+    if (!is_singular('post') || !in_the_loop() || !is_main_query()) {
+        return $content;
+    }
+
+    $video_url = zib_get_post_meta(get_the_ID(), 'mytheme_public_video', true);
+    if (!$video_url) {
+        return $content;
+    }
+
+    $video = zib_new_dplayer(array(
+        'url'          => esc_url($video_url),
+        'pic'          => zib_post_thumbnail('full', 0, true),
+        'scale_height' => 56,
+        'preload'      => 'metadata',
+    ), false);
+
+    return $content . '<div class="zib-widget mt20">' . $video . '</div>';
+}
+add_filter('the_content', 'mytheme_append_public_video', 20);
+```
+
+通过 Ajax 返回视频 HTML：
+
+```php
+function mytheme_ajax_get_video()
+{
+    $post_id = !empty($_REQUEST['post_id']) ? (int) $_REQUEST['post_id'] : 0;
+    if (!$post_id) {
+        zib_send_json_error(__('参数错误', 'zib_language'));
+    }
+
+    $video_url = zib_get_post_meta($post_id, 'mytheme_public_video', true);
+    if (!$video_url) {
+        zib_send_json_error(__('暂无视频', 'zib_language'));
+    }
+
+    $html = zib_new_dplayer(array(
+        'url'          => esc_url($video_url),
+        'scale_height' => 56,
+    ), false);
+
+    zib_send_json_success(array(
+        'html' => $html,
+    ));
+}
+add_action('wp_ajax_mytheme_get_video', 'mytheme_ajax_get_video');
+add_action('wp_ajax_nopriv_mytheme_get_video', 'mytheme_ajax_get_video');
+```
+
+前端插入 `html` 后记得调用 `auto_fun()`。
+
+## 风险清单
+
+- 不把未授权视频 URL 输出到前端后再用 CSS 或 JS 隐藏。
+- 不把展示型视频当成付费视频，付费必须走 `posts_zibpay` 和 `zibpay_is_paid()`。
+- 不改掉 `.new-dplayer`、`.switch-video`、`.dplayer-featured`、`video-url`、`dplayer-id` 这些前端协议。
+- 不在 Ajax 插入视频后忘记调用 `auto_fun()`。
+- 不在列表卡片里批量创建完整播放器，应保留 `video-thumb-box` 懒加载。
+- 不允许普通用户无权限插入 iframe。
+- 不直接保存未经白名单处理的 iframe HTML。
+- 不把 `featured_video`、`product_config.cover_videos` 和 `posts_zibpay.video_url` 混用：它们分别是文章封面、商品封面轮播和付费视频内容。
+- 不在移动端强依赖视频背景，主题多个模块都会在移动端回退到图片。

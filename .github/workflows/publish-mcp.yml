@@ -1,0 +1,61 @@
+name: Publish zibll-docs-mcp
+
+on:
+  push:
+    tags:
+      - 'mcp-v*'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the current package version to npm
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-mcp
+  cancel-in-progress: false
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Generate documentation data
+        run: npm run prebuild
+
+      - name: Validate MCP protocol
+        run: npm run mcp:check
+
+      - name: Match release tag to package version
+        if: github.event_name == 'push'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="$(node -p "require('./packages/zibll-docs-mcp/package.json').version")"
+          test "mcp-v${VERSION}" = "${RELEASE_TAG}"
+
+      - name: Inspect package contents
+        run: npm pack --workspace packages/zibll-docs-mcp --dry-run
+
+      - name: Publish package
+        if: github.event_name == 'push' || inputs.publish == true
+        run: npm publish --workspace packages/zibll-docs-mcp --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -1,0 +1,320 @@
+---
+title: 文章和页面 Meta
+description: 拆解子比主题文章、页面、模板配置和侧栏 metabox 的字段渲染、保存位置与读取方式。
+---
+
+## 文件位置
+
+文章和页面相关后台字段主要在：
+
+```txt
+inc/options/metabox-options.php
+```
+
+这个文件里同时存在两种写法：
+
+| 写法                   | 代表场景                                   | 保存位置                      |
+| ---------------------- | ------------------------------------------ | ----------------------------- |
+| `ZCSF::instance()`     | 主题核心文章 Meta、页面基础 Meta、SEO Meta | `zib_update_post_meta()` 决定 |
+| `CSF::createMetabox()` | 高级筛选、百度资源提交、页面配置           | 由 CSF 的 `data_type` 决定    |
+
+读这页时要先分清字段属于哪一种，否则很容易读错保存位置。
+
+## 子比聚合 Meta
+
+子比主题把一部分常用 meta 聚合到 `zib_other_data` 中。是否聚合由 `inc/dependent.php` 的 `zib_get_option_meta_keys('post_meta')` 决定。
+
+典型聚合字段包括：
+
+```txt
+description
+keywords
+title
+layout_bg
+layout_max_width
+page_content_style
+page_header_style
+article_maxheight_xz
+no_article-navs
+show_layout
+subtitle
+featured_video_title
+featured_video_episode
+featured_slide
+featured_video
+cover_image
+thumbnail_url
+pay_hide_part
+vote_option
+vote_data
+score_detail
+documentnav_options
+```
+
+读取和写入必须优先用主题封装：
+
+```php
+$cover = zib_get_post_meta($post_id, 'cover_image', true);
+zib_update_post_meta($post_id, 'cover_image', $cover);
+```
+
+不要直接假设它一定是单独的 `wp_postmeta.meta_key = cover_image`。
+
+## 主题字段渲染方式
+
+主题会先根据字段 id 组装旧值：
+
+```php
+$option_meta_keys = zib_get_option_meta_keys('post_meta');
+$zib_meta         = get_post_meta($post->ID, 'zib_other_data', true);
+
+foreach ($fields as $field) {
+    if (!empty($field['id'])) {
+        if (in_array($field['id'], $option_meta_keys)) {
+            if (isset($zib_meta[$field['id']])) {
+                $value[$field['id']] = $zib_meta[$field['id']];
+            }
+        } else {
+            $value[$field['id']] = get_post_meta($post->ID, $field['id'], true);
+        }
+    }
+}
+```
+
+然后用 ZCSF 渲染：
+
+```php
+$csf_args = array(
+    'class'  => 'zib-post-meta',
+    'value'  => $value,
+    'form'   => false,
+    'nonce'  => false,
+    'fields' => $fields,
+);
+
+ZCSF::instance('post_meta', $csf_args);
+```
+
+保存时按白名单字段写入：
+
+```php
+foreach ($fields as $field) {
+    if (isset($_POST[$field])) {
+        zib_update_post_meta($post_id, $field, $_POST[$field]);
+    }
+}
+```
+
+这套写法的好处是：字段展示保持 CSF 风格，保存仍由主题统一封装，聚合字段不会写散。
+
+## 文章主 Meta
+
+普通文章编辑页里的主题配置属于 `post` 类型。源码里会判断当前是否是 `post.php` 或 `post-new.php`，再注册对应 metabox。
+
+常见字段用途：
+
+| 字段                   | 用途             |
+| ---------------------- | ---------------- |
+| `subtitle`             | 文章副标题       |
+| `show_layout`          | 单篇布局         |
+| `cover_image`          | 封面图           |
+| `thumbnail_url`        | 列表缩略图       |
+| `featured_video`       | 特色视频         |
+| `featured_slide`       | 特色幻灯片       |
+| `article_maxheight_xz` | 内容高度限制     |
+| `no_article-navs`      | 是否关闭文章目录 |
+
+前台读取示例：
+
+```php
+$subtitle = zib_get_post_meta(get_the_ID(), 'subtitle', true);
+if ($subtitle) {
+    echo '<div class="muted-color">' . esc_html($subtitle) . '</div>';
+}
+```
+
+图片字段输出：
+
+```php
+$cover = zib_get_post_meta(get_the_ID(), 'cover_image', true);
+if ($cover) {
+    echo '<img src="' . esc_url($cover) . '" alt="">';
+}
+```
+
+## 页面主 Meta
+
+页面也会使用 ZCSF 渲染一部分基础配置，例如布局、页面标题、页面内容样式、SEO 等。这类字段仍然走 `zib_update_post_meta()`。
+
+页面模板中常见读取方式：
+
+```php
+$layout = zib_get_post_meta(get_the_ID(), 'show_layout', true);
+$style  = zib_get_post_meta(get_the_ID(), 'page_content_style', true);
+```
+
+判断页面模板时使用 WordPress 原生函数：
+
+```php
+if (is_page_template('pages/user-sign.php')) {
+    return;
+}
+```
+
+## `page_config`
+
+页面还有一类独立配置用 `CSF::createMetabox()` 创建，prefix 是：
+
+```php
+$prefix = 'page_config';
+```
+
+源码形态：
+
+```php
+CSF::createMetabox($prefix, array(
+    'title'     => __('页面配置', 'zib_language'),
+    'post_type' => array('page'),
+    'context'   => 'normal',
+    'priority'  => 'high',
+    'theme'     => 'light',
+    'data_type' => 'serialize',
+));
+```
+
+这类字段保存为一个数组：
+
+```txt
+wp_postmeta.meta_key = page_config
+```
+
+读取方式：
+
+```php
+$page_config = get_post_meta(get_the_ID(), 'page_config', true);
+$page_config = is_array($page_config) ? $page_config : array();
+
+if (!empty($page_config['header_slider_show'])) {
+    // 当前页面单独开启顶部幻灯片
+}
+```
+
+不要用 `zib_get_post_meta($post_id, 'header_slider_show', true)` 读取 `page_config` 内部字段。它们不是独立 meta key。
+
+## `custom_filter`
+
+文章高级筛选使用独立 metabox：
+
+```php
+CSF::createMetabox('custom_filter', array(
+    'title'     => __('高级自定义筛选', 'zib_language'),
+    'post_type' => array('post'),
+    'context'   => 'side',
+    'data_type' => 'unserialize',
+));
+
+CSF::createSection('custom_filter', array(
+    'fields' => post_custom_filter::csf_fields(),
+));
+```
+
+它的字段来源不是直接写死在 metabox 中，而是 `post_custom_filter::csf_fields()`。筛选项配置来自后台主题设置：
+
+```php
+$opts = _pz('custom_filter');
+```
+
+开发时要注意两层关系：
+
+| 层级                 | 来源                            |
+| -------------------- | ------------------------------- |
+| 筛选维度配置         | 主题设置 `_pz('custom_filter')` |
+| 某篇文章选中的筛选值 | 文章 metabox `custom_filter`    |
+
+## `baidu_resource_submission`
+
+百度资源提交是一个侧栏 metabox，适用于多种 post type：
+
+```php
+CSF::createMetabox('baidu_resource_submission', array(
+    'title'     => __('百度资源提交', 'zib_language'),
+    'post_type' => array('post', 'page', 'plate', 'forum_post', 'shop_product'),
+    'context'   => 'side',
+    'data_type' => 'unserialize',
+));
+```
+
+它说明一个原则：不是所有 metabox 都只服务文章和页面。子比会把相同后台能力挂到 `post`、`page`、`plate`、`forum_post`、`shop_product` 等多个内容类型。
+
+## 批量编辑
+
+`metabox-options.php` 里还有批量编辑逻辑，例如文章专题、高级配置等。保存时会检查：
+
+```php
+if (!$update || $post->post_type !== 'post' || empty($_REQUEST['screen']) || $_REQUEST['screen'] !== 'edit-post') {
+    return;
+}
+```
+
+批量编辑要特别注意：
+
+- 只在列表页保存。
+- 只处理允许的 post type。
+- 没有修改的字段要传 `ignore`，不能把空值当作删除。
+- 保存仍然走 `zib_update_post_meta()`。
+
+## 读取规则
+
+按保存方式选择读取函数：
+
+| 保存方式                                         | 读取                                                        |
+| ------------------------------------------------ | ----------------------------------------------------------- |
+| 子比核心聚合字段                                 | `zib_get_post_meta($post_id, $key, true)`                   |
+| 普通独立 post meta                               | `zib_get_post_meta()` 也可以，封装会回落到 `get_metadata()` |
+| `CSF::createMetabox(... data_type => serialize)` | `get_post_meta($post_id, $prefix, true)`                    |
+| `page_config` 内部字段                           | 先读 `page_config` 数组，再取子键                           |
+
+## 常见错误
+
+### 读错保存层级
+
+错误：
+
+```php
+$show = zib_get_post_meta($post_id, 'header_slider_show', true);
+```
+
+如果字段在 `page_config` 里，正确写法是：
+
+```php
+$page_config = get_post_meta($post_id, 'page_config', true);
+$show = !empty($page_config['header_slider_show']);
+```
+
+### 直接写聚合字段
+
+错误：
+
+```php
+update_post_meta($post_id, 'cover_image', $cover);
+```
+
+推荐：
+
+```php
+zib_update_post_meta($post_id, 'cover_image', $cover);
+```
+
+### switcher 关闭后没保存
+
+HTML 表单里未勾选的 checkbox 可能不提交。子比的 ZCSF 保存函数通常只处理 `isset($_POST[$field])` 的字段，所以开关类字段要确认 CSF 是否输出了隐藏值，或在保存函数中主动补默认值。
+
+### 字段显示但前台无效
+
+检查顺序：
+
+1. 字段 id 是否属于 `zib_get_option_meta_keys('post_meta')`。
+2. 保存函数是否执行。
+3. 读取时是否使用 `zib_get_post_meta()`。
+4. 如果是 `page_config`，是否先读数组。
+5. 模板是否被缓存或当前页面模板是否不同。

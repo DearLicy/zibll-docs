@@ -1,0 +1,147 @@
+---
+title: Codestar Framework
+description: 子比主题 CSF 后台菜单、Meta 配置、字段系统、数据读取与源码实践总览。
+---
+
+## 这一类文档讲什么
+
+子比主题使用 Codestar Framework 承载后台配置。主题设置里的开关、颜色、上传图片、分组、折叠面板、导航菜单高级配置、文章页面配置、用户资料配置、小工具配置，大部分都和 CSF 有关。
+
+这组文档不是原版 Codestar 文档的翻译，也不是外部扩展示例合集，而是围绕子比主题本体源码说明：
+
+```txt
+inc/codestar-framework/     原始 Codestar Framework
+inc/csf-framework/          子比主题自定义 CSF 扩展和覆盖
+inc/options/                主题设置、文章 Meta、用户 Meta、菜单项配置
+inc/widgets/                小工具注册和输出
+inc/functions/bbs/admin/    论坛模块后台字段
+inc/functions/shop/admin/   商城模块后台字段
+```
+
+## 阅读路径
+
+Codestar Framework 这一类文档按“加载、保存、字段、模块”组织。根页面只做路线图，具体细节进入左侧子菜单阅读。
+
+| 目标                  | 页面                                                     | 适合解决的问题                                                    |
+| --------------------- | -------------------------------------------------------- | ----------------------------------------------------------------- |
+| 快速认识主题 CSF 入口 | [快速开始](/docs/codestar-framework/quick-start)         | 第一次阅读源码时先看哪些文件、怎样挂载字段                        |
+| 理清加载顺序          | [加载机制](/docs/codestar-framework/loading)             | CSF、ZCSF、Font Awesome、后台条件加载从哪里来                     |
+| 看完整生命周期        | [生命周期与加载顺序](/docs/codestar-framework/lifecycle) | 字段注册、渲染、保存、副作用之间的顺序                            |
+| 判断数据位置          | [数据保存与读取](/docs/codestar-framework/data-storage)  | `_pz()`、post meta、term meta、user meta、`zib_other_data` 怎么选 |
+| 定位设置归属          | [主题设置结构地图](/docs/codestar-framework/option-map)  | 字段应该放到哪个一级分组和子设置页                                |
+| 排查保存问题          | [保存流程与备份链路](/docs/codestar-framework/save-flow) | Ajax 保存、重置、导入、备份、缓存刷新、rewrite 同步               |
+
+## 后台与 Meta
+
+| 目标       | 页面                                                       | 重点                                               |
+| ---------- | ---------------------------------------------------------- | -------------------------------------------------- |
+| 全站设置   | [后台设置菜单](/docs/codestar-framework/admin-options)     | `zibll_options`、section 分层、字段读取            |
+| 导航菜单项 | [导航菜单项配置](/docs/codestar-framework/menu-options)    | `zib_menu_options`、`zib_menu_pz()`、图标徽章      |
+| 文章和页面 | [文章和页面 Meta](/docs/codestar-framework/post-page-meta) | `post_meta`、`page_config`、独立 SEO、筛选字段     |
+| 论坛字段   | [论坛和分类 Meta](/docs/codestar-framework/forum-meta)     | `forum_extend`、`forum_allow_view`、`plate_extend` |
+| 分类字段   | [Taxonomy Meta](/docs/codestar-framework/taxonomy-meta)    | 分类、标签、专题、论坛、商城 taxonomy 字段         |
+| 用户字段   | [用户 Meta](/docs/codestar-framework/user-meta)            | profile、头像封面、绑定信息、聚合 user meta        |
+
+## 字段系统
+
+| 目标           | 页面                                                     | 重点                                               |
+| -------------- | -------------------------------------------------------- | -------------------------------------------------- |
+| 查字段类型     | [字段速查](/docs/codestar-framework/field-reference)     | 常用 CSF 字段、保存形态、输出转义                  |
+| 查字段值格式   | [字段值格式](/docs/codestar-framework/value-shapes)      | switcher、upload、group、repeater、fieldset、多选  |
+| 查子比字段     | [子比自定义字段](/docs/codestar-framework/custom-fields) | `palette`、`between_number`、`accordion`、覆盖字段 |
+| 查显隐条件     | [依赖条件](/docs/codestar-framework/dependencies)        | `dependency`、多条件、隐藏字段保存边界             |
+| 渲染自定义表单 | [ZCSF 表单渲染](/docs/codestar-framework/zcsf-form)      | `ZCSF::instance()`、资源加载、取值、保存方式       |
+
+## 模块与排错
+
+| 目标       | 页面                                                  | 重点                                          |
+| ---------- | ----------------------------------------------------- | --------------------------------------------- |
+| 小工具配置 | [小工具配置](/docs/codestar-framework/widget-options) | `CSF_Widget`、`Zib_CFSwidget`、公共字段注入   |
+| 高级能力   | [高级能力](/docs/codestar-framework/advanced)         | Comment、Shortcode、Customize、Hook、导入导出 |
+| 排查异常   | [排错清单](/docs/codestar-framework/troubleshooting)  | 字段不显示、保存失败、读取为空、Ajax 异常     |
+
+## 两个核心目录
+
+```txt
+inc/
+├─ codestar-framework/              # Codestar Framework 原始框架
+└─ csf-framework/                   # 子比主题自定义 CSF 扩展和覆盖
+```
+
+`inc/codestar-framework` 提供基础能力：
+
+- `CSF::createOptions()`
+- `CSF::createSection()`
+- `CSF::createMetabox()`
+- `CSF::createTaxonomyOptions()`
+- `CSF::createNavMenuOptions()`
+- `CSF::createProfileOptions()`
+- `CSF::createCommentOptions()`
+- `CSF::createShortcoder()`
+- `CSF::createWidget()`
+
+`inc/csf-framework` 是子比主题自己的扩展层：
+
+| 路径                                 | 用途                                                             |
+| ------------------------------------ | ---------------------------------------------------------------- |
+| `classes/admin-options.class.php`    | 改写后台设置页保存、菜单、搜索、Ajax 保存、重置和 HTML 保存策略  |
+| `classes/taxonomy-options.class.php` | 改写分类法配置，兼容 WordPress 版本差异并调整保存策略            |
+| `classes/widget-options.class.php`   | 子比小工具配置类，自动注入标题、布局、显示条件、动画、背景等字段 |
+| `classes/zib-csf.class.php`          | `ZCSF::instance()`，用于在已有表单里渲染 CSF 字段                |
+| `fields/*`                           | 子比自定义或覆盖后的字段                                         |
+| `assets/*`                           | 后台字段样式、脚本、图片素材、CodeMirror 本地资源                |
+
+## 主题里的真实使用点
+
+| 模块            | 文件                                               | CSF 能力                                          |
+| --------------- | -------------------------------------------------- | ------------------------------------------------- |
+| 全站设置        | `inc/options/admin-options.php`                    | `CSF::createOptions()`、`CSF::createSection()`    |
+| 文章和页面 Meta | `inc/options/metabox-options.php`                  | `ZCSF::instance()`、`CSF::createMetabox()`        |
+| 用户资料        | `inc/options/profile-options.php`                  | `ZCSF::instance()`                                |
+| 导航菜单项      | `inc/options/metabox-options.php`                  | `CSF::createNavMenuOptions()`                     |
+| 小工具          | `inc/widgets/*.php`                                | `Zib_CFSwidget::create()` / `CSF::createWidget()` |
+| 论坛后台字段    | `inc/functions/bbs/admin/meta-option.php`          | `CSF::createMetabox()`                            |
+| 商城商品字段    | `inc/functions/shop/admin/options/meta-option.php` | `CSF::createMetabox()`                            |
+| 商城分类字段    | `inc/functions/shop/admin/options/term-option.php` | `CSF::createTaxonomyOptions()`                    |
+
+## 该用哪种能力
+
+| 需求                 | 子比源码中的方案                                         | 数据位置                         |
+| -------------------- | -------------------------------------------------------- | -------------------------------- |
+| 全站主题配置         | `CSF::createOptions('zibll_options')`                    | `wp_options.zibll_options`       |
+| 主题设置读取         | `_pz($key, $default, $subkey)`                           | 静态缓存后的 `zibll_options`     |
+| 文章或页面核心字段   | `ZCSF::instance()` + `zib_update_post_meta()`            | `wp_postmeta` / `zib_other_data` |
+| 页面独立配置         | `CSF::createMetabox('page_config')`                      | `wp_postmeta.page_config`        |
+| 论坛帖子配置         | `CSF::createMetabox('forum_extend')`、`forum_allow_view` | `wp_postmeta`                    |
+| 论坛板块配置         | `CSF::createMetabox('plate_extend')`                     | `wp_postmeta`                    |
+| 商城商品配置         | `CSF::createMetabox('product_config')`                   | `wp_postmeta.product_config`     |
+| 分类、话题、标签配置 | `CSF::createTaxonomyOptions()`                           | `wp_termmeta`                    |
+| 用户资料配置         | `show_user_profile` + `ZCSF::instance()`                 | `wp_usermeta` / `zib_other_data` |
+| 导航菜单项配置       | `CSF::createNavMenuOptions('zib_menu_options')`          | 菜单项 `post_meta`               |
+| 小工具模块           | `CSF::createWidget()`                                    | widget instance                  |
+| 自定义表单渲染       | `ZCSF::instance()`                                       | 由调用方保存                     |
+
+## 核心读写函数
+
+| 函数                             | 用途                                       |
+| -------------------------------- | ------------------------------------------ |
+| `_pz($name, $default, $subname)` | 读取主题设置                               |
+| `_spz($name, $value)`            | 单独更新主题设置                           |
+| `zib_get_post_meta()`            | 读取文章、页面、论坛帖子、板块等 post meta |
+| `zib_update_post_meta()`         | 更新 post meta，自动处理聚合字段           |
+| `zib_get_user_meta()`            | 读取用户 meta，自动处理聚合字段            |
+| `zib_update_user_meta()`         | 更新用户 meta，自动处理聚合字段            |
+| `zib_get_term_meta()`            | 读取 term meta，自动处理聚合字段           |
+| `zib_update_term_meta()`         | 更新 term meta，自动处理聚合字段           |
+| `zib_menu_pz()`                  | 读取导航菜单项配置                         |
+| `zib_get_option_meta_keys()`     | 判断哪些字段进入 `zib_other_data`          |
+
+## 开发原则
+
+- 先确认字段保存入口，再选择读取函数。
+- 读写 post/user/term/comment meta 时，优先使用子比封装函数，避免 `zib_other_data` 读不到。
+- 主题核心设置读取统一走 `_pz()`，不要散读 `get_option('zibll_options')`。
+- 字段 ID 避免和主题已有字段冲突，尤其是菜单、小工具、文章 Meta 和用户 Meta。
+- 需要保存 HTML 的字段明确 `sanitize => false`，输出时再用白名单过滤。
+- `dependency` 只解决后台显隐，前台仍然要先判断总开关。
+- 涉及支付、用户认证、订单、资产的字段必须走对应业务流程，不要只改 meta。

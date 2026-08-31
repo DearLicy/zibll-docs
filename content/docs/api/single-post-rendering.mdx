@@ -1,0 +1,512 @@
+---
+title: 文章正文与单页渲染
+description: 扩展子比主题文章页框架、顶部封面、正文 Hook、阅读权限、文章目录、高度限制、版权、标签、点赞收藏分享和相关推荐。
+---
+
+## 模块边界
+
+文章页由模板框架、文章头部、正文内容、底部动作、评论区和文章后模块共同组成。二次开发时不要只盯着 `the_content()`，因为子比主题在正文前后还处理了封面、面包屑、作者、状态角标、文章目录、阅读权限、版权、标签、点赞、打赏、分享、收藏、作者卡片、上一篇下一篇和相关文章。
+
+| 文件                               | 作用                                                      |
+| ---------------------------------- | --------------------------------------------------------- |
+| `single.php`                       | 文章页模板框架、侧栏位置、评论模板、文档模式切换          |
+| `template/single-dosc.php`         | 文档模式文章模板                                          |
+| `inc/functions/zib-single.php`     | 文章页头部、封面、正文、阅读权限、底部动作和文章后模块    |
+| `inc/functions/zib-footer.php`     | 移动端文章页底部 Tabbar 动作                              |
+| `inc/functions/zib-header.php`     | 移动端菜单内的文章目录占位                                |
+| `inc/functions/bbs/inc/single.php` | 论坛帖子正文目录协议复用                                  |
+| `inc/widgets/widget-more.php`      | 文章目录树小工具                                          |
+| `js/section-navs.js`               | 前端扫描标题并生成目录树                                  |
+| `inc/functions/zib-theme.php`      | 点赞、收藏、打赏、文章 meta 等通用按钮函数                |
+| `inc/options/admin-options.php`    | 文章页显示、版权、相关推荐、文章目录等主题设置            |
+| `inc/options/metabox-options.php`  | 单篇文章封面、视频、幻灯片、高度限制、文章目录开关等 Meta |
+
+文章页模板先检查文档模式：
+
+```php
+if (zib_is_docs_mode()) {
+    get_template_part('template/single-dosc');
+    return;
+}
+```
+
+所以扩展普通文章页和文档模式文章页要分开判断。不要在普通文章 Hook 里假设文档模式一定会走同一套 HTML。
+
+## 页面框架
+
+`single.php` 的结构是：
+
+```php
+get_header();
+
+dynamic_sidebar('all_top_fluid');
+dynamic_sidebar('single_top_fluid');
+
+echo '<main role="main" class="container">';
+dynamic_sidebar('single_top_content');
+
+zib_single();
+comments_template('/template/comments.php', true);
+
+dynamic_sidebar('single_bottom_content');
+get_sidebar();
+
+dynamic_sidebar('single_bottom_fluid');
+dynamic_sidebar('all_bottom_fluid');
+
+get_footer();
+```
+
+如果只是给文章页顶部或底部加模块，优先使用侧栏位置：
+
+| 位置                                 | 用途                         |
+| ------------------------------------ | ---------------------------- |
+| `single_top_fluid`                   | 文章页顶部全宽模块           |
+| `single_top_content`                 | 正文内容区上方模块           |
+| `single_bottom_content`              | 评论区前、正文内容区下方模块 |
+| `single_bottom_fluid`                | 文章页底部全宽模块           |
+| `all_top_fluid` / `all_bottom_fluid` | 全站通用顶部/底部全宽模块    |
+
+需要插入和文章数据强相关的内容时，再使用文章页 Hook。
+
+## 主体结构
+
+文章主体入口是：
+
+```php
+function zib_single()
+{
+    zib_single_header();
+    do_action('zib_single_before');
+    echo '<article class="article main-bg theme-box box-body radius8 main-shadow">';
+    zib_single_content();
+    echo '</article>';
+    do_action('zib_single_after');
+}
+```
+
+常用 Hook：
+
+| Hook                            | 位置                                                 |
+| ------------------------------- | ---------------------------------------------------- |
+| `zib_single_before`             | 文章卡片前                                           |
+| `zib_single_after`              | 文章卡片后，作者卡片、上一篇下一篇、相关文章也在这里 |
+| `zib_single_box_content_before` | 文章头部后、正文内容前                               |
+| `zib_single_box_content_after`  | 正文内容和底部动作后                                 |
+| `zib_posts_content_before`      | `the_content()` 前，参数 `$post`                     |
+| `zib_posts_content_after`       | `the_content()` 后，参数 `$post`                     |
+| `zib_article_content_after`     | 文章正文底部版权和标签前，参数 `$post`               |
+
+例如在正文后追加一个提示：
+
+```php
+function zib_docs_single_notice($post)
+{
+    if (!$post || 'post' !== $post->post_type) {
+        return;
+    }
+
+    echo '<div class="muted-box mt20">';
+    echo esc_html__('本文内容仅供学习参考，请以实际站点配置为准。', 'zib_language');
+    echo '</div>';
+}
+add_action('zib_posts_content_after', 'zib_docs_single_notice', 20);
+```
+
+## 顶部封面
+
+`zib_single_header()` 优先输出 `zib_single_cover()`，没有封面时输出面包屑：
+
+```php
+function zib_single_header()
+{
+    $cover = zib_single_cover();
+    echo $cover ? $cover : zib_get_breadcrumbs();
+}
+```
+
+`zib_single_cover()` 有缓存，单次请求内不会重复生成：
+
+```php
+static $single_cover_html = null;
+if ($single_cover_html !== null) {
+    return $single_cover_html;
+}
+```
+
+封面优先级：
+
+1. 特色视频 `featured_video`，可带剧集 `featured_video_episode`。
+2. 特色幻灯片 `featured_slide`。
+3. 文章封面图 `cover_image`。
+4. 无封面时回落到面包屑和普通文章头部。
+
+封面内会合并标题、面包屑和 `zib_get_single_meta_box()`。不要在模板里重复输出标题，否则有封面时会出现双标题。
+
+## 文章头部
+
+`zib_single_box_header()` 负责普通头部：
+
+```php
+$time_html    = _pz('post_single_hide_time_s') ? '' : zib_get_post_time_tooltip(null, _pz('post_time_source'));
+$user_box     = zib_get_post_user_box($user_id, $time_html, 'article-avatar');
+$status_badge = zib_get_post_status_badge();
+```
+
+如果没有顶部封面，会输出标题和 meta；如果已有封面，标题和 meta 已经在封面里，普通头部只保留作者区域。
+
+文章时间由 `post_time_source` 决定是显示发布时间还是更新时间。扩展文章头部时不要自己格式化时间，优先使用 `zib_get_post_time_tooltip()`，这样 tooltip、发布时间/更新时间逻辑能保持一致。
+
+## 正文内容
+
+正文容器：
+
+```php
+<div class="article-content">
+    <?php zib_single_content_header(); ?>
+    <?php echo _pz('post_front_content'); ?>
+    <div data-nav="posts" class="theme-box wp-posts-content limit-height">
+        <?php do_action('zib_posts_content_before', $post); ?>
+        <?php the_content(); ?>
+        <?php wp_link_pages(...); ?>
+        <?php do_action('zib_posts_content_after', $post); ?>
+        <?php echo _pz('post_after_content'); ?>
+        <?php tb_xzh_render_tail(); ?>
+    </div>
+    <?php zib_single_content_footer($post); ?>
+</div>
+```
+
+几个重要点：
+
+- `post_front_content` 是主题设置里的正文前内容。
+- `post_after_content` 是主题设置里的正文后内容。
+- `tb_xzh_render_tail()` 会在正文尾部输出熊掌号相关内容。
+- `wp_link_pages()` 处理文章分页。
+- 文章目录需要 `data-nav="posts"`。
+- 高度限制会增加 `limit-height`、`max-height` 和 `data-maxheight`。
+
+如果你要在正文里插入业务模块，优先使用 `zib_posts_content_before` 或 `zib_posts_content_after`。不要直接过滤 `the_content` 拼大段 UI，除非你的功能确实属于正文内容本身。
+
+## 文章目录与高度限制
+
+文章目录树不是服务端提前解析正文生成 HTML，而是一套“服务端标记 + 前端扫描 + 目录占位”的协议。
+
+核心由三部分组成：
+
+| 层级     | 关键点                                              |
+| -------- | --------------------------------------------------- |
+| 正文容器 | 有 `data-nav="posts"` 的内容区域会被前端扫描        |
+| 目录容器 | `.posts-nav-box` 是目录树插入位置                   |
+| 前端脚本 | `section-navs.js` 扫描标题并生成 `.posts-nav-lists` |
+
+### 显示开关
+
+文章目录显示判断在 `zib_is_show_posts_nav()`：
+
+```php
+function zib_is_show_posts_nav()
+{
+    global $post;
+    $show_nav = zib_get_post_meta($post->ID, 'no_article-navs', true);
+    if (_pz('article_nav') && !($show_nav)) {
+        return true;
+    }
+    return false;
+}
+```
+
+全局开关来自主题设置：
+
+| 字段                       | 位置                     | 作用                             |
+| -------------------------- | ------------------------ | -------------------------------- |
+| `article_nav`              | 主题设置 -> 文章功能     | 文章目录树默认开关               |
+| `article_nav_mobile_nav_s` | 主题设置 -> 文章功能     | 是否在移动端弹出菜单内显示目录树 |
+| `no_article-navs`          | 单篇文章 Meta / 批量编辑 | 当前文章不显示目录树             |
+
+普通文章只有在全局 `article_nav` 开启且当前文章没有勾选 `no_article-navs` 时，正文容器才会带 `data-nav="posts"`：
+
+```php
+if ($show_nav) {
+    $show_nav_data .= 'data-nav="posts"';
+}
+
+echo '<div ' . $show_nav_data . ' class="theme-box wp-posts-content">';
+```
+
+文档模式文章同样调用 `zib_is_show_posts_nav()`，但它的目录容器固定在文档侧栏：
+
+```php
+<div data-affix="1" data-title="<?php echo esc_attr__('文章目录', 'zib_language'); ?>" class="posts-nav-box"></div>
+```
+
+论坛帖子正文也复用这个协议：
+
+```php
+$article_nav = _pz('article_nav') ? ' data-nav="posts"' : '';
+echo '<div class="theme-box wp-posts-content"' . $article_nav . '>';
+```
+
+论坛帖子当前只看全局 `article_nav`，不会读取文章 Meta `no_article-navs`。扩展论坛帖子目录时，要单独判断帖子类型和论坛权限，不要照搬普通文章的 Meta 开关。
+
+### 目录容器
+
+目录树小工具 `widget_ui_posts_navs` 只输出占位容器：
+
+```php
+echo '<div class="widget-container">';
+echo '<div data-affix="true" class="posts-nav-box" data-title="' . esc_attr($title) . '"></div>';
+echo '</div>';
+```
+
+小工具字段很少：
+
+| 字段         | 作用                               |
+| ------------ | ---------------------------------- |
+| `title`      | 目录标题，输出到 `data-title`      |
+| `mini_title` | 副标题，拼到标题后                 |
+| `in_affix`   | 侧栏随动，输出 `data-affix="true"` |
+
+小工具说明里明确：非文章、非帖子页不会显示内容，正文标题超过 3 个才会显示。这里的“不会显示”不是服务端隐藏小工具，而是前端扫描不到足够标题时不会向 `.posts-nav-box` 填充目录。
+
+移动端菜单也会注入目录占位：
+
+```php
+if (_pz('article_nav', true) && _pz('article_nav_mobile_nav_s', true)) {
+    $menu .= '<div class="posts-nav-box" data-title="' . esc_attr__('文章目录', 'zib_language') . '"></div>';
+}
+```
+
+所以自定义移动端导航时不要删除这个 `.posts-nav-box`，否则用户在移动端将失去文章目录入口。
+
+### 前端生成规则
+
+`main.js` 在自动初始化时判断：
+
+```js
+$('[data-nav] h1,[data-nav] h2,[data-nav] h3,[data-nav] h4').length > 2 &&
+  tbquire(['section-navs']);
+```
+
+`section-navs.js` 继续扫描 `[data-nav]` 内的 `h1`、`h2`、`h3`、`h4`：
+
+```js
+var selector_s =
+  selector + ' h1,' + selector + ' h2,' + selector + ' h3,' + selector + ' h4';
+```
+
+生成目录时会：
+
+1. 跳过 `.item-heading` 标题。
+2. 跳过 `.no-nav` 容器内的标题。
+3. 给正文标题写入 `id="wznav_{index}"`。
+4. 给每个 `.posts-nav-box` 填充同一份目录。
+5. 点击目录时展开父级 `.panel .collapse`。
+6. 点击目录时自动触发 `.read-more-open`，避免高度限制挡住目标标题。
+7. 使用 `scrollspy` 高亮当前阅读位置。
+
+```js
+function isExcludedElement(el) {
+  return el.hasClass('item-heading') || el.parents('.no-nav').length;
+}
+```
+
+如果目录高度超过 `380px`，脚本会把 `H1`、`H2` 下面的子级折叠，并追加 `.nav-toggle-collapse` 折叠按钮。这是前端行为，不需要后端为目录层级额外生成嵌套结构。
+
+扩展正文模块时，如果模块内部标题不应该进入文章目录，给模块外层加：
+
+```html
+<div class="no-nav">
+  <h2>模块内部标题</h2>
+</div>
+```
+
+如果自定义标题已经有业务 `id`，要注意 `section-navs.js` 会覆盖为 `wznav_{index}`。需要稳定锚点时，可以避免把该标题放进 `[data-nav]`，或在前端目录生成后再追加自定义跳转逻辑。
+
+### 和文档导航页面的区别
+
+`action/documentnav.php` 处理的是“文档导航页面”的分类文章列表搜索和分页：
+
+```php
+add_action('wp_ajax_documentnav_posts', 'zib_ajax_get_documentnav_posts');
+add_action('wp_ajax_nopriv_documentnav_posts', 'zib_ajax_get_documentnav_posts');
+```
+
+它返回的是某个分类下的文章列表，不参与正文标题目录生成。不要把 `documentnav_posts` Ajax 当成文章目录树接口；正文目录树没有 Ajax 接口，完全由当前页面 HTML 生成。
+
+高度限制由全局 `article_maxheight_kg` 或单篇 Meta `article_maxheight_xz` 启用：
+
+```php
+if (_pz('article_maxheight_kg') || $is_max_height) {
+    $max_height_class .= ' limit-height';
+    $max_height       = (int) _pz('article_maxheight');
+    $max_height       = $max_height ?: 1000;
+    $max_height_style = ' style="max-height:' . $max_height . 'px;" data-maxheight="' . ($max_height - 80) . '"';
+}
+```
+
+扩展正文容器时要保留这些属性。删除 `data-nav` 会让文章目录失效，删除 `limit-height` 相关属性会让“展开全文”体验断开。
+
+## 阅读权限
+
+文章正文权限来自分类阅读限制。主题把权限检查挂到 `the_content`：
+
+```php
+function zib_single_content_allow_view($content)
+{
+    $data = zib_get_post_allow_view_data();
+    if (!$data['allow']) {
+        return $data['not_html'];
+    }
+
+    return $content;
+}
+add_filter('the_content', 'zib_single_content_allow_view');
+```
+
+摘要也会被同步处理：
+
+```php
+add_filter('zib_get_excerpt', 'zib_single_content_excerpt_allow_view', 10, 2);
+```
+
+`zib_get_post_allow_view_data()` 会读取文章所有分类，并调用 `zib_get_post_cat_allow_view()`。任意分类无权限，就返回无权限数据。
+
+扩展付费、会员、等级、认证等阅读限制时，不要只在列表页隐藏摘要。必须让正文 `the_content` 和摘要 `zib_get_excerpt` 两条链路都一致，否则列表看不到、详情却能读到，或反过来。
+
+## 正文底部
+
+`zib_single_content_footer($post)` 输出：
+
+1. 正文尾部一言，完整刷新协议见 [精彩一言与短句刷新](/docs/api/quotes-yiyan)。
+2. `zib_article_content_after` Hook。
+3. 版权声明。
+4. `THE END`。
+5. 专题、分类和标签按钮。
+
+版权声明由 `post_copyright_s` 和 `post_copyright` 控制：
+
+```php
+if (_pz('post_copyright_s')) {
+    echo '<div class="em09 muted-3-color"><div><span>©</span> ' . __('版权声明', 'zib_language') . '</div><div class="posts-copyright">' . _pz('post_copyright') . '</div></div>';
+}
+```
+
+如果要在版权前插入声明、下载提示、作者补充信息，使用：
+
+```php
+function zib_docs_article_after($post)
+{
+    echo '<div class="muted-box mb20">' . esc_html__('补充说明内容', 'zib_language') . '</div>';
+}
+add_action('zib_article_content_after', 'zib_docs_article_after', 20);
+```
+
+不要直接覆盖 `zib_single_content_footer()`，否则版权、THE END、分类和标签都会一起丢失。
+
+## 底部互动动作
+
+`zib_single_content_footer_action()` 输出文章底部动作：
+
+```php
+$favorite_button = zib_get_post_favorite('action action-favorite');
+
+echo '<div class="text-center post-actions">';
+if (_pz('post_like_s')) {
+    echo zib_get_post_like('action action-like');
+}
+if (_pz('post_rewards_s')) {
+    echo zib_get_rewards_button($user_id, 'action action-rewards');
+}
+if (_pz('share_s')) {
+    echo zib_get_post_share_btn(null, 'action action-share');
+}
+echo $favorite_button;
+echo '</div>';
+```
+
+这里复用了主题点赞、打赏、分享、收藏按钮。扩展底部动作时可以追加按钮，但不要替换已有按钮协议。点赞和收藏还会联动用户 meta、计数、消息通知和等级积分。
+
+追加按钮示例：
+
+```php
+function zib_docs_single_box_after()
+{
+    if (!is_single()) {
+        return;
+    }
+
+    echo '<div class="text-center mt10">';
+    echo '<a class="but jb-blue radius" href="' . esc_url(add_query_arg('print', '1', get_permalink())) . '">';
+    echo '<i class="fa fa-print mr6"></i>' . esc_html__('打印文章', 'zib_language');
+    echo '</a>';
+    echo '</div>';
+}
+add_action('zib_single_box_content_after', 'zib_docs_single_box_after', 20);
+```
+
+## 文章后模块
+
+`zib_single_after_box()` 默认挂在 `zib_single_after`：
+
+```php
+add_action('zib_single_after', 'zib_single_after_box');
+```
+
+它按主题设置输出：
+
+| 设置                | 输出                                                                    |
+| ------------------- | ----------------------------------------------------------------------- |
+| `yiyan_single_box`  | 文章卡片后一言，完整规则见 [精彩一言与短句刷新](/docs/api/quotes-yiyan) |
+| `post_authordesc_s` | 作者卡片                                                                |
+| `post_prevnext_s`   | 上一篇/下一篇                                                           |
+| `post_related_s`    | 相关文章                                                                |
+
+如果要在相关文章前后插入内容，可以调整 Hook 优先级：
+
+```php
+function zib_docs_before_related()
+{
+    echo '<div class="zib-widget">...</div>';
+}
+add_action('zib_single_after', 'zib_docs_before_related', 8);
+```
+
+默认 `zib_single_after_box` 没有拆成多个 Hook。如果要替换相关文章算法，优先看 `zib_posts_related()` 的参数和相关设置，不要直接移除整组文章后模块。
+
+## 移动端底部动作
+
+移动端文章页底部 Tabbar 在 `zib-footer.php` 中通过 `footer_tabbar` Filter 接入。文章页可输出评论、点赞、收藏、分享、购买等动作。扩展文章页底部动作时要同时检查：
+
+- `zib_single_content_footer_action()` 桌面和正文底部按钮。
+- `footer_tabbar` 移动端底部动作。
+- 付费内容购买按钮 `zibpay_is_show_paybutton`。
+- 评论开关和 `#respond` 输入框。
+
+不要只改桌面底部按钮，移动端用户主要使用底部 Tabbar。
+
+## 开发检查
+
+| 场景           | 应检查                                                  |
+| -------------- | ------------------------------------------------------- |
+| 修改文章页结构 | 普通文章和文档模式是否分开处理                          |
+| 增加正文模块   | Hook 位置是否正确，是否影响 `the_content`               |
+| 顶部封面       | 视频、幻灯片、图片三种封面是否都正常                    |
+| 文章目录       | 是否保留 `data-nav="posts"`                             |
+| 高度限制       | 是否保留 `limit-height`、`max-height`、`data-maxheight` |
+| 阅读权限       | 正文和摘要是否同时受限制                                |
+| 底部动作       | 点赞、收藏、分享、打赏协议是否保留                      |
+| 文章后模块     | 作者卡片、上一篇下一篇、相关文章是否仍按设置显示        |
+| 移动端         | 底部 Tabbar 是否同步保留业务动作                        |
+
+## 常见误区
+
+- 不要直接复制 `single.php` 后长期维护两套文章页。
+- 不要在有顶部封面时重复输出标题和 meta。
+- 不要过滤 `the_content` 绕过主题的阅读权限。
+- 不要删除 `.wp-posts-content`、`data-nav`、`limit-height` 等正文协议属性。
+- 不要替换点赞、收藏、分享按钮为普通链接。
+- 不要只改桌面文章底部，忽略移动端 Tabbar。
+- 不要在文档模式文章页套用普通文章页假设。
+
+本页根据 `single.php`、`template/single-dosc.php`、`inc/functions/zib-single.php`、`inc/functions/zib-footer.php`、`inc/functions/zib-header.php`、`inc/functions/bbs/inc/single.php`、`inc/widgets/widget-more.php`、`inc/functions/zib-theme.php`、`inc/options/admin-options.php`、`inc/options/metabox-options.php`、`js/section-navs.js` 蒸馏整理。

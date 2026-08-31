@@ -1,0 +1,47 @@
+{
+  "name": "zibll-docs-mcp",
+  "version": "0.1.0",
+  "description": "Local read-only MCP server for the Zibll theme development documentation.",
+  "type": "module",
+  "license": "MIT AND CC0-1.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DearLicy/zibll-docs.git",
+    "directory": "packages/zibll-docs-mcp"
+  },
+  "bugs": {
+    "url": "https://github.com/DearLicy/zibll-docs/issues"
+  },
+  "homepage": "https://dearlicy.github.io/zibll-docs/docs/mcp",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "zibll",
+    "wordpress",
+    "documentation"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "zibll-docs-mcp": "bin/zibll-docs-mcp.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "data",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node bin/zibll-docs-mcp.mjs",
+    "prepack": "node ../../scripts/generate-mcp-data.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.1.12"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,289 @@
+---
+title: 保存流程与备份链路
+description: 拆解子比主题 CSF 设置保存、Ajax 保存、reset、导入、自动备份、缓存刷新和 WordPress 选项同步流程。
+---
+
+## 保存入口
+
+后台主题设置保存由 `inc/csf-framework/classes/admin-options.class.php` 处理。核心方法是：
+
+```php
+public function set_options($ajax = false)
+public function save_options($data)
+```
+
+Ajax 保存入口来自：
+
+```php
+add_action('wp_ajax_csf_' . $this->unique . '_ajax_save', array(&$this, 'ajax_save'));
+```
+
+对子比主题来说，`$this->unique` 是：
+
+```txt
+zibll_options
+```
+
+因此 Ajax action 是：
+
+```txt
+csf_zibll_options_ajax_save
+```
+
+## set_options 的执行顺序
+
+`set_options()` 不是简单接收 `$_POST` 后写入数据库。它按这个顺序处理：
+
+| 顺序 | 动作          | 说明                                                      |
+| ---- | ------------- | --------------------------------------------------------- |
+| 1    | 读取请求      | Ajax 从 `$_POST['data']` 解析 JSON，普通提交读取 `$_POST` |
+| 2    | 校验 nonce    | nonce key 为 `csf_options_nonce{$unique}`                 |
+| 3    | 判断导入/重置 | 支持导入、重置全部、重置当前 section                      |
+| 4    | 遍历字段      | 按 `pre_fields` 收集所有带 `id` 的字段                    |
+| 5    | 处理值        | 读取提交值，必要时 `wp_unslash()`                         |
+| 6    | sanitize      | 按字段 `sanitize` 配置处理                                |
+| 7    | validate      | 如果字段有 `validate` callable，失败则回滚旧值并记录错误  |
+| 8    | 保存前 Hook   | `csf_{$unique}_save_before`                               |
+| 9    | 保存过滤      | `csf_{$unique}_save`                                      |
+| 10   | 写数据库      | `save_options($data)`                                     |
+| 11   | 保存后 Hook   | `csf_{$unique}_save_after`                                |
+
+理解这个顺序后，很多问题会变清楚：字段没有提交时会保存为空；验证失败会回到旧值；导入和 reset 会绕过普通提交值。
+
+## 子比对 sanitize 的改动
+
+子比覆盖后的 `admin-options.class.php` 里有一段注释：
+
+```php
+//修改：移出sanitize，允许全部保存html代码
+if (!isset($field['sanitize'])) {
+    $data[$field_id] = $field_value;
+} else if (isset($field['sanitize']) && is_callable($field['sanitize'])) {
+    $data[$field_id] = call_user_func($field['sanitize'], $field_value);
+} else {
+    $data[$field_id] = $field_value;
+}
+```
+
+这意味着：
+
+- 没写 `sanitize` 的字段，保存时不会默认 `wp_kses_post()`。
+- 写了 callable 的 `sanitize` 才会按自定义函数过滤。
+- HTML 字段可以保存完整内容，但前台输出必须按场景转义。
+
+常见输出边界：
+
+| 内容          | 输出方式                             |
+| ------------- | ------------------------------------ |
+| 普通文本      | `esc_html()`                         |
+| URL           | `esc_url()`                          |
+| 属性          | `esc_attr()`                         |
+| 后台可信 HTML | `wp_kses_post()` 或主题白名单        |
+| JSON 配置     | `wp_json_encode()` 后输出            |
+| JS 字符串     | 不直接拼接，使用本地化变量或严格转义 |
+
+所以字段“保存 HTML”不等于“前台原样 echo”。保存策略和输出策略是两件事。
+
+## save_options 写入位置
+
+`save_options()` 会根据 `database` 参数决定保存位置：
+
+```php
+if ($this->args['database'] === 'transient') {
+    set_transient($this->unique, $data, $this->args['transient_time']);
+} else if ($this->args['database'] === 'theme_mod') {
+    set_theme_mod($this->unique, $data);
+} else if ($this->args['database'] === 'network') {
+    update_site_option($this->unique, $data);
+} else {
+    update_option($this->unique, $data);
+}
+
+do_action("csf_{$this->unique}_saved", $data, $this);
+```
+
+子比主题全站设置使用默认 options 数据库，因此最终写入：
+
+```txt
+wp_options.option_name = zibll_options
+```
+
+前台读取统一用：
+
+```php
+_pz('field_id', $default);
+```
+
+## reset 与导入
+
+CSF 支持三种非普通保存路径：
+
+| 动作     | 触发条件                                    | 结果                                        |
+| -------- | ------------------------------------------- | ------------------------------------------- |
+| 导入     | `csf_import_data`                           | 使用导入 JSON 覆盖 `$options`               |
+| 重置全部 | `csf_transient[reset]`                      | 所有字段回到默认值                          |
+| 重置分区 | `csf_transient[reset_section]` + section id | 当前 section 字段回到默认值，并与旧配置合并 |
+
+子比主题在 reset 前增加了备份 Hook：
+
+```php
+add_action('csf_zibll_options_reset_before', 'zib_csf_reset_to_backup');
+add_action('csf_zibll_options_reset_section_before', 'zib_csf_reset_section_to_backup');
+```
+
+因此重置前会把当前 `zibll_options` 保存到 `zibll_options_backup`。
+
+## 自动备份
+
+`inc/options/options.php` 里有统一备份函数：
+
+```php
+function zib_options_backup($type)
+```
+
+备份数据结构大致是：
+
+```php
+$options_backup[$time] = array(
+    'time' => $time,
+    'type' => $type,
+    'data' => $options,
+);
+```
+
+备份最多保留 20 次。触发来源：
+
+| 触发           | 类型                |
+| -------------- | ------------------- |
+| 重置全部前     | `重置全部 自动备份` |
+| 重置选区前     | `重置选区 自动备份` |
+| 主题更新时     | `更新主题 自动备份` |
+| 设置保存后定期 | `定期自动备份`      |
+
+定期自动备份通过：
+
+```php
+add_action('csf_zibll_options_saved', 'zib_csf_save_section_to_backup');
+```
+
+它会查最近一次 `定期自动备份`，超过约 600 小时才新增一份，避免每次保存都堆积备份。
+
+## 保存后的同步
+
+主题设置保存后还会执行：
+
+```php
+add_action('csf_zibll_options_save_after', 'zib_save_zibll_wp_options');
+```
+
+`zib_save_zibll_wp_options()` 做两类事：
+
+| 场景     | 行为                                                                      |
+| -------- | ------------------------------------------------------------------------- |
+| 首次安装 | 写入评论分页、评论顺序、邮箱名称要求、嵌套评论、媒体尺寸等 WordPress 选项 |
+| 每次保存 | 更新 `Zibll_version`，执行 `zib_flush_rewrite_rules()`                    |
+
+这说明某些设置保存后会影响站点固定链接和 WordPress 基础选项。开发或排错时，如果设置保存后前台链接仍不对，要同时考虑 rewrite 规则和缓存。
+
+## 升级迁移任务
+
+主题更新后的迁移任务不在 `set_options()` 里直接执行，而是由 `inc/options/upgrade.php` 单独维护任务队列：
+
+```php
+zib_add_update_theme_tasks($key, $func_name);
+add_action('wp_ajax_update_theme_task_action', 'zib_ajax_update_theme_task_action');
+```
+
+完整链路可以分成两条：
+
+| 链路     | 入口                                                                | 作用                                                                                       |
+| -------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| 更新通知 | `zib_notice_update()` -> `zibll_update_notices`                     | 更新后自动备份 `zibll_options`、删除 `zibll_new_version`、刷新对象缓存，并提示保存主题设置 |
+| 迁移任务 | `zib_update_theme_task_action_page()` -> `update_theme_task_action` | 超级管理员进入前台或后台时显示任务页，通过 Ajax 分批执行升级脚本                           |
+
+保存主题设置会更新 `Zibll_version` 并刷新 rewrite rules，所以更新提示会在保存后关闭；但这不等于所有历史数据迁移都已经跑完。论坛推荐指数、订单数据修正、旧 meta 聚合迁移这类大数据操作，走的是 `update_theme_task_action`。
+
+任务函数支持返回继续状态。前端看到：
+
+```js
+if (n.status === 'continue') {
+  ajax(_data);
+}
+```
+
+就会继续请求同一个 Ajax action。适合分批处理订单、论坛帖子、用户 meta、term meta 等数据，避免一次请求跑完整库。
+
+几个排查边界要特别记住：
+
+| 现象                   | 检查点                                                                                                           |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| 更新通知还在           | 查 `Zibll_version`，保存一次主题设置，再清页面缓存/CDN                                                           |
+| 升级任务页反复出现     | 查 `wp_ajax_update_theme_task_action` 是否成功、PHP 错误日志、浏览器 Network 返回的 `continue` / `stop` / `over` |
+| 任务已完成但数据读不到 | 确认字段是否已经迁到聚合存储，读取是否应走 `zib_get_option()`、`zib_get_user_meta()`、`zib_get_term_meta()`      |
+| 新站也提示旧迁移       | 首次安装没有 `Zibll_version` 时，源码会把当前任务标记为已完成；如果仍提示，先查版本 option 和缓存                |
+
+`update_theme_tasks_completed` 不是普通散落 option，它在 `inc/dependent.php` 的 option 聚合 key 清单里，落点是 `zib_other_options`。排查时不要只看 `get_option('update_theme_tasks_completed')`，应按主题封装读写入口理解。
+
+新增升级任务时要保持幂等、分批、可继续：每一批只处理明确范围，成功后再记录完成状态；不要在普通前台请求里直接跑大 SQL，也不要把订单 token、支付凭据、用户验证码这类敏感值写进迁移日志。
+
+## 模块缓存刷新
+
+保存 `zibll_options` 还会被其他模块监听：
+
+```php
+add_action('csf_zibll_options_saved', 'zib_search_facets_datas_cache_delete');
+add_action('csf_zibll_options_saved', 'zib_medal_args_cache_set');
+```
+
+典型含义：
+
+- 高级筛选配置变化后，搜索筛选缓存需要删除。
+- 用户徽章配置变化后，徽章参数缓存需要重建。
+
+如果新增字段会影响派生数据，也应该挂到 `csf_zibll_options_saved` 或更精准的业务 Hook，而不是要求用户手动清缓存。
+
+## Meta 保存 Hook
+
+不同 CSF 类型有不同保存 Hook 参数：
+
+| 类型     | Hook 形态                                   | 额外参数                         |
+| -------- | ------------------------------------------- | -------------------------------- |
+| Options  | `csf_{$unique}_save`、`csf_{$unique}_saved` | `$data, $this`                   |
+| Metabox  | `csf_{$unique}_save`、`csf_{$unique}_saved` | `$data, $post_id, $this`         |
+| Taxonomy | `csf_{$unique}_save`、`csf_{$unique}_saved` | `$data, $term_id, $this`         |
+| Profile  | `csf_{$unique}_save`、`csf_{$unique}_saved` | `$data, $user_id, $this`         |
+| Nav Menu | `csf_{$unique}_save`、`csf_{$unique}_saved` | `$data, $menu_item_db_id, $this` |
+| Widget   | `csf_{$unique}_save`                        | `$new_instance, $args, $this`    |
+
+写 Hook 时先确认 `$unique` 和参数数量。拿 options 的 Hook 写法去接 taxonomy 或 nav menu，参数会错。
+
+## 什么时候挂保存 Hook
+
+适合挂保存 Hook 的情况：
+
+- 保存后需要删除缓存。
+- 保存后需要刷新 rewrite rules。
+- 保存后需要同步一份派生配置。
+- 保存前要统一纠正字段结构。
+- 保存前要阻止非法组合值。
+
+不适合挂保存 Hook 的情况：
+
+- 只是前台展示判断，用 `_pz()` 即可。
+- 只是字段显示隐藏，用 `dependency` 即可。
+- 只是单个用户/文章业务动作，应走对应 Ajax 或业务函数。
+- 涉及支付订单、余额、会员、积分时，应走业务流程，不要只改 CSF 保存数据。
+
+## 保存问题排查
+
+按这个顺序查：
+
+1. 请求是不是 `csf_zibll_options_ajax_save` 或主题设置页普通提交。
+2. nonce 是否通过。
+3. 字段是否存在于 `pre_fields`。
+4. 字段 `id` 是否随表单提交。
+5. 字段是否被 `validate` 回滚。
+6. `csf_zibll_options_save` filter 是否改写了值。
+7. `update_option('zibll_options')` 是否成功。
+8. `_pz()` 的静态缓存是否在同一次请求里已经提前读取。
+9. 保存后相关缓存、rewrite、派生数据是否刷新。

@@ -1,0 +1,341 @@
+---
+title: 主题扩展
+description: 子比主题二次开发、模块扩展、Hook、Ajax、模板覆盖与业务系统参考。
+---
+
+## 这部分解决什么
+
+子比主题不是一个以开放 API 为核心的系统。源码里真正适合二次开发使用的入口，主要是 WordPress 主题常见的扩展面：主题函数、Action、Filter、Ajax 动作、短代码、模板覆盖，以及用户、论坛、商城、Zibpay、社交登录、消息通知等业务模块。
+
+这组文档的目标不是把源码逐行搬出来，而是把“应该从哪里扩展、哪些地方不能绕过、怎么判断改插件还是改子主题、如何保留升级能力”讲清楚。你可以把它当作子比主题二次开发的路线图和风险边界。
+
+## 阅读路径
+
+<Cards>
+  <Card
+    title="开发地图"
+    description="先判断需求属于展示、流程、数据、业务模块还是后台配置。"
+    href="/docs/api/map"
+  />
+  <Card
+    title="加载顺序"
+    description="理解 functions.php、inc/inc.php、zib_require 和各模块入口。"
+    href="/docs/api/loading"
+  />
+  <Card
+    title="数据模型"
+    description="梳理文章、论坛、商城、用户、订单和分类法之间的关系。"
+    href="/docs/api/data-models"
+  />
+  <Card
+    title="主题函数"
+    description="查找、调用和封装主题函数，避免重复查询和绕过校验。"
+    href="/docs/api/functions"
+  />
+  <Card
+    title="Hook 与过滤器"
+    description="使用 Action 与 Filter 做无侵入扩展。"
+    href="/docs/api/hooks"
+  />
+  <Card
+    title="Ajax 动作"
+    description="理解 admin-ajax.php 动作、权限、nonce、响应格式和缓存边界。"
+    href="/docs/api/ajax"
+  />
+  <Card
+    title="前端交互协议"
+    description="复用 RefreshModal、wp-ajax-submit、ajaxpager、Ajax Tab 和动态模块加载。"
+    href="/docs/api/frontend-events"
+  />
+  <Card
+    title="自定义代码与安全注入"
+    description="梳理自定义 CSS、JS、头部/底部 HTML、统计代码、Hook 注入和 PHP 扩展边界。"
+    href="/docs/api/custom-code-injection"
+  />
+  <Card
+    title="站点框架与导航"
+    description="扩展页头、顶部导航、移动菜单、高级子菜单、右侧浮动按钮、手机底部 Tabbar 和 SEO head。"
+    href="/docs/api/site-frame-navigation"
+  />
+  <Card
+    title="菜单徽章与高级子菜单"
+    description="拆解菜单项图标、徽章、高级子菜单、图文卡片、多栏目链接和前台 Walker 渲染扩展边界。"
+    href="/docs/api/menu-badges-advanced-submenus"
+  />
+  <Card
+    title="主题样式、背景与模式切换"
+    description="梳理全局主题色、背景图、页面背景、布局宽度、导航页脚颜色、日夜间模式和前台样式扩展边界。"
+    href="/docs/api/theme-style-appearance"
+  />
+  <Card
+    title="顶部多功能组件与广告位"
+    description="蒸馏顶部首屏幻灯片、视频背景、搜索叠加、图标卡片、文章插入内容、广告位和小工具投放。"
+    href="/docs/api/top-components-ads"
+  />
+  <Card
+    title="普通页面与前台设置"
+    description="扩展普通页面模板、页面头部样式、内容样式、页面专属小工具容器和前台设置弹窗。"
+    href="/docs/api/pages-frontend-settings"
+  />
+  <Card
+    title="主题后台管理扩展"
+    description="扩展 inc/functions/admin、后台提醒、分类图像、分类 SEO、链接管理、评论列表、菜单项、用户资料页和编辑器资源。"
+    href="/docs/api/admin-management"
+  />
+  <Card
+    title="短代码"
+    description="整理主题内置短代码，以及新增短代码的实现边界。"
+    href="/docs/api/shortcodes"
+  />
+  <Card
+    title="古腾堡块与正文模块"
+    description="梳理编辑器区块、短代码桥接、正文保存结构和前台渲染依赖。"
+    href="/docs/api/gutenberg-blocks"
+  />
+  <Card
+    title="模板覆盖"
+    description="使用子主题覆盖模板、保留主题原有权限和安全输出。"
+    href="/docs/api/templates"
+  />
+  <Card
+    title="主题小工具与侧栏"
+    description="扩展 inc/widgets、小工具注册、页面容器、侧栏位置、CSF 小工具、显示规则和 Ajax 小工具加载。"
+    href="/docs/api/widgets-sidebars"
+  />
+  <Card
+    title="精彩一言与短句刷新"
+    description="梳理一言文本文件、前端刷新协议、文章页位置、小工具、用户签名替换和动态内容边界。"
+    href="/docs/api/quotes-yiyan"
+  />
+  <Card
+    title="外链重定向与网址导航"
+    description="扩展 go.php 外链中转、go_link、nonce 鉴权、排除域名、文章外链、用户网址和友情链接模块。"
+    href="/docs/api/external-links-redirect"
+  />
+  <Card
+    title="SEO Head 与 robots"
+    description="梳理 wp_head 清理、SEO title、keywords、description、canonical、特殊页面 noindex 和扩展边界。"
+    href="/docs/api/seo-head-robots"
+  />
+  <Card
+    title="SEO 与百度资源提交"
+    description="梳理百度自动推送、普通收录、快速收录、提交结果缓存、熊掌号 JSON-LD 和重试边界。"
+    href="/docs/api/seo-baidu-submission"
+  />
+  <Card
+    title="IP 归属地与位置展示"
+    description="梳理 IP 获取、腾讯/高德/太平洋查询、评论与用户地址展示、注册防刷和后台测试链路。"
+    href="/docs/api/ip-geolocation"
+  />
+  <Card
+    title="首页与归档列表"
+    description="扩展首页 Tab、分类/标签/专题封面、筛选菜单、主文章列表、排序查询和 Ajax 分页。"
+    href="/docs/api/archive-post-lists"
+  />
+  <Card
+    title="文章正文与单页渲染"
+    description="扩展文章页框架、顶部封面、正文 Hook、阅读权限、文章目录、高度限制、版权和底部动作。"
+    href="/docs/api/single-post-rendering"
+  />
+  <Card
+    title="分享、海报与微信分享"
+    description="扩展分享平台、移动端分享弹窗、海报生成数据、论坛/商城海报适配和微信 JS-SDK 分享。"
+    href="/docs/api/share-posters-wechat"
+  />
+  <Card
+    title="评论与互动"
+    description="梳理评论提交、评论审核、点赞、收藏、关注、举报和消息联动。"
+    href="/docs/api/comments-interactions"
+  />
+  <Card
+    title="媒体上传"
+    description="说明前台上传、分片上传、媒体库隔离、附件归属、特色媒体编辑和上传审核。"
+    href="/docs/api/media-upload"
+  />
+  <Card
+    title="内容审核与发布安全"
+    description="梳理 API 内容审核、百度审核接入、投稿评论私信审核、图片审核、论坛审核和人工审核边界。"
+    href="/docs/api/content-audit-security"
+  />
+  <Card
+    title="多语言智能翻译与 JS 国际化"
+    description="梳理前后台语言分离、前台智能翻译、语言按钮、术语配置、动态内容监听和脚本文案扩展。"
+    href="/docs/api/multilingual-translation-i18n"
+  />
+  <Card
+    title="视频资源与播放器"
+    description="梳理视频封面、DPlayer、剧集切换、iframe 嵌入、古腾堡视频块、前台投稿视频权限和付费视频链路。"
+    href="/docs/api/video-resources-player"
+  />
+  <Card
+    title="前台投稿与编辑"
+    description="梳理投稿页、草稿、审核、付费内容、特色封面、删除文章和前台设置扩展。"
+    href="/docs/api/frontend-posting"
+  />
+  <Card
+    title="搜索体系"
+    description="梳理搜索页、搜索弹窗、类型 Tab、筛选、排序、关键词、搜索历史和 Meilisearch。"
+    href="/docs/api/search-system"
+  />
+  <Card
+    title="主题内置 AI 扩展"
+    description="解读 inc/functions/ai、AI SEO、WordPress Abilities API、WP AI Client、后台资源加载和 Ajax 生成流程。"
+    href="/docs/api/theme-ai-abilities"
+  />
+  <Card
+    title="邮件、SMTP 与验证码"
+    description="扩展 SMTP 发信、HTML 邮件模板、验证码发送、业务通知邮件和后台邮件测试流程。"
+    href="/docs/api/email-smtp-notifications"
+  />
+  <Card
+    title="短信验证码服务"
+    description="梳理 ZibSMS、短信服务商配置、手机验证码发送、绑定手机和服务商排查。"
+    href="/docs/api/sms-verification-services"
+  />
+  <Card
+    title="用户系统"
+    description="扩展登录、注册、资料、绑定、签到、等级、认证和用户中心。"
+    href="/docs/api/user-system"
+  />
+  <Card
+    title="作者主页与用户中心"
+    description="扩展作者主页 Tab、收藏类型、关注粉丝、用户中心抽屉 Tab、侧栏服务、账户安全和当前用户 Ajax 数据。"
+    href="/docs/api/author-user-pages"
+  />
+  <Card
+    title="用户成长与权限体系"
+    description="扩展签到、等级经验、认证、徽章、邀请码、用户能力和禁封申诉流程。"
+    href="/docs/api/user-growth-permissions"
+  />
+  <Card
+    title="用户成长奖励事件"
+    description="梳理经验值与免费积分的同源 Hook、每日上限、防重复字段和任务活动奖励扩展。"
+    href="/docs/api/user-growth-reward-events"
+  />
+  <Card
+    title="用户成长数据维护"
+    description="梳理 zib_other_data、等级经验、签到、徽章、禁封日志、迁移清理和批量修复边界。"
+    href="/docs/api/user-growth-data-maintenance"
+  />
+  <Card
+    title="用户资产、积分与余额"
+    description="梳理 Zibpay 积分、余额、转账、充值、购买积分、免费积分发放和后台手动调整的扩展边界。"
+    href="/docs/api/user-assets-points-balance"
+  />
+  <Card
+    title="论坛模块"
+    description="扩展 plate、forum_post、话题、标签、版主和帖子流程。"
+    href="/docs/api/bbs"
+  />
+  <Card
+    title="论坛排序与推荐指数"
+    description="拆解论坛帖子排序选项、推荐分计算、动态时间权重、排序缓存和评分收藏评论联动。"
+    href="/docs/api/bbs-sorting-recommendation"
+  />
+  <Card
+    title="论坛小工具与侧栏"
+    description="整理论坛侧栏注册、版块小工具、帖子列表、话题列表、Ajax 加载和 Tab 切换写法。"
+    href="/docs/api/bbs-widgets"
+  />
+  <Card
+    title="商城模块"
+    description="扩展 shop_product、购物车、商品页、售后、物流和店铺能力。"
+    href="/docs/api/shop"
+  />
+  <Card
+    title="商城商品发布字段"
+    description="梳理 product_config、规格选项、库存、发货类型、售后继承、前台 Vue 数据和保存边界。"
+    href="/docs/api/shop-product-fields"
+  />
+  <Card
+    title="商城参数与继承配置"
+    description="拆解商品展示参数、默认参数模板、分类统一配置和商品、分类、全局三级继承读取。"
+    href="/docs/api/shop-parameter-inheritance"
+  />
+  <Card
+    title="商城购物车与确认下单"
+    description="梳理购物车数据、确认弹窗、服务端重算、Zibpay 创建和支付发起链路。"
+    href="/docs/api/shop-cart-checkout"
+  />
+  <Card
+    title="商城发货、售后与优惠"
+    description="梳理订单付款后的发货、物流、确认收货、售后状态机、退款、商品优惠和优惠码扩展边界。"
+    href="/docs/api/shop-shipping-after-sale"
+  />
+  <Card
+    title="商城后台与订单排查"
+    description="梳理商品后台列表、评价后台展示、后台订单查询、用户中心计数缓存和异常订单排查。"
+    href="/docs/api/shop-admin-diagnostics"
+  />
+  <Card
+    title="商城用户中心与消息通知"
+    description="梳理用户中心订单展示、联系商家、收货地址修改申请、邮件、站内信和微信模板通知链路。"
+    href="/docs/api/shop-user-center-messages"
+  />
+  <Card
+    title="商城小工具与商品列表"
+    description="整理商城侧栏注册、商品列表、小工具字段、Ajax 加载、商品 Tab 和单行滚动列表。"
+    href="/docs/api/shop-widgets"
+  />
+  <Card
+    title="Zibpay 扩展"
+    description="扩展订单、支付、下载权限、余额、积分、VIP、分佣和提现。"
+    href="/docs/api/zibpay"
+  />
+  <Card
+    title="Zibpay VIP 与会员权益"
+    description="梳理会员购买、续费、升级、卡密兑换、积分兑换、支付成功回调、会员状态和权益判断。"
+    href="/docs/api/zibpay-vip-membership"
+  />
+  <Card
+    title="Zibpay 付费下载与资源权限"
+    description="梳理付费资源字段、购买盒子、收银台、订单校验、下载路由、免费次数限制和下载日志。"
+    href="/docs/api/zibpay-paid-download"
+  />
+  <Card
+    title="Zibpay 分佣与提现"
+    description="梳理推广返佣、创作分成、提现申请、处理中锁定、后台处理、API 打款和消息通知链路。"
+    href="/docs/api/zibpay-rebate-withdraw"
+  />
+  <Card
+    title="社交登录"
+    description="理解 OAuth 目录、第三方回调、绑定和解绑流程。"
+    href="/docs/api/oauth"
+  />
+  <Card
+    title="消息通知"
+    description="扩展站内消息、私信、微信模板消息和业务通知。"
+    href="/docs/api/messages"
+  />
+  <Card
+    title="REST 搜索扩展"
+    description="说明主题对 WordPress REST 搜索的补充，不把它误解为开放接口平台。"
+    href="/docs/api/rest-search"
+  />
+  <Card
+    title="落地清单"
+    description="开发前、开发中、上线前的检查项。"
+    href="/docs/api/checklist"
+  />
+</Cards>
+
+## 先做这个判断
+
+| 需求类型                         | 首选位置                     | 不建议的做法                    |
+| -------------------------------- | ---------------------------- | ------------------------------- |
+| 只改样式、布局或局部展示         | 子主题、CSS、模板覆盖        | 直接修改主题核心模板            |
+| 改按钮、文案、查询参数、展示片段 | Filter 或已有主题函数        | 复制一份完整函数再改            |
+| 在流程节点追加通知、日志、同步   | Action                       | 改主题流程里的核心函数          |
+| 新增前端交互或后台异步任务       | Ajax 动作，配合 nonce 与权限 | 直接暴露未校验的入口            |
+| 新增可复用业务能力               | 插件                         | 堆进 `functions.php` 或主题核心 |
+| 新增后台配置、Meta 字段、小工具  | Codestar Framework           | 手写分散的设置页和保存逻辑      |
+| 支付、订单、下载权限、余额积分   | Zibpay 既有流程与 Hook       | 直接改订单状态或资产字段        |
+
+## 主题扩展的底线
+
+- 不直接改主题核心文件，除非只是临时排查问题。
+- 不绕过登录态、nonce、权限、订单状态、支付签名和下载权限。
+- 不把调试信息、服务器路径、SQL、密钥、回调原文输出给前端。
+- 不把动态用户页面、支付页面、Ajax 动作当成普通静态页面缓存。
+- 不假设每个站点都启用了论坛、商城、支付、AI 或社交登录模块。
+- 不假设主题函数、类、常量在所有版本里都存在，调用前先做兼容判断。

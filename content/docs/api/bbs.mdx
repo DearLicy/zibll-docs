@@ -1,0 +1,1279 @@
+---
+title: 论坛模块
+description: 扩展子比主题论坛版块、帖子、话题、标签、评分、采纳、版主、论坛页面和论坛 Ajax 动作。
+---
+
+## 模块入口
+
+论坛模块入口是 `inc/functions/bbs/bbs.php`。它先定义资源常量，再加载基础函数和动作：
+
+```php
+define('ZIB_BBS_ASSETS_URI', ZIB_TEMPLATE_DIRECTORY_URI . '/inc/functions/bbs/assets');
+define('ZIB_BBS_REQUIRE_URI', '/inc/functions/bbs/');
+
+zib_require(array(
+    'inc/functions',
+    'action/action',
+), false, ZIB_BBS_REQUIRE_URI);
+```
+
+后台配置总是会加载 `inc/functions/bbs/admin/option.php`。真正的论坛前台能力由 `zib_bbs()` 的状态控制：
+
+```php
+$zib_bbs = zib_bbs();
+if (!$zib_bbs->s) {
+    // 论坛关闭时，后台评论列表默认不显示论坛评论。
+} else {
+    zib_require(array(
+        'widgets/widgets',
+        'inc/user-page',
+    ), false, ZIB_BBS_REQUIRE_URI);
+}
+```
+
+扩展论坛前先判断论坛是否开启，不要假设 `plate`、`forum_post` 和论坛模板一定参与当前请求。
+
+## 目录地图
+
+| 目录                                   | 作用                                                                                      |
+| -------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `inc/functions/bbs/inc/class.init.php` | 注册 `plate`、`forum_post`、`plate_cat`、`forum_topic`、`forum_tag`，处理重写规则和主查询 |
+| `inc/functions/bbs/inc/functions.php`  | 论坛基础函数、列表、推荐指数、热度、SEO、浏览统计                                         |
+| `inc/functions/bbs/inc/plate.php`      | 版块、版块关注、付费关注、版块页面                                                        |
+| `inc/functions/bbs/inc/posts.php`      | 帖子列表、搜索、动态推荐分、收藏、排序                                                    |
+| `inc/functions/bbs/inc/comment.php`    | 回答、采纳、热评、评论操作扩展                                                            |
+| `inc/functions/bbs/inc/edit.php`       | 论坛发布和编辑表单能力                                                                    |
+| `inc/functions/bbs/inc/template.php`   | 论坛通用页面骨架和动态模板 Hook                                                           |
+| `inc/functions/bbs/action/*`           | 前台论坛 Ajax 动作                                                                        |
+| `inc/functions/bbs/admin/*`            | 论坛后台设置、Meta、批量编辑                                                              |
+| `inc/functions/bbs/widgets/*`          | 论坛小工具和论坛侧栏                                                                      |
+
+## 数据模型
+
+`inc/functions/bbs/inc/class.init.php` 注册论坛的核心对象：
+
+| 类型          | 注册方式                                                     | 说明     |
+| ------------- | ------------------------------------------------------------ | -------- |
+| `plate`       | `register_post_type()`                                       | 版块     |
+| `forum_post`  | `register_post_type()`                                       | 帖子     |
+| `plate_cat`   | `register_taxonomy('plate_cat', array('plate'), ...)`        | 版块分类 |
+| `forum_topic` | `register_taxonomy('forum_topic', array('forum_post'), ...)` | 话题     |
+| `forum_tag`   | `register_taxonomy('forum_tag', array('forum_post'), ...)`   | 标签     |
+
+论坛不是普通文章列表的换皮。它额外处理：
+
+- 版块关注、付费关注和查看权限。
+- 帖子评分、精华、置顶、热帖、动态推荐分。
+- 评论采纳、热评、回答身份标记。
+- 版主申请、添加、移除、审核。
+- 论坛首页、版块页、话题页、标签页和帖子编辑页的模板路由。
+
+## 搜索与新增入口
+
+论坛开启后会把版块和帖子加入主题搜索：
+
+```php
+add_filter('search_types', 'zib_bbs_search_types_filter');
+add_filter('search_main_tabs_array', 'zib_bbs_search_main_tabs_array_filter');
+```
+
+也会把创建版块、创建话题、发布帖子加入顶部新增按钮选项：
+
+```php
+add_filter('new_add_btns_bbs_plate', 'zib_bbs_new_add_btns_filter_bbs_plate');
+add_filter('new_add_btns_bbs_topic', 'zib_bbs_new_add_btns_filter_bbs_topic');
+add_filter('new_add_btns_bbs_posts', 'zib_bbs_new_add_btns_filter_bbs_posts');
+add_filter('new_add_btns_options', 'zib_bbs_new_add_btns_options');
+```
+
+扩展搜索时优先挂这些 Filter，而不是直接改搜索模板。
+
+搜索页实际会联动三处论坛实现：
+
+| 环节       | 文件                                                                 | 说明                                                                          |
+| ---------- | -------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| 类型和 Tab | `inc/functions/bbs/bbs.php`                                          | 注册 `plate` 和 `forum` 两个搜索类型                                          |
+| 主查询     | `inc/functions/bbs/inc/class.init.php`                               | `type=forum` 设置 `post_type=forum_post`，`type=plate` 设置 `post_type=plate` |
+| 内容输出   | `inc/functions/bbs/inc/posts.php`、`inc/functions/bbs/inc/plate.php` | 分别渲染帖子搜索结果和版块搜索结果                                            |
+
+论坛搜索的版块筛选使用 `trem=plate_{plate_id}`，再由 `main_post_query()` 追加 `plate_id` meta 查询。话题、标签和版块分类仍然走普通 term ID。更完整的搜索筛选、排序、facet 缓存和 REST 搜索边界见 [搜索体系](/docs/api/search-system)。
+
+## 前台模板 Hook
+
+论坛模板骨架来自 `inc/functions/bbs/inc/template.php` 和 `inc/functions/bbs/page/*`。模板会按页面类型触发动态 Hook：
+
+```php
+do_action('bbs_locate_template');
+do_action('bbs_locate_template_' . $type);
+
+do_action('bbs_' . $page_type . '_page_header');
+do_action('bbs_' . $page_type . '_page_content');
+do_action('bbs_' . $page_type . '_page_sidebar');
+do_action('bbs_' . $page_type . '_page_footer');
+```
+
+常见页面类型：
+
+| 页面        | 常见 Hook                                                                          |
+| ----------- | ---------------------------------------------------------------------------------- |
+| 论坛首页    | `bbs_home_page_content`、`bbs_home_tab_content_top`、`bbs_home_tab_content_bottom` |
+| 版块页      | `bbs_plate_page_content`、`bbs_plate_page_sidebar`                                 |
+| 帖子页      | `bbs_posts_page_content`、`bbs_single_footer`、`zib_bbs_posts_content_after`       |
+| 发帖/编辑页 | `bbs_posts_edit_page_content`、`bbs_posts_edit_page_sidebar`                       |
+| 话题/标签页 | `bbs_forum_topic_page_content`、`bbs_forum_tag_page_content`                       |
+
+追加模块时优先使用 Hook：
+
+```php
+add_action('bbs_single_footer', 'zib_docs_bbs_single_notice', 20);
+
+function zib_docs_bbs_single_notice($post)
+{
+    if (empty($post->ID) || $post->post_type !== 'forum_post') {
+        return;
+    }
+
+    echo '<div class="muted-box mt20">' . esc_html__('请遵守社区交流规则。', 'zib_language') . '</div>';
+}
+```
+
+## 论坛首页与 Tab 配置
+
+论坛首页不是普通页面正文承载，而是由 `inc/functions/bbs/page/home.php` 进入 `zib_bbs_page_template('home')`。页面骨架会按 `home` 类型输出三组动态侧栏和四组页面 Hook：
+
+| 位置     | 入口                                                                        |
+| -------- | --------------------------------------------------------------------------- |
+| 顶部通栏 | `dynamic_sidebar('bbs_home_top_fluid')`                                     |
+| 页面头部 | `do_action('bbs_home_page_header')`                                         |
+| 主内容区 | `do_action('bbs_home_page_content')`                                        |
+| 右侧栏   | `dynamic_sidebar('bbs_home_sidebar')`、`do_action('bbs_home_page_sidebar')` |
+| 底部通栏 | `dynamic_sidebar('bbs_home_bottom_fluid')`                                  |
+| 页面底部 | `do_action('bbs_home_page_footer')`                                         |
+
+首页主内容默认挂载 `zib_bbs_home_tab_content()`。它读取后台 `bbs_home_tab` 配置，并先经过 `bbs_home_tab_options` Filter，再生成 Tab 导航和 Tab 内容：
+
+```php
+$tabs_options = apply_filters('bbs_home_tab_options', _pz('bbs_home_tab', array()));
+```
+
+管理员和论坛管理员会自动追加 `pending` Tab，用于查看待审核帖子。普通用户不会看到这个入口。每个 Tab 都可以通过 `?index=2`、`?index=3` 这样的参数直达，默认激活项来自 `bbs_home_tab_active_index`。
+
+首页 Tab 的外层结构也很重要：
+
+```php
+echo '<div class="fixed-wrap bbs-home-tab">';
+echo '<div class="fixed-wrap-nav zib-widget affix-header-sm" offset-top="-8">' . $tab_nav . '</div>';
+echo '<div class="fixed-wrap-content">';
+do_action('bbs_home_tab_content_top');
+echo $tab_content;
+do_action('bbs_home_tab_content_bottom');
+echo '</div>';
+echo '</div>';
+```
+
+因此扩展首页模块时，优先放在 `bbs_home_tab_content_top` 或 `bbs_home_tab_content_bottom`，不要重写整套首页模板。这样可以继续复用主题的吸顶导航、Ajax Tab、骨架屏和分页加载。
+
+## 首页 Tab 数据结构
+
+`bbs_home_tab` 是 Codestar `sortable` 字段。默认包含关注、综合、版块和多组帖子列表类栏目。常见 key 可以按这个方式理解：
+
+| Key                          | 内容来源                         | 说明                                                       |
+| ---------------------------- | -------------------------------- | ---------------------------------------------------------- |
+| `follow`                     | `bbs_home_tab_content_follow`    | 当前用户关注版块内的帖子，未登录时显示登录提示             |
+| `synthesis`                  | `bbs_home_tab_content_synthesis` | 综合帖子列表，最终走帖子查询                               |
+| `plate`                      | `bbs_home_tab_content_plate`     | 按 `plate_cat` 分组展示版块                                |
+| `tabs` / `tabs_2` / `tabs_3` | `bbs_home_tab_content_other`     | 后台配置的帖子列表栏目，如热门、精华、问答、投票、最新回复 |
+| `pending`                    | `bbs_home_tab_content_pending`   | 管理员和论坛管理员的待审核列表                             |
+
+如果只是追加一个首页 Tab，可以改 `bbs_home_tab_options`。示例保留主题的命名函数和 `array()` 写法：
+
+```php
+add_filter('bbs_home_tab_options', 'zib_docs_bbs_home_tab_options', 20);
+
+function zib_docs_bbs_home_tab_options($tabs_options)
+{
+    if (!is_array($tabs_options)) {
+        $tabs_options = array();
+    }
+
+    $tabs_options['tabs'][] = array(
+        'show'      => array('pc_s', 'm_s'),
+        'title'     => __('最新讨论', 'zib_language'),
+        'style'     => 'detail',
+        'orderby'   => 'modified',
+        'filter'    => array(),
+        'topping_s' => true,
+    );
+
+    return $tabs_options;
+}
+```
+
+如果只是给首页 Tab 内容上方加一个轻量提示，使用 Action 更合适：
+
+```php
+add_action('bbs_home_tab_content_top', 'zib_docs_bbs_home_notice');
+
+function zib_docs_bbs_home_notice()
+{
+    echo '<div class="zib-widget mb20">' . esc_html__('欢迎参与社区讨论。', 'zib_language') . '</div>';
+}
+```
+
+## 版块分区与排序
+
+首页 `plate` Tab 由 `zib_bbs_get_home_tab_content_plate()` 渲染。它先判断当前用户是否有创建版块权限：
+
+```php
+$can_plate_add = zib_bbs_current_user_can('plate_add');
+```
+
+然后读取后台配置：
+
+| 配置              | 用途                                            |
+| ----------------- | ----------------------------------------------- |
+| `cat_orderby`     | 控制版块分类 `plate_cat` 的排序方式             |
+| `orderby_include` | 当 `cat_orderby=include` 时，手动指定并排序分类 |
+| `orderby`         | 控制分类内版块列表的排序方式                    |
+| `user_follow`     | 在版块分区前展示当前用户关注的版块              |
+| `hot_plate`       | 在版块分区前展示系统推荐版块                    |
+
+分类查询入口是：
+
+```php
+$cat_objs = zib_bbs_get_plate_cats_orderby($orderby, !$can_plate_add, $include);
+```
+
+这里第二个参数会根据创建版块权限决定是否隐藏空分类：没有创建权限的用户不需要看到空分区；有创建权限的用户可以看到空分区并通过创建按钮补齐版块。
+
+每个分类会渲染为 `.panel.panel-plate`。桌面端标题是可折叠结构，移动端只输出标题，分类内列表统一交给：
+
+```php
+zib_bbs_get_plate_main_lists(array(
+    'cat'     => $cat_obj->term_id,
+    'orderby' => $plate_orderby,
+));
+```
+
+`zib_bbs_get_plate_main_lists()` 内部继续走 `zib_bbs_get_plate_query()`，所以新增排序或筛选时应该扩展查询参数或排序选项，不要另写一套版块 HTML。版块查询默认是 `post_type=plate`、`post_status=publish`、`showposts=-1`，传入 `cat` 时会转成 `plate_cat` 的 `tax_query`，传入 `include` 时会使用 `post__in` 和 `orderby=post__in` 保留手动排序。
+
+首页版块内容前后还各有一个 Filter：
+
+```php
+apply_filters('bbs_home_tab_content_plate_before', $html, $option);
+apply_filters('bbs_home_tab_content_plate_after', $html, $option);
+```
+
+主题内置的“我关注的版块”和“热门推荐”就是挂在 `bbs_home_tab_content_plate_before` 上。自定义推荐版块时也建议挂这里，并保持输出为 `panel panel-plate`，这样视觉和折叠布局会跟原生分区一致。
+
+## 帖子列表 Tab
+
+`synthesis`、`other` 和后台多组帖子列表栏目最终会进入 `zib_bbs_get_home_tab_content_other()`。它支持的核心筛选参数包括：
+
+| 参数            | 说明                                          |
+| --------------- | --------------------------------------------- |
+| `include_plate` | 只看指定版块                                  |
+| `exclude_plate` | 排除指定版块；存在 `include_plate` 时不会生效 |
+| `include_topic` | 只看指定话题                                  |
+| `include_tag`   | 只看指定标签                                  |
+| `orderby`       | 帖子排序方式                                  |
+| `bbs_type`      | 帖子类型筛选                                  |
+| `filter`        | 其它筛选，如精华、热门等                      |
+| `allow_view`    | 阅读权限筛选                                  |
+| `style`         | 列表样式，`detail` 或 `mini`                  |
+| `topping_s`     | 首页第一页是否显示置顶帖                      |
+
+这个函数会按配置决定是否输出版块头、话题头或标签头，再通过 `zib_bbs_get_posts_query()` 查询帖子。分页使用 `zib_bbs_get_paginate($posts->found_posts)`，并追加 `.post_ajax_loader` 骨架屏。扩展帖子列表 Tab 时，重点是补齐查询参数，不要破坏 `.ajax-item`、`.ajax-pag` 和 `.post_ajax_loader` 这些 Ajax 分页协议。
+
+## 论坛前台运营与列表性能
+
+官网教程强调论坛首页是“Tab 栏目 + 模块化布局”的运营入口：每个首页 Tab 都有独立地址，适合放到菜单、按钮或活动页里直接跳转；但本地源码里真正决定列表是否稳定的，是 Tab 配置、查询参数、分页协议和缓存刷新是否一致。
+
+| 运营动作                       | 源码入口                                                                       | 排查重点                                                              |
+| ------------------------------ | ------------------------------------------------------------------------------ | --------------------------------------------------------------------- |
+| 首页新增热门、精华、问答等栏目 | `bbs_home_tab`、`bbs_home_tab_options`、`zib_bbs_get_home_tab_content_other()` | 栏目必须有内容来源；空栏目只会显示兜底提示，不适合长期挂在首页首屏    |
+| 版块页单独配置 Tab             | 版块 meta `plate_tab_alone_s`、`plate_tab`、`tab_active_index`                 | 单独配置会覆盖全局 `bbs_plate_tab`，排查时先看版块 meta，再看全局设置 |
+| 给菜单或活动页直达某个栏目     | `?index=2`、`?index=3`                                                         | `index` 是 Tab 序号，不是栏目 key；调整后台排序后外部链接也要同步检查 |
+| 首页插入运营模块               | `bbs_home_tab_content_top` / `bbs_home_tab_content_bottom`                     | 适合公告、活动、引导卡片；不要重写首页模板以免丢失 Ajax Tab 和骨架屏  |
+| 版块页插入运营模块             | `bbs_plate_page_content`、`bbs_plate_tab_content_*`                            | 如果模块只适合某个版块，先判断当前 `plate`，避免全站版块页都显示      |
+| 移动端左右滑动 Tab             | `bbs_home_tab_swiper`、`bbs_plate_tab_swiper`                                  | Tab 很多、首屏模块重或低端设备卡顿时，优先关闭滑动切换或减少栏目      |
+
+列表查询的主干要按页面类型区分：
+
+| 页面                        | 列表入口                                | 查询来源                                                                         |
+| --------------------------- | --------------------------------------- | -------------------------------------------------------------------------------- |
+| 论坛首页综合/自定义帖子 Tab | `zib_bbs_get_home_tab_content_other()`  | 后台 Tab 的 `include_plate`、`include_topic`、`include_tag`、`filter`、`orderby` |
+| 版块页帖子 Tab              | `zib_bbs_get_plate_tab_content_plate()` | 当前版块 `plate_id`，再叠加 Tab 配置里的话题、标签、类型和排序                   |
+| 话题/标签归档页             | `Zib_BBS_Init::wp_query()`              | 主查询被改为 `forum_post`，每页数量读取 `bbs_posts_per_page`                     |
+| 用户中心论坛列表            | `inc/functions/bbs/inc/user-page.php`   | 用户维度的状态、排序和 Ajax 分页，不能直接套首页 Tab 参数                        |
+| 论坛小工具                  | `inc/functions/bbs/widgets/*`           | 小工具有独立字段和 Ajax 分页，详见 [论坛小工具与侧栏](/docs/api/bbs-widgets)     |
+
+列表性能优先检查这些后台配置和缓存点：
+
+| 配置或缓存                                               | 影响                                    | 建议                                                                               |
+| -------------------------------------------------------- | --------------------------------------- | ---------------------------------------------------------------------------------- |
+| `bbs_posts_per_page`                                     | 首页、版块页、话题/标签归档的每页帖子数 | 内容多的站点不要盲目调大；先保持 12 到 20，再靠 Tab 精准筛选                       |
+| `bbs_posts_paginate_type`                                | 数字分页或 Ajax 追加列表                | 首页运营流更适合 `ajax_lists`，排查 SEO 或爬虫收录时可临时切数字分页               |
+| `bbs_posts_paginate_ias_s`、`bbs_posts_paginate_ias_max` | 滚动到底自动加载和最大自动加载页数      | 大图多、评论多、移动端卡顿时降低自动加载页数，保留“加载更多”按钮                   |
+| `bbs_thumb_size`                                         | 列表缩略图读取尺寸                      | 非原图尺寸会触发缩略图读取，官方后台提示建议配合 Redis 或 Memcached                |
+| `recommend_score_opt.cache_time`                         | 推荐指数排序结果缓存                    | 使用 `dynamic_score` 排序时不要把缓存时间设得过短，大站优先观察 SQL 和对象缓存命中 |
+| `bbs_dynamic_score_ids`、`bbs_dynamic_score_max`         | 推荐指数排序缓存组                      | 发帖发布、回收站恢复、转待审、删除、移动版块会清理；批量脚本改范围时也要主动清理   |
+| 版块统计缓存                                             | 帖子数、回复数、阅读数、热门状态        | 批量改 `plate_id`、评论状态或阅读数后要走主题刷新函数，不能只改 meta               |
+
+常见前台问题可以按下面顺序定位：
+
+| 现象                               | 优先检查                                                                                      |
+| ---------------------------------- | --------------------------------------------------------------------------------------------- |
+| 首页某个 Tab 空白                  | 后台 Tab 是否选了无内容的版块/话题/标签，当前 `filter` 是否过窄，普通用户是否无查看权限       |
+| 调整 Tab 顺序后外链打开错栏目      | 外部链接里的 `index` 序号是否仍对应旧排序                                                     |
+| 第一页有置顶，第二页又出现相同内容 | 是否自定义查询时忘记排除 `topping`；首页/版块默认首个 Tab 会单独插入置顶                      |
+| 列表排序和后台选择不一致           | URL 上是否带了 `orderby` 覆盖后台配置；新增排序 key 是否只加了选项、没改查询                  |
+| 推荐指数排序更新慢                 | `recommend_score` 是否已重算，`recommend_score_opt.cache_time` 是否仍在缓存周期内             |
+| 版块统计或热门状态不准             | 是否绕过了 `save_post`、`wp_update_comment_count`、`posts_views_record` 或 `posts_plate_move` |
+| 移动端 Tab 滑动卡顿                | Tab 数量、首屏图片、快速发布 TinyMCE、自动加载页数和 `bbs_home_tab_swiper`                    |
+| CDN 后用户看到旧列表               | 论坛首页、版块页、发帖页和 `admin-ajax.php` 不应被全页静态缓存固定                            |
+
+扩展列表时要优先调用 `zib_bbs_get_posts_query()` 和主题列表函数。自己拼 `WP_Query` 可以做临时排查，但长期实现要把 `forum_post`、`plate_id`、话题/标签、置顶、阅读权限、推荐分、分页和 Ajax 协议一起处理，否则很容易出现“后台配置看起来正确，前台列表却不跟随”的问题。
+
+## 快速发布与待审核
+
+首页快速发布由 `bbs_home_tab_quick_posts_s` 控制，只在第一页生效。主题会用 `bbs_home_tab_quick_posts_tab` 和当前 `index` 判断是否插入：
+
+```php
+$html = zib_bbs_edit::quick_posts(array(
+    'class' => 'ajax-item-header zib-widget',
+)) . $html;
+```
+
+如果开启快速发布，主题还会在底部输出 TinyMCE 全局配置：
+
+```php
+add_action('wp_print_footer_scripts', 'zib_echo_mce_global_config_script', 5);
+```
+
+待审核 Tab 只对超级管理员或论坛管理员追加，查询 `post_status=pending`，列表使用 `zib_bbs_get_posts_manage_list('alone ajax-item', true)`。因此二次开发时不要把待审核入口写死到前台菜单里，应交给主题的身份判断和 `pending` Tab 自动注入。
+
+## 发帖与编辑保存链路
+
+论坛发帖页不是普通文章投稿页的换皮，而是独立的 `forum_post` 编辑链路。模板入口在 `inc/functions/bbs/inc/edit-posts.php`，主内容和侧栏分别挂到：
+
+```php
+add_action('bbs_posts_edit_page_content', 'zib_bbs_posts_edit_page_content');
+add_action('bbs_posts_edit_page_sidebar', 'zib_bbs_posts_edit_sidebar');
+```
+
+主内容区负责封面、标题、编辑器和提交提示：
+
+```php
+echo zib_bbs_edit::posts_featured($in_args['post_id']);
+echo zib_bbs_edit::posts_title($in_args['title']);
+zib_bbs_edit::posts_editor($in_args);
+echo zib_bbs_edit::desc_text($in_args);
+```
+
+侧栏负责真正会影响保存数据的业务字段：
+
+| 组件     | 输出函数                         | 保存目标                                         |
+| -------- | -------------------------------- | ------------------------------------------------ |
+| 提交按钮 | `zib_bbs_edit::posts_submit()`   | `bbs_posts_save` 或 `bbs_posts_draft`            |
+| 状态切换 | `zib_bbs_edit::status()`         | `post_status`，仅有审核权限时显示                |
+| 阅读权限 | `zib_bbs_edit::allow_view_set()` | `allow_view`、`allow_view_roles`、`posts_zibpay` |
+| 版块选择 | `zib_bbs_edit::plate_select()`   | `plate_id` meta                                  |
+| 话题选择 | `zib_bbs_edit::topic_select()`   | `forum_topic` taxonomy                           |
+| 标签选择 | `zib_bbs_edit::tag_select()`     | `forum_tag` taxonomy                             |
+| 发布类型 | `zib_bbs_edit::type_select()`    | `bbs_type` meta                                  |
+| 投票设置 | `zib_bbs_edit::vote_set()`       | 投票相关 meta                                    |
+
+编辑器能力由当前用户权限动态打开。`posts_editor()` 会按能力挂载 `tinymce_upload_img`、`tinymce_hide`、`tinymce_upload_video`、`tinymce_upload_file`、`tinymce_iframe_video`，因此扩展编辑器按钮时要跟随 `zib_bbs_current_user_can()`，不要全局给所有论坛编辑器打开上传或 iframe 能力。
+
+```php
+if ((!$in_args['post_id'] && zib_bbs_current_user_can('posts_upload_img')) || ($in_args['post_id'] && zib_bbs_current_user_can('posts_upload_img', $in_args['post_id']))) {
+    add_filter('tinymce_upload_img', '__return_true');
+}
+```
+
+保存入口集中在 `zib_bbs_ajax_edit_posts()`：
+
+```php
+add_action('wp_ajax_bbs_posts_draft', 'zib_bbs_ajax_edit_posts');
+add_action('wp_ajax_bbs_posts_save', 'zib_bbs_ajax_edit_posts');
+add_action('wp_ajax_nopriv_bbs_posts_draft', 'zib_bbs_ajax_edit_posts');
+add_action('wp_ajax_nopriv_bbs_posts_save', 'zib_bbs_ajax_edit_posts');
+```
+
+实际保存顺序如下：
+
+1. 校验登录、`bbs_edit_posts` nonce 和人机验证。
+2. 新帖检查 `posts_add`，编辑检查 `posts_edit`。
+3. 用 `select_plate` 校验当前用户是否能发到所选版块。
+4. 校验标题必填、标题长度和发布时的最小长度。
+5. 根据 `posts_save_audit_no`、`posts_audit`、`audit_bbs_posts`、`posts_save_audit_no_manual` 判断是否直接发布。
+6. 快速发布时把上传图片写成正文 `<img data-edit-file-id="...">`，把隐藏内容拼成 `[hidecontent]` 结构。
+7. 构造 `forum_post` 的 `$insert_args`，新帖默认 `comment_status=open`。
+8. 允许 iframe 视频的用户临时放开 `wp_kses_allowed_html` 的 iframe 属性。
+9. 触发 `zib_pre_insert_post`，再调用 `wp_insert_post()`。
+10. 保存话题、标签、发布类型、投票、阅读权限和封面。
+11. 触发 `bbs_add_posts` 或 `bbs_edit_posts`，并按 `pending`、`draft`、`publish` 返回不同提示和跳转。
+
+这段链路里最容易写错的是状态判断。`bbs_posts_draft` 默认保存为 `draft`；`bbs_posts_save` 默认先走 `pending`，只有具备免审核能力，或 API 审核通过且具备免人工审核能力，才会变成 `publish`。有审核权限的人编辑帖子时，侧栏的 `post_status` 才会生效。
+
+```php
+if ('bbs_posts_save' === $action) {
+    $post_status = 'pending';
+
+    if ($is_audit) {
+        $post_status = !empty($_REQUEST['post_status']) ? $_REQUEST['post_status'] : 'publish';
+    }
+}
+```
+
+保存后的扩展应挂在主题 Hook 上，而不是替换 Ajax。比如给新帖追加一个已处理标记：
+
+```php
+add_action('bbs_add_posts', 'zib_docs_bbs_after_add_posts');
+
+function zib_docs_bbs_after_add_posts($post)
+{
+    if (empty($post->ID) || get_post_type($post->ID) !== 'forum_post') {
+        return;
+    }
+
+    zib_update_post_meta($post->ID, 'docs_checked', current_time('mysql'));
+}
+```
+
+如果要在入库前做额外校验或记录即将写入的数据，可以监听 `zib_pre_insert_post`。注意它拿到的是 `$insert_args`，不应把它当成稳定的字段改写入口；涉及发帖成功后的通知、索引同步、附件归属和缓存清理，优先放到 `bbs_add_posts` / `bbs_edit_posts` 后置 Hook。
+
+## 阅读限制与付费可见
+
+论坛阅读限制同时作用于 `plate` 和 `forum_post`。实际判断入口集中在 `inc/functions/bbs/inc/posts.php`：
+
+| 函数                                                 | 作用                                                                                |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `zib_bbs_get_allow_view_data($post)`                 | 读取 `allow_view`、`allow_view_roles` 和付费参数，返回是否开放、允许原因、提示 HTML |
+| `zib_bbs_get_posts_not_allow_view($post, $hide_pay)` | 帖子列表和正文判断是否隐藏，先判断所属版块，再判断帖子自身                          |
+| `zib_bbs_get_plate_not_allow_view($post)`            | 版块页判断当前用户是否能查看该版块内容                                              |
+| `zib_bbs_get_posts_allow_view_btn()`                 | 在帖子列表、帖子头部等位置显示权限徽章                                              |
+| `zib_bbs_get_plate_allow_view_btn()`                 | 在版块相关位置显示权限徽章                                                          |
+
+判断顺序非常关键。帖子是否可见不是只看帖子自身：
+
+```php
+$plate_id   = zib_bbs_get_plate_id($post->ID);
+$plate_data = zib_bbs_get_allow_view_data(get_post($plate_id));
+
+if ($plate_data['open'] && !$plate_data['allow_reason']) {
+    return $plate_data['not_html'];
+}
+
+$data = zib_bbs_get_allow_view_data($post);
+```
+
+也就是说，版块限制优先于帖子限制。给版块设置查看限制后，版块内所有帖子列表、帖子页内容都会先受版块限制影响；只有版块允许查看后，才会继续判断帖子自己的阅读限制。
+
+支持的 `allow_view` 类型：
+
+| 值        | 含义             | 关键判断                                                  |
+| --------- | ---------------- | --------------------------------------------------------- |
+| 空值      | 公开             | 不启用限制                                                |
+| `signin`  | 登录后可查看     | 未登录显示登录/注册入口                                   |
+| `comment` | 评论后可查看     | `zib_user_is_commented()` 判断当前用户是否已评论          |
+| `roles`   | 部分用户可查看   | 读取 `allow_view_roles`，支持会员、等级、认证用户         |
+| `pay`     | 付费查看         | 读取 `posts_zibpay`，通过 `zibpay_is_paid()` 判断购买状态 |
+| `points`  | 支付积分查看     | 同样走 `posts_zibpay`，`pay_modo=points`                  |
+| `follow`  | 关注版块后可查看 | 用于版块查看限制，调用 `zib_bbs_is_followed_plate()`      |
+
+管理员、论坛管理员、内容作者、版主或分区版主会在 `zib_bbs_get_allow_view_data()` 里得到 `allow_reason`，即使内容设置了限制也可以查看。扩展权限时不要绕过这个函数，否则很容易让版主、作者、购买用户或会员用户出现前台显示和后台权限不一致。
+
+帖子阅读权限保存入口是 `edit_allow_view`：
+
+```php
+add_action('wp_ajax_edit_allow_view', 'zib_bbs_ajax_edit_allow_view');
+```
+
+它会校验：
+
+| 场景                     | 能力                      |
+| ------------------------ | ------------------------- |
+| 发布帖子时设置阅读权限   | `posts_allow_view_add`    |
+| 修改已发布帖子的阅读权限 | `posts_allow_view_edit`   |
+| 设置积分可见             | `posts_allow_view_points` |
+| 设置付费可见             | `posts_allow_view_pay`    |
+
+保存的数据：
+
+| Meta               | 内容                                      |
+| ------------------ | ----------------------------------------- |
+| `allow_view`       | 阅读限制类型                              |
+| `allow_view_roles` | 会员、等级、认证用户等允许查看条件        |
+| `posts_zibpay`     | 付费/积分价格、会员价、推广折扣、购买说明 |
+| `pay_hide_part`    | 是否只隐藏部分内容                        |
+
+版块查看权限保存入口是 `plate_edit_allow_view`，保存 `allow_view` 和 `allow_view_roles` 到 `plate` 的 post meta。如果版块 `allow_view` 选择 `follow`，保存时还会同步执行 `zib_bbs_ajax_plate_edit_follow_pay()`，因为关注后可查看通常会和付费关注一起使用。
+
+## 付费版块与付费关注
+
+付费版块不是单独的 post type，而是版块 `plate` 的关注能力叠加支付参数。核心数据由 `zib_bbs_get_plate_follow_pay_options($plate_id)` 读取：
+
+| Meta              | 说明                                       |
+| ----------------- | ------------------------------------------ |
+| `follow_pay`      | 是否开启付费关注                           |
+| `follow_pay_args` | 支付方式、现金价格、积分价格、会员价等参数 |
+
+默认数据结构：
+
+```php
+$data = array(
+    's'            => (int) get_post_meta($plate_id, 'follow_pay', true),
+    'pay_modo'     => '0',
+    'pay_price'    => 0,
+    'vip_1_price'  => 0,
+    'vip_2_price'  => 0,
+    'points_price' => 0,
+    'vip_1_points' => 0,
+    'vip_2_points' => 0,
+);
+```
+
+前台付费关注流程由 `zib_bbs_get_plate_follow_pay_cashier_modal()` 输出收银台。它会先查当前用户是否已有待支付订单：
+
+```php
+$wait_payment_data = zibpay_get_current_user_post_wait_payment($plate_id, 11);
+```
+
+没有待支付订单时再根据 `pay_modo` 生成积分支付或现金支付表单。现金支付会走 `zibpay_get_initiate_pay_input()`，订单类型是 `11`；积分支付会检查当前用户积分是否足够，不足时给出积分入口。
+
+付费关注保存入口是：
+
+```php
+add_action('wp_ajax_plate_edit_follow_pay', 'zib_bbs_ajax_plate_edit_follow_pay');
+```
+
+保存时会做价格校验：
+
+- 现金价格必须大于 0，并受 `bbs_plate_follow_pay_opt.price_limit.price` 限制。
+- 积分价格必须大于 0，并受 `bbs_plate_follow_pay_opt.price_limit.points` 限制。
+- 会员价不能高于普通价。
+- 二级会员价不能高于一级会员价。
+- 未单独填写会员价时，按后台折扣自动计算。
+
+用户点击关注时走 `follow_plate`；如果版块开启了付费关注，未支付用户会进入收银台。免费确认和取消确认会走 `follow_plate_confirm`。因此扩展付费版块时，不要自己写独立订单表或独立关注表，应接入现有 `follow_plate`、`submit_order` 和 `follow_plate_confirm` 流程。
+
+如果要在付费关注成功后同步业务记录，可以挂已有的关注 Hook：
+
+```php
+add_action('bbs_follow_plate', 'zib_docs_bbs_follow_plate_log', 10, 2);
+
+function zib_docs_bbs_follow_plate_log($plate_id, $user_id)
+{
+    $plate_id = (int) $plate_id;
+    $user_id  = (int) $user_id;
+
+    if (!$plate_id || !$user_id) {
+        return;
+    }
+
+    update_post_meta($plate_id, '_docs_last_follow_time', current_time('mysql'));
+}
+```
+
+## 发布限制与创建版块限制
+
+论坛发布限制分两层：
+
+| 类型                   | 存储位置                             | 控制能力                        |
+| ---------------------- | ------------------------------------ | ------------------------------- |
+| 在某个版块发帖         | `plate` 的 `add_limit` post meta     | `select_plate`、`posts_add`     |
+| 在某个版块分类创建版块 | `plate_cat` 的 `add_limit` term meta | `select_plate_cat`、`plate_add` |
+
+后台可以配置限制选项数量：
+
+| 配置                               | 说明                                |
+| ---------------------------------- | ----------------------------------- |
+| `bbs_posts_add_limit_opt_max`      | 发帖限制选项数量                    |
+| `bbs_plate_add_limit_opt_max`      | 创建版块限制选项数量                |
+| `user_cap.bbs_posts_add_limit_{N}` | 第 N 个发帖限制选项对应的用户组     |
+| `user_cap.bbs_plate_add_limit_{N}` | 第 N 个创建版块限制选项对应的用户组 |
+
+选项生成入口是：
+
+```php
+zib_bbs_get_add_limit_options($type);
+```
+
+权限判断集中在 `zib_bbs_user_can()`。发帖时先判断基础 `posts_add`，再判断是否有选择目标版块的权限：
+
+```php
+if (!zib_bbs_current_user_can('select_plate', $plate, $post_id)) {
+    zib_send_json_error(sprintf(__('您暂无在此%s发布的权限，请重新选择%s', 'zib_language'), $zib_bbs->plate_name, $zib_bbs->plate_name));
+}
+```
+
+创建版块时先判断基础 `plate_add`，再判断是否有选择目标版块分类的权限：
+
+```php
+if (!zib_bbs_current_user_can('select_plate_cat', $cat, $plate_id)) {
+    zib_send_json_error(sprintf(__('您没有在此分类创建%s的权限，请重新选择%s分类', 'zib_language'), $name, $name));
+}
+```
+
+发布限制的弹窗和保存入口：
+
+| Action                | 回调                               | 说明                                       |
+| --------------------- | ---------------------------------- | ------------------------------------------ |
+| `set_add_limit_modal` | `zib_bbs_ajax_set_add_limit_modal` | 输出发布限制设置弹窗                       |
+| `save_add_limit`      | `zib_bbs_ajax_save_add_limit`      | 保存 `add_limit` 到 post meta 或 term meta |
+
+版块编辑表单也会内联这些设置：`zib_bbs_edit::input_add_limit('posts', $plate_id)` 用于设置某个版块的发帖限制；版块分类保存时，`ajax-term.php` 会把 `add_limit` 写入 term meta。
+
+扩展发布限制时有两个原则：
+
+1. 新增限制条件要进入 `zib_bbs_get_add_limit_options()` 和 `zib_bbs_user_can()` 的能力链路，而不是只在前端隐藏发布按钮。
+2. 前台展示权限提示时复用 `zib_bbs_get_add_limit_btn()` 或 `zib_bbs_get_plate_badge_popover()`，这样版块卡片、版块头部和侧栏小工具里的权限徽章会保持一致。
+
+## 后台列表与批量维护
+
+论坛后台维护分两层：`inc/functions/bbs/inc/class.init.php` 负责后台查询、筛选、回收站和评论列表入口；`inc/functions/bbs/admin/meta-option.php` 负责帖子后台 meta box、快速编辑和批量编辑字段。
+
+| 能力                  | 入口                                                 | 源码位置                                                     | 说明                                                                        |
+| --------------------- | ---------------------------------------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| 后台帖子按版块筛选    | `restrict_manage_posts`                              | `zib_bbs::plate_select()`                                    | 只在 `forum_post` 列表输出版块下拉                                          |
+| 后台主查询按版块过滤  | `pre_get_posts`                                      | `zib_bbs::admin_post_query()`                                | 读取 `$_GET['plate_id']`，追加 `plate_id` meta 查询                         |
+| 帖子快速/批量编辑字段 | `bulk_edit_custom_box`、`quick_edit_custom_box`      | `zib_bbs_posts_bulk_edit::edit_box()`                        | 只在 `post_type=forum_post` 时挂载                                          |
+| 快速/批量编辑保存     | `save_post`                                          | `zib_bbs_posts_bulk_edit::save()`                            | 只处理 `screen=edit-forum_post` 且 `zib_bulk_edit['forum_post']` 存在的请求 |
+| 版块移入回收站        | `trashed_post`                                       | `zib_bbs::trashed_plate()`                                   | 版块移入回收站时，把所属已发布帖子直接批量改为 `trash`                      |
+| 从回收站恢复          | `wp_untrash_post_status`                             | `zib_bbs::untrash_post_status()`                             | `plate` 和 `forum_post` 恢复时直接设为 `publish`                            |
+| 用户列表统计          | `manage_users_columns`、`manage_users_custom_column` | `zib_bbs::users_columns()`、`zib_bbs::users_custom_column()` | 在用户列表显示版块数和帖子数，并链接到对应后台列表                          |
+
+后台快速/批量编辑目前会输出这些字段：
+
+| 字段         | 保存行为                                 |
+| ------------ | ---------------------------------------- |
+| `plate_id`   | 更新帖子所属版块                         |
+| `topping`    | 更新置顶级别                             |
+| `bbs_type`   | 更新帖子类型                             |
+| `essence`    | 更新精华标记                             |
+| `views`      | 支持设置、增加、减少、乘除，最终不低于 0 |
+| `allow_view` | 更新帖子查看权限                         |
+
+生效的批量编辑类是 `zib_bbs_posts_bulk_edit`。`inc/functions/bbs/inc/class.init.php` 里也保留了 `bulk_edit_custom_box()` 和 `bulk_save_post()` 方法，但当前 `setup()` 没有挂载这两个方法；二次开发时不要误以为两套批量编辑都会执行。
+
+后台批量维护和前台 Ajax 的边界不同。比如前台移动版块会调用 `zib_bbs_posts_plate_move()`，它会刷新新旧版块统计并触发 `posts_plate_move`；后台快速/批量编辑直接更新 `plate_id`，随后 `save_post` 统计刷新只会按当前新 `plate_id` 处理，旧版块统计和监听 `posts_plate_move` 的扩展可能不会同步。
+
+因此批量迁移帖子所属版块时，更稳的做法是自己调用主题移动函数：
+
+```php
+function zib_docs_bbs_batch_move_posts($post_ids, $new_plate_id)
+{
+    $new_plate_id = (int) $new_plate_id;
+    if (!$new_plate_id || get_post_type($new_plate_id) !== 'plate') {
+        return;
+    }
+
+    foreach ((array) $post_ids as $post_id) {
+        $post_id = (int) $post_id;
+        if (!$post_id || get_post_type($post_id) !== 'forum_post') {
+            continue;
+        }
+
+        $old_plate_id = zib_bbs_get_plate_id($post_id);
+        if (!$old_plate_id || $old_plate_id === $new_plate_id) {
+            continue;
+        }
+
+        zib_bbs_posts_plate_move($post_id, $new_plate_id, $old_plate_id);
+    }
+}
+```
+
+如果必须使用后台批量编辑改 `plate_id`，保存后要刷新新旧版块统计、动态推荐缓存和自己的外部索引。不能只看帖子 meta 已经变了，就认为版块页、小工具、推荐排序和消息监听都已经同步。
+
+版块移入回收站也要谨慎。`trashed_plate()` 用 SQL 直接把该版块下已发布帖子改为 `trash`，这不会逐篇触发前台删除 Ajax 的通知、原因记录或自定义 Hook。需要给作者发消息、写审计日志或迁移帖子时，优先走前台 `plate_delete` 流程里的“迁移到新版块”逻辑，或在批量任务里显式补齐通知和缓存刷新。
+
+后台用户列表会追加一列：
+
+```php
+$columns['bbs_count'] = $this->plate_name . ' · ' . $this->posts_name;
+```
+
+列内容分别链接到：
+
+```text
+edit.php?post_type=plate&author={user_id}
+edit.php?post_type=forum_post&author={user_id}
+```
+
+如果要扩展用户列表统计，优先追加新列或过滤这一列输出，不要把耗时统计塞进每个用户行。用户列表可能一次展示大量用户，复杂统计应使用已有计数函数或缓存。
+
+源码里还提供了后台评论列表和版块/帖子列表列函数：
+
+| 函数                                                | 作用                                           | 当前注意点                                          |
+| --------------------------------------------------- | ---------------------------------------------- | --------------------------------------------------- |
+| `views_comments()`                                  | 在评论列表状态链接中增加论坛评论和文章评论切换 | `comment_status_links` 挂载在当前源码中是注释状态   |
+| `comments_list_table_query_args()`                  | 评论列表默认不显示论坛帖子评论                 | 当前源码中可见函数，但要确认实际挂载再依赖          |
+| `plate_columns()` / `plate_custom_column()`         | 版块后台列表显示版主、统计、最后发布时间       | 当前 `setup()` 中未看到对应 `manage_*_columns` 挂载 |
+| `posts_columns()` / `posts_custom_column()`         | 帖子后台列表显示所属版块、阅读、评分、收藏     | 当前 `setup()` 中未看到对应 `manage_*_columns` 挂载 |
+| `plate_cat_columns()` / `plate_cat_custom_column()` | 版块分类列表显示分区版主                       | 当前 `setup()` 中未看到对应 taxonomy 列挂载         |
+
+二次开发时不要只看到函数存在就认为后台界面已经启用。先搜索是否挂到了 WordPress 的 `manage_*_columns`、`manage_*_custom_column`、`comment_status_links` 或 `comments_list_table_query_args`，再决定是复用、补挂载，还是另写自己的后台列。
+
+## 帖子视频、图集与图片封面
+
+论坛帖子封面使用与文章封面相同的核心 meta key，但保存和前台渲染在论坛模块里单独接管。优先级固定为：
+
+```text
+featured_video > featured_slide > cover_image
+```
+
+后台编辑页的封面 meta box 来自 `inc/functions/bbs/admin/meta-option.php`：
+
+| 字段             | 类型                      | 说明                              |
+| ---------------- | ------------------------- | --------------------------------- |
+| `featured_video` | `upload`，`library=video` | 视频封面地址                      |
+| `featured_slide` | `gallery`                 | 图集/幻灯片封面，保存附件 ID 列表 |
+| `cover_image`    | `upload`，`library=image` | 图片封面，也作为视频首图封面      |
+
+后台保存入口是 `save_post` 上的 `zib_bbs_save_meta_box_forum_cover()`，它只处理这三个字段：
+
+```php
+$meta_fields = array('featured_video', 'featured_slide', 'cover_image');
+foreach ($meta_fields as $field) {
+    if (isset($_POST[$field])) {
+        zib_update_post_meta($post_id, $field, $_POST[$field]);
+    }
+}
+```
+
+前台发帖/编辑页使用 `zib_bbs_edit::posts_featured()` 输出封面编辑器。它先判断图片封面权限，图片封面没有权限时整个封面编辑器不会输出；然后再按能力打开图集和视频选项：
+
+| 能力                | 说明                                       |
+| ------------------- | ------------------------------------------ |
+| `posts_image_cover` | 允许设置图片封面，也是封面编辑器的基础权限 |
+| `posts_slide_cover` | 允许设置幻灯片/图集封面                    |
+| `posts_video_cover` | 允许设置视频封面                           |
+
+这些能力在后台论坛权限里定义为 `bbs_posts_image_cover`、`bbs_posts_slide_cover`、`bbs_posts_video_cover`。`posts_slide_cover` 和 `posts_video_cover` 都依赖图片封面能力，因为视频首图、图集预览和普通图片封面共享上传入口与比例配置。
+
+前台 Ajax 保存入口是 `zib_bbs_ajax_edit_posts_featured()`，它读取 `featured_data.type`：
+
+| `featured_data.type` | 保存行为                                                      |
+| -------------------- | ------------------------------------------------------------- |
+| `video`              | 写入 `featured_video`；如果传入 `pic`，同时写入 `cover_image` |
+| `slide`              | 清空 `featured_video`，把附件 ID 数组写入 `featured_slide`    |
+| `image`              | 清空 `featured_video` 和 `featured_slide`，写入 `cover_image` |
+| `close`              | 清空 `featured_video`、`featured_slide`、`cover_image`        |
+
+这个清理顺序是为了保证前台渲染优先级稳定。比如切换到普通图片封面时，必须清空视频和图集，否则列表页仍会优先显示旧视频或旧图集。
+
+## 封面渲染链路
+
+列表页详细样式会先判断帖子是否允许查看：
+
+```php
+$cover = zib_bbs_posts_is_can_viewed($post) ? zib_bbs_get_posts_lists_cover($post) : '';
+```
+
+因此被阅读限制挡住的帖子不会在列表中暴露真实封面。允许查看时，`zib_bbs_get_posts_lists_cover()` 按顺序渲染：
+
+1. 如果 `bbs_posts_cover_opt.lists_video_s` 开启，并且有 `featured_video`，输出 `.forum-thumb-video`。
+2. 否则尝试 `zib_bbs_get_posts_slide_cover($post->ID)`。
+3. 否则尝试 `zib_bbs_get_posts_image_cover($post->ID)`。
+
+视频列表封面不会直接输出完整播放器，而是输出视频缩略容器：
+
+```php
+$cover = '<div class="forum-thumb-video" style="--scale-height:' . $scale_height . '%;">'
+    . '<div class="video-thumb-box" video-url="' . esc_url($video) . '"' . $mute_attr . '>'
+    . '<div class="img-thumb">' . $pic_html . '</div><div class="video-thumb"></div>'
+    . '</div></div>';
+```
+
+这里的 `video-url` 和 `data-volume` 交给论坛前台脚本初始化。`lists_video_mute_s` 开启时输出 `data-volume="none"`，否则输出 `data-volume="100"`。如果帖子没有设置 `cover_image` 作为视频首图，`zib_bbs_get_video_cover_pic()` 会从 `bbs_posts_cover_opt.video_spare_pic` 随机取一张备用图。
+
+详情页封面由 `zib_bbs_get_single_cover()` 输出，位置在帖子页内容区顶部、面包屑之前：
+
+```php
+do_action('bbs_posts_page_content_top');
+echo zib_bbs_get_single_cover();
+if (apply_filters('single_show_breadcrumbs', true)) {
+    echo zib_bbs_get_breadcrumbs();
+}
+```
+
+详情页同样先检查 `zib_bbs_posts_is_can_viewed($post)`。可见时，视频封面会直接调用 `zib_get_dplayer($video, $pic_url, $scale_height)` 输出播放器；图集和图片封面会传入 `$show_breadcrumbs=true`，把面包屑叠到封面左下角，并通过 `add_filter('single_show_breadcrumbs', '__return_false')` 阻止页面再输出一遍面包屑。
+
+封面比例和列表视频行为都来自 `bbs_posts_cover_opt`：
+
+| 配置                 | 用途                           |
+| -------------------- | ------------------------------ |
+| `image_ratio`        | 图片封面比例                   |
+| `slide_ratio`        | 幻灯片封面比例                 |
+| `video_ratio`        | 视频封面比例                   |
+| `lists_video_s`      | 列表页是否显示视频封面         |
+| `lists_video_mute_s` | 列表视频预览是否静音           |
+| `video_spare_pic`    | 未设置视频首图时的备用封面图库 |
+
+扩展封面时要复用这些入口。比如给帖子自动补一张封面图，可以在发帖保存后的业务 Hook 里写入 `cover_image`，不要另起 meta key：
+
+```php
+add_action('bbs_add_posts', 'zib_docs_bbs_posts_default_cover');
+
+function zib_docs_bbs_posts_default_cover($post)
+{
+    if (empty($post->ID) || get_post_type($post->ID) !== 'forum_post') {
+        return;
+    }
+
+    $cover = zib_get_post_meta($post->ID, 'cover_image', true);
+    if ($cover) {
+        return;
+    }
+
+    $default_cover = apply_filters('zib_docs_bbs_default_cover_url', '', $post);
+    if (!$default_cover) {
+        return;
+    }
+
+    zib_update_post_meta($post->ID, 'cover_image', esc_url_raw($default_cover));
+}
+```
+
+如果要改变封面显示顺序，应优先包装 `zib_bbs_get_posts_lists_cover()` 或 `zib_bbs_get_single_cover()` 的调用位置，而不是改 `featured_video`、`featured_slide`、`cover_image` 的语义。主题列表、详情页和通用封面逻辑都会默认这三个 key 的含义不变。
+
+## 前台管理操作
+
+帖子详情页的管理菜单来自 `inc/functions/bbs/inc/single.php` 和 `inc/functions/bbs/inc/posts.php`。主题不会把“能看见按钮”当成权限本身，每个 Ajax 回调仍会再次校验 nonce、目标对象和 `zib_bbs_current_user_can()`。二次开发时应复用这些链接生成函数，而不是手写按钮直连 Ajax。
+
+| 操作          | 前台入口                               | Ajax Action                                         | 权限能力                            | 数据变化                                |
+| ------------- | -------------------------------------- | --------------------------------------------------- | ----------------------------------- | --------------------------------------- |
+| 设置精华      | `zib_bbs_get_posts_essence_set_link()` | `posts_essence_set`                                 | `posts_essence_set`                 | 写入 `essence` meta                     |
+| 设置置顶      | `zib_bbs_get_posts_topping_set_link()` | `posts_topping_set_modal` / `posts_topping_set`     | `posts_topping_set`                 | 写入 `topping` meta                     |
+| 移动版块      | `zib_bbs_get_posts_plate_move_link()`  | `posts_plate_move_modal` / `plate_move`             | `posts_plate_move` + `select_plate` | 更新 `plate_id` meta                    |
+| 审核/驳回     | `zib_bbs_get_posts_audit_link()`       | `posts_audit_modal` / `posts_audit`                 | `posts_audit`                       | 切换 `post_status`                      |
+| 关闭/开启评论 | 详情页管理菜单                         | `posts_comment_close_modal` / `posts_comment_close` | `comment_close`                     | 切换 `comment_status`                   |
+| 采纳回答      | `zib_bbs_get_comment_adopt_link()`     | `answer_adopt_modal` / `answer_adopt`               | `question_answer_adopt`             | 写入 `question_status` 和评论 `adopted` |
+| 设置热评      | 评论管理菜单                           | `comment_set_hot`                                   | `comment_set_hot`                   | 写入评论 `is_hot`                       |
+
+精华和置顶共用 `zib_bbs_ajax_posts_meta_save()`。它会用当前 `action` 直接做能力名，因此新增类似管理动作时要避免让未受控的 `action` 进入通用 meta 保存函数：
+
+```php
+if (!zib_bbs_current_user_can($action, $post_id)) {
+    echo json_encode(array(
+        'error' => 1,
+        'ys'    => 'danger',
+        'msg'   => __('暂无此权限', 'zib_language'),
+    ));
+    exit;
+}
+```
+
+置顶不是布尔值。`topping` 会保存为具体置顶级别，展示文案来自 `zib_bbs_get_posts_topping_options()`；取消置顶时保存 `0`。精华则使用 `essence=1` 或空值。两个操作分别触发：
+
+```php
+do_action('bbs_posts_essence_set', $post_id, $val);
+do_action('bbs_posts_topping_set', $post_id, $topping);
+```
+
+移动版块要校验两层权限：先确认当前用户能移动这个帖子，再确认用户能选择目标版块。真正更新由 `zib_bbs_posts_plate_move()` 完成，它不只改 `plate_id`，还会触发新旧版块的 `save_post`，并触发 `posts_plate_move`：
+
+```php
+function zib_bbs_posts_plate_move($id, $new_id, $old_id)
+{
+    if ($new_id == $old_id) {
+        return;
+    }
+
+    update_post_meta($id, 'plate_id', $new_id);
+    do_action('save_post', $new_id, get_post($new_id), true);
+    do_action('save_post', $old_id, get_post($old_id), true);
+    do_action('posts_plate_move', $id, $new_id, $old_id);
+}
+```
+
+因此批量移动或后台自定义移动时，也应调用 `zib_bbs_posts_plate_move()`，不要只写 `plate_id`。否则版块统计、推荐分缓存和监听 `posts_plate_move` 的扩展都不会同步。
+
+审核入口 `zib_bbs_ajax_plate_or_posts_audit()` 同时服务版块和帖子。`pending` 状态下默认发布；如果传入 `method=reject`，会要求填写驳回原因，保持 `pending` 并调用 `zib_newmsg_publish_to_pending($post)` 通知作者。非 `pending` 内容再次操作会转回 `pending`：
+
+```php
+if ('pending' === $post->post_status) {
+    if ('reject' === $method) {
+        $post_status = 'pending';
+        zib_newmsg_publish_to_pending($post);
+    } else {
+        $post_status = 'publish';
+    }
+} else {
+    $post_status = 'pending';
+}
+```
+
+采纳回答只允许已审核评论，并且会防重复。真正落库在 `zib_bbs_answer_adopt()`：帖子写入 `question_status=1`，评论写入 `adopted=1`，随后触发 `answer_adopted`。主题消息模块会监听这个 Hook，只通知一次，并按 `email_bbs_answer_adopted` 决定是否发邮件。
+
+```php
+add_action('answer_adopted', 'zib_docs_bbs_answer_adopted_log', 20, 2);
+
+function zib_docs_bbs_answer_adopted_log($comment, $desc = '')
+{
+    if (empty($comment->comment_ID)) {
+        return;
+    }
+
+    update_comment_meta($comment->comment_ID, 'docs_adopted_time', current_time('mysql'));
+}
+```
+
+热评既可以由管理员手动设置，也可以由点赞逻辑自动触发。手动 `comment_set_hot` 会先删除 `posts_lists_hot_comment` 缓存，再写评论 meta；设置为热评时触发 `comment_is_hot`，取消热评不会触发通知 Hook。扩展通知或奖励时要监听 `comment_is_hot`，并自行做好只奖励一次的标记。
+
+## 版主申请与管理
+
+论坛有三类管理身份：分区版主、版块创建者和版块版主。它们不是 WordPress role，而是主题权限体系里的动态身份：
+
+| 身份       | 判断函数                                         | 数据来源                           |
+| ---------- | ------------------------------------------------ | ---------------------------------- |
+| 分区版主   | `zib_bbs_is_the_cat_moderator()`                 | `plate_cat` term meta：`moderator` |
+| 版块创建者 | `zib_bbs_is_the_moderator()` 返回 `plate_author` | `plate` 的 `post_author`           |
+| 版块版主   | `zib_bbs_is_the_moderator()` 返回 `moderator`    | `plate` post meta：`moderator`     |
+
+后台权限项允许把能力授予这些动态身份。比如版主相关权限来自“论坛[用户权限]”：
+
+| 能力                      | 说明                 | 默认倾向                                 |
+| ------------------------- | -------------------- | ---------------------------------------- |
+| `apply_moderator`         | 普通用户申请成为版主 | 排除已是版主、版块创建者、分区版主的用户 |
+| `moderator_apply_process` | 处理、审核版主申请   | 默认给版块创建者和分区版主               |
+| `moderator_add`           | 为管理的版块添加版主 | 默认给版块创建者和分区版主               |
+| `moderator_edit`          | 删除、修改版主       | 默认给版块创建者和分区版主               |
+
+能力判断仍然走 `zib_bbs_current_user_can()`。`moderator_add`、`moderator_edit` 和 `moderator_apply_process` 这类能力只对“自己管理下的对象”生效，会继续检查当前用户是否是目标版块的版主、版块创建者或分区版主。
+
+版主身份的写入统一走 `zib_bbs_update_moderator()`，不要直接改 meta：
+
+```php
+function zib_bbs_update_moderator($action = 'add', $type = 'plate', $id = 0, $user_id = 0)
+{
+    if (!$id || !$user_id) {
+        return false;
+    }
+
+    if ('cat' === $type) {
+        $moderator = get_term_meta($id, 'moderator', true);
+    } else {
+        $moderator = get_post_meta($id, 'moderator', true);
+    }
+
+    if (!$moderator || !is_array($moderator)) {
+        $moderator = array();
+    }
+
+    if ('delete' === $action) {
+        if (in_array($user_id, $moderator)) {
+            $index = array_search($user_id, $moderator);
+            unset($moderator[$index]);
+        }
+    } else {
+        if (!in_array($user_id, $moderator)) {
+            $moderator[] = (string) $user_id;
+        }
+    }
+
+    if ('cat' === $type) {
+        update_term_meta($id, 'moderator', $moderator);
+        wp_cache_delete($user_id, 'cat_moderator_ids');
+        zib_bbs_get_user_cat_moderator_ids($user_id);
+    } else {
+        update_post_meta($id, 'moderator', $moderator);
+        wp_cache_delete($user_id, 'plate_moderator_ids');
+        zib_bbs_get_user_plate_moderator_ids($user_id);
+    }
+
+    return true;
+}
+```
+
+新增版主和移出版主的 Ajax 都在 `inc/functions/bbs/action/ajax-user.php`。流程是：打开弹窗、搜索用户、确认用户、提交写入。提交时会再次校验 nonce、目标对象和权限，然后调用 `zib_bbs_moderator_add_user()` 或 `zib_bbs_moderator_remove_user()`。这两个函数会先写入/删除 `moderator` meta，再给目标用户发送站内消息，必要时发送邮件。
+
+| Action                 | 用途             | 关键校验                                 |
+| ---------------------- | ---------------- | ---------------------------------------- |
+| `moderator_modal`      | 查看版主列表     | 可匿名查看                               |
+| `moderator_edit_modal` | 管理版主列表     | `moderator_edit` 或 `cat_moderator_edit` |
+| `moderator_add_modal`  | 打开添加版主弹窗 | `moderator_add` 或 `cat_moderator_add`   |
+| `moderator_add_search` | 搜索可添加用户   | 搜索结果还要在提交时复核权限             |
+| `moderator_add_user`   | 添加版主         | nonce、目标对象、`moderator_add`         |
+| `moderator_remove`     | 移出版主         | nonce、目标对象、`moderator_edit`        |
+
+申请成为版主不是直接写入 `moderator`。用户提交 `apply_moderator` 时，主题会先校验 `apply_moderator` 能力、`apply_moderator` nonce 和申请说明长度，然后创建一条 `type=moderator_apply`、`status=0` 的站内消息：
+
+```php
+$msg_args = array(
+    'send_user'    => $user_id,
+    'receive_user' => 'admin',
+    'type'         => 'moderator_apply',
+    'title'        => $title,
+    'content'      => $msg_con . $motel_btn,
+    'meta'         => array(
+        'plate_id' => $plate->ID,
+        'desc'     => $desc,
+        'time'     => current_time('Y-m-d H:i:s'),
+    ),
+);
+
+ZibMsg::add($msg_args);
+```
+
+待处理申请通过 `zib_bbs_get_apply_moderator_processing()` 查询，本质是查当前用户发出的 `moderator_apply` 未处理消息。审批时，`apply_moderator_process` 只接受 `process=1` 或 `process=2`：通过时调用 `zib_bbs_add_moderator('plate', $plate_id, $user_id)`，拒绝时只更新消息状态并给用户发回复消息。
+
+```php
+if (1 == $process) {
+    zib_bbs_add_moderator('plate', $plate_id, $user_id);
+}
+```
+
+扩展版主申请时要保留这个“两段式”流程。比如要记录审批结果，可以监听申请回复消息或监听 `moderator` meta 变化，不要在申请提交阶段提前把用户加入版主数组：
+
+```php
+add_action('updated_post_meta', 'zib_docs_bbs_moderator_meta_log', 20, 4);
+
+function zib_docs_bbs_moderator_meta_log($meta_id, $post_id, $meta_key, $meta_value)
+{
+    if ('moderator' !== $meta_key || get_post_type($post_id) !== 'plate') {
+        return;
+    }
+
+    update_post_meta($post_id, 'docs_moderator_updated_at', current_time('mysql'));
+}
+```
+
+版主缓存要特别小心。主题会缓存用户管理的分区、版块创建者列表和版块版主列表，缓存组分别是 `cat_moderator_ids`、`plate_author_ids`、`plate_moderator_ids`。使用主题函数添加或移出版主时会自动刷新；如果外部脚本批量改 `moderator` meta，必须同步删除对应用户缓存。
+
+## 用户中心入口
+
+论坛会把版块、帖子、收藏和论坛身份接入作者页。入口集中在 `inc/functions/bbs/inc/user-page.php`，列表查询集中在 `inc/functions/bbs/inc/user.php`，分页 Ajax 在 `inc/functions/bbs/action/ajax-user.php`。
+
+| 入口                 | Hook / Action                      | 说明                                                           |
+| -------------------- | ---------------------------------- | -------------------------------------------------------------- |
+| 用户主页版块 Tab     | `author_main_tab_plate`            | 标题显示用户创建版块数；如果没有创建版块，会显示用户管理版块数 |
+| 用户主页帖子 Tab     | `author_main_tab_forum`            | 标题显示用户发布的论坛帖子数，并启用 route                     |
+| 用户主页版块内容     | `main_author_tab_content_plate`    | 输出状态筛选、排序和版块列表                                   |
+| 用户主页帖子内容     | `main_author_tab_content_forum`    | 输出状态筛选、排序和帖子列表                                   |
+| 收藏列表里的论坛帖子 | `author_favorite_lists_forum_post` | 在用户收藏页显示收藏的论坛帖子                                 |
+| 收藏类型扩展         | `author_favorite_types`            | 给收藏页追加 `forum_post` 类型和排序项                         |
+| 作者头部身份         | `author_header_identity`           | 追加论坛身份徽章                                               |
+| 异步版块分页         | Ajax `author_plate`                | 调用 `zib_bbs_get_user_plate_lists()`                          |
+| 异步帖子分页         | Ajax `author_forum_posts`          | 调用 `zib_bbs_get_user_posts_lists()`                          |
+
+用户主页版块 Tab 不是只看作者创建的 `plate`。它会先取 `zib_bbs_get_user_plate_count($author_id)`，如果为 0，再取 `zib_bbs_get_user_moderator_plate_count($author_id)`。因此用户没有创建版块、但正在管理版块时，也应该能在作者页看到版块入口。
+
+版块列表支持三种状态：
+
+| 状态        | 查询含义           | 数据来源                            |
+| ----------- | ------------------ | ----------------------------------- |
+| `publish`   | 用户创建的公开版块 | `plate` post author                 |
+| `moderator` | 用户管理的版块     | `moderator` post meta 中包含用户 ID |
+| `follow`    | 用户关注的版块     | user meta `follow_plate`            |
+
+帖子列表默认显示用户发布的 `forum_post`。当前登录用户查看自己的主页，或超级管理员查看用户主页时，才会看到 `pending` 和 `draft`；其他访客始终只能看到 `publish`。扩展用户主页时不要把待审核或草稿入口公开到所有访客。
+
+| 列表 | 排序项                                                                                   |
+| ---- | ---------------------------------------------------------------------------------------- |
+| 版块 | `date`、`last_post`、`last_reply`、`posts_count`、`reply_count`、`views`、`follow_count` |
+| 帖子 | `date`、`modified`、`last_reply`、`views`、`score`、`comment_count`、`favorite_count`    |
+| 收藏 | `post__in`、`date`、`modified`、`views`、`comment_count`、`favorite_count`               |
+
+版块关注数缓存组是 `user_favorite_plate_count`，帖子收藏数缓存组是 `user_favorite_posts_count`。主题分别监听 `bbs_follow_plate` 和 `bbs_favorite_posts` 删除缓存并重新计算。扩展关注或收藏时要触发这两个 Hook，不要只改 user meta。
+
+示例：给作者页论坛帖子 Tab 追加一个自定义提示，同时保留主题的 route 和 loader：
+
+```php
+add_filter('author_main_tab_forum', 'zib_docs_author_main_tab_forum_note', 20, 2);
+
+function zib_docs_author_main_tab_forum_note($tab, $author_id)
+{
+    if (empty($tab['title'])) {
+        return $tab;
+    }
+
+    $tab['title'] .= '<span class="badg badg-sm ml6 c-blue">' . __('动态', 'zib_language') . '</span>';
+    return $tab;
+}
+```
+
+## Ajax 动作地图
+
+论坛前台动作集中在 `inc/functions/bbs/action/*`。常用动作：
+
+| Action                                        | 回调                                        | 说明                           |
+| --------------------------------------------- | ------------------------------------------- | ------------------------------ |
+| `author_plate`                                | `zib_bbs_ajax_user_plate_lists`             | 用户主页版块分页               |
+| `author_forum_posts`                          | `zib_bbs_ajax_user_posts_lists`             | 用户主页论坛帖子分页           |
+| `bbs_posts_save` / `bbs_posts_draft`          | `zib_bbs_ajax_edit_posts`                   | 发布、编辑、保存草稿           |
+| `score_extra` / `score_deduct`                | `zib_bbs_ajax_posts_score`                  | 给帖子加分或扣分               |
+| `favorite_posts`                              | `zib_bbs_ajax_favorite_posts`               | 收藏或取消收藏帖子             |
+| `posts_essence_set`                           | `zib_bbs_ajax_posts_meta_save`              | 设置精华                       |
+| `posts_topping_set`                           | `zib_bbs_ajax_posts_meta_save`              | 设置置顶                       |
+| `plate_move`                                  | `zib_bbs_ajax_posts_plate_move`             | 移动帖子所属版块               |
+| `posts_delete`                                | `zib_bbs_ajax_plate_or_posts_delete`        | 删除论坛帖子到回收站           |
+| `plate_delete`                                | `zib_bbs_ajax_plate_or_posts_delete`        | 删除版块，可选择迁移版块下帖子 |
+| `posts_delete_revoke` / `plate_delete_revoke` | `zib_bbs_ajax_plate_or_posts_delete_revoke` | 从回收站恢复帖子或版块         |
+| `answer_adopt`                                | `zib_bbs_ajax_answer_adopt`                 | 采纳回答                       |
+| `comment_set_hot`                             | `zib_bbs_ajax_comment_set_hot`              | 设置热评                       |
+| `save_plate`                                  | `zib_bbs_ajax_save_plate`                   | 创建或编辑版块                 |
+| `follow_plate`                                | `zib_bbs_ajax_follow_plate`                 | 关注版块                       |
+| `save_plate_cat`                              | `zib_bbs_ajax_save_term`                    | 保存版块分类                   |
+| `save_forum_topic`                            | `zib_bbs_ajax_save_term`                    | 保存话题                       |
+| `save_forum_tag`                              | `zib_bbs_ajax_save_term`                    | 保存标签                       |
+| `apply_moderator`                             | `zib_bbs_ajax_apply_moderator`              | 申请版主                       |
+| `apply_moderator_process`                     | `zib_bbs_ajax_apply_moderator_process`      | 处理版主申请                   |
+| `moderator_add_user`                          | `zib_bbs_ajax_moderator_add_user`           | 添加版主                       |
+| `moderator_remove`                            | `zib_bbs_ajax_moderator_remove`             | 移除版主                       |
+
+这些动作会校验登录态、目标对象、权限、版主身份、作者身份、状态和 nonce。新增论坛 Ajax 时不要只判断 `is_user_logged_in()`。
+
+## 关键业务 Hook
+
+帖子发布和编辑会触发：
+
+```php
+do_action('zib_pre_insert_post', $insert_args);
+do_action('bbs_' . ($is_new ? 'add' : 'edit') . '_posts', $new_post_obj);
+```
+
+评分、收藏、置顶、精华和版块关注会触发：
+
+```php
+do_action('bbs_user_' . $action, $author_id, $id, $author_score);
+do_action('bbs_' . $action, $id, $user_id, $new_user_score);
+do_action('bbs_favorite_posts', $id, $user_id, $type);
+do_action('bbs_posts_essence_set', $post_id, $val);
+do_action('bbs_posts_topping_set', $post_id, $topping);
+do_action('bbs_follow_plate', $id, $user_id);
+```
+
+回答采纳和热评会触发：
+
+```php
+do_action('answer_adopted', $comment, $desc);
+do_action('comment_is_hot', $comment);
+```
+
+这些 Hook 不只服务论坛本身。消息通知、等级经验、徽章统计和部分用户成长逻辑都会监听它们。比如 `bbs_score_extra`、`bbs_posts_essence_set`、`posts_is_hot`、`plate_is_hot`、`comment_is_hot`、`answer_adopted` 都会影响用户成长，详见 [用户成长、权限与徽章](/docs/api/user-growth-permissions)。
+
+示例：在帖子加精后同步站内消息或日志：
+
+```php
+add_action('bbs_posts_essence_set', 'zib_docs_bbs_posts_essence_log', 10, 2);
+
+function zib_docs_bbs_posts_essence_log($post_id, $val)
+{
+    $post_id = (int) $post_id;
+    if (!$post_id || get_post_type($post_id) !== 'forum_post') {
+        return;
+    }
+
+    update_post_meta($post_id, '_docs_last_essence_time', current_time('mysql'));
+}
+```
+
+## 消息通知
+
+论坛通知不是一个独立弹窗逻辑，而是挂在论坛业务 Hook 上，再交给主题消息系统、邮件开关和用户接收设置处理。扩展时应该监听同一批 Hook，保留防重复 meta，避免在前端按钮点击时直接写消息。
+
+| 触发 Hook               | 核心回调                          | 消息场景                                   | 防重复字段                        | 邮件开关                                                                                             |
+| ----------------------- | --------------------------------- | ------------------------------------------ | --------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `answer_adopted`        | `zib_bbs_answer_adopted_msg()`    | 回答被采纳，通知回答用户                   | comment meta `is_adopted_notify`  | `_pz('email_bbs_answer_adopted', true)`                                                              |
+| `comment_is_hot`        | `zib_bbs_comment_is_hot_msg()`    | 评论成为热评，通知评论用户                 | comment meta `is_hot_notify`      | 跟随站内消息接收设置                                                                                 |
+| `posts_is_hot`          | `zib_bbs_new_msg_is_hot()`        | 帖子成为热门，通知帖子作者                 | post meta `is_hot_notify`         | 跟随站内消息接收设置                                                                                 |
+| `plate_is_hot`          | `zib_bbs_new_msg_is_hot()`        | 版块成为热门，通知版块作者                 | post meta `is_hot_notify`         | 跟随站内消息接收设置                                                                                 |
+| `bbs_posts_essence_set` | `zib_bbs_posts_essence_msg()`     | 帖子被设为精华，通知帖子作者               | 由业务状态控制，取消精华不通知    | 跟随站内消息接收设置                                                                                 |
+| `bbs_add_posts`         | `zib_bbs_add_posts_pending_msg()` | 新帖进入待审核，通知管理员、版块作者和版主 | post meta `add_posts_pending_msg` | `_pz('email_bbs_posts_pending_to_admin', true)`、`_pz('email_bbs_posts_pending_to_moderator', true)` |
+
+这些回调会先判断作者、评论用户或版主身份，再通过 `zib_msg_is_allow_receive()` 判断用户是否允许接收对应类型的消息。待审核通知还受 `_pz('msg_include_plate')` 控制；如果站点关闭论坛待审消息，不应该在扩展里强行绕过。
+
+`zib_bbs_add_posts_publish_msg()` 在源码中存在，但 `bbs_add_posts` 上的发布通知版主挂载被注释，说明默认流程只保留待审核通知。二次开发如果需要“新帖发布通知版主”，可以复用 `bbs_add_posts`，但要自己补开关和防重复字段。
+
+示例：监听热门帖子事件并写入一次性记录：
+
+```php
+add_action('posts_is_hot', 'zib_docs_bbs_hot_posts_record');
+
+function zib_docs_bbs_hot_posts_record($post)
+{
+    $post = get_post($post);
+    if (empty($post->ID) || 'forum_post' !== $post->post_type) {
+        return;
+    }
+
+    if (zib_get_post_meta($post->ID, '_docs_hot_recorded')) {
+        return;
+    }
+
+    zib_update_post_meta($post->ID, '_docs_hot_recorded', array(
+        'time'  => current_time('mysql'),
+        'views' => (int) get_post_meta($post->ID, 'views', true),
+    ));
+}
+```
+
+## 权限与能力边界
+
+论坛会接入主题权限体系：
+
+```php
+add_filter('is_can_roles', 'zib_bbs_is_can_roles_filter', 10, 3);
+add_filter('zib_user_can', 'zib_bbs_user_can_filter', 10, 4);
+add_filter('hascaps_roles_lists', 'zib_bbs_hascaps_roles_lists_filter', 10, 3);
+```
+
+扩展时要分清：
+
+| 身份     | 能力边界                                                   |
+| -------- | ---------------------------------------------------------- |
+| 普通用户 | 发帖、收藏、评分、关注、申请版主，受后台开关和版块限制影响 |
+| 帖子作者 | 编辑自己的帖子，是否允许删除、关闭评论、修改权限取决于配置 |
+| 版主     | 管理所属版块内的帖子、评论、申请和部分设置                 |
+| 管理员   | 全局管理版块、话题、标签、帖子状态和后台字段               |
+
+付费查看和论坛权限有交叉。主题会通过 `sanitize_post_meta_posts_zibpay_for_forum_post` 修正论坛帖子付费字段，并通过 `tourists_pay_is_allow` 禁止论坛帖子免密购买。
+
+## 版块统计与缓存
+
+论坛统计会同时写入 post meta、term meta、对象缓存和全局查询结果。列表页、小工具、版块页头部和热门判断都依赖这些结果，直接改 meta 很容易让页面显示和排序状态不一致。
+
+| 数据                                          | 写入位置                                              | 刷新时机                                                                            | 缓存组                                             |
+| --------------------------------------------- | ----------------------------------------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------- |
+| 版块帖子数 `posts_count`                      | 版块 post meta                                        | `save_post` 保存论坛帖子或版块时，经 `zib_bbs_updata_plate_posts_count()` 刷新      | `plate_posts_count_all`、`plate_posts_count_today` |
+| 版块回复数 `reply_count`、`today_reply_count` | 版块 post meta                                        | `save_post`、`wp_update_comment_count` 经 `zib_bbs_updata_plate_reply_count()` 刷新 | `plate_reply_count_all`、`plate_reply_count_today` |
+| 版块阅读数 `views`                            | 版块 post meta                                        | `posts_views_record` 经 `zib_bbs_updata_views()` 汇总版块下所有帖子阅读数           | `plate_views_count`                                |
+| 分区阅读数 `views`                            | `plate_cat` term meta                                 | `posts_views_record` 汇总分区下版块阅读数                                           | `term_views_count`                                 |
+| 最近发帖 `last_post`                          | 版块 post meta、`plate_cat` term meta                 | 已发布论坛帖子保存时写入                                                            | 无固定对象缓存，依赖 meta                          |
+| 最近回复 `last_reply`                         | 帖子 post meta、版块 post meta、`plate_cat` term meta | `comment_post`、`comment_unapproved_to_approved` 审核通过时写入                     | 无固定对象缓存，依赖 meta                          |
+| 热门状态 `is_hot`                             | 帖子或版块 post meta                                  | `posts_views_record` 经 `zib_bbs_updata_is_hot()` 判断                              | `bbs_is_hot`                                       |
+
+帖子数通过 `zib_bbs_get_plate_posts_count($plate_id, $today)` 读取。函数会先读 `plate_posts_count_all` 或 `plate_posts_count_today`，再用一次分组查询缓存所有版块结果；今日统计会按 `post_date_gmt` 限定当天。
+
+回复数通过 `zib_bbs_get_plate_reply_count($plate_id, $today)` 读取。函数会统计已审核评论，并且只计算已发布的 `forum_post`。今日回复数按 `comment_date_gmt` 限定当天，因此跨时区展示时要优先相信主题函数返回值，不要自己用本地时间拼 SQL。
+
+热门帖子判断会读取帖子 `views`、`score`、`comment_count`，再和版块平均阅读量比较；过滤器是 `bbs_is_hot_posts`。热门版块判断会读取版块帖子数、阅读数、回复数，再和分区平均阅读量比较；过滤器是 `bbs_is_hot_plate`。当 `is_hot` 从旧值变为新值且结果为真时，才会触发 `posts_is_hot` 或 `plate_is_hot`。
+
+删除、移动和恢复也属于统计维护链路：
+
+| 场景               | 主题函数 / Action                                  | 维护要点                                                                          |
+| ------------------ | -------------------------------------------------- | --------------------------------------------------------------------------------- |
+| 单帖移动版块       | `zib_bbs_posts_plate_move($id, $new_id, $old_id)`  | 写入帖子 `plate_id`，对新旧版块分别触发 `save_post`，再触发 `posts_plate_move`    |
+| 版块删除前迁移帖子 | `zib_bbs_plates_move($new_id, $old_id)`            | 批量更新帖子 `plate_id`，触发新旧版块 `save_post` 刷新统计                        |
+| 删除帖子           | Ajax `posts_delete`                                | 校验 `posts_delete` 能力和 nonce，执行 `wp_trash_post()`，触发 `bbs_posts_delete` |
+| 删除版块           | Ajax `plate_delete`                                | 校验 `plate_delete` 能力；可选择把帖子迁移到新版块，再把版块移入回收站            |
+| 恢复帖子或版块     | Ajax `posts_delete_revoke` / `plate_delete_revoke` | 校验编辑权限，执行 `wp_untrash_post()`，返回恢复后的链接                          |
+
+`plate_delete` 在选择迁移帖子时会校验新版块是否存在、是否已删除，并且不能选择当前版块。这个流程能保证迁移后的帖子继续属于有效版块；扩展后台批量清理时也应该保留这几个检查。
+
+批量导入、批量移动、直接修正 `plate_id`、批量审核评论时，要主动走主题刷新链路。最稳妥的做法是让 `save_post`、`wp_update_comment_count`、`posts_views_record` 或 `posts_plate_move` 正常触发；如果必须后台脚本处理，也要调用对应的 `zib_bbs_updata_*` 函数并清理相关缓存。
+
+论坛还有动态推荐分缓存，详见 [论坛排序与推荐指数](/docs/api/bbs-sorting-recommendation)。新增统计字段时要同时考虑统计刷新、排序缓存、版块小工具、消息通知和前台列表。
+
+## 扩展建议
+
+- 只追加展示内容时，先找 `bbs_*_page_*` 或 `bbs_single_footer`。
+- 改排序选项时，优先使用 `bbs_plate_order_options`、`bbs_posts_order_options`、`bbs_plate_cat_order_options`。
+- 改用户页时，使用 `author_main_tab_forum`、`main_author_tab_content_forum`、`author_favorite_types`。
+- 改权限时，先读 `inc/functions/bbs/inc/user.php`，不要绕过 `zib_user_can`。
+- 涉及付费关注、积分评分、采纳奖励、版主操作时，要保留原有业务流程、消息通知和缓存刷新。
+- 论坛页面、发帖页、帖子页和论坛 Ajax 不应被全页缓存固定。

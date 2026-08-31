@@ -1,0 +1,28 @@
+name: 开发问答
+description: 提交已经查过文档、但仍需要社区共同定位的开发问题
+title: '问答：'
+labels: [question]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先搜索本站文档、Issues 和已有 Discussions。可以复现且需要修复的问题请改用 Issue Form。
+  - type: input
+    id: environment
+    attributes:
+      label: 版本与环境
+      placeholder: 子比主题 7.x / WordPress 6.x / PHP 8.2
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: 问题与已尝试方案
+      description: 写明目标、当前行为、相关路径和你已经查过的资料。
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 最小代码或证据
+      description: 请脱敏，不要提交主题完整源码、密钥、Cookie、密码或个人数据。

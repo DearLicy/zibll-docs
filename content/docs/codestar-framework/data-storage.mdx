@@ -1,0 +1,143 @@
+---
+title: 数据保存与读取
+description: 梳理子比主题 CSF 配置保存位置、_pz、zib_other_data 和主题封装读写函数。
+---
+
+## 保存位置先分层
+
+CSF 负责字段界面，数据最终会保存到 WordPress 的不同位置。子比主题还把部分 meta 聚合进 `zib_other_data`，所以读写时要先判断数据属于哪一层。
+
+| 配置类型       | 保存位置                             | 子比主题常用读取              |
+| -------------- | ------------------------------------ | ----------------------------- |
+| 主题设置       | `wp_options.zibll_options`           | `_pz($key, $default)`         |
+| 文章/页面 Meta | `wp_postmeta` 或 `zib_other_data`    | `zib_get_post_meta()`         |
+| 分类/标签 Meta | `wp_termmeta` 或 `zib_other_data`    | `zib_get_term_meta()`         |
+| 用户 Meta      | `wp_usermeta` 或 `zib_other_data`    | `zib_get_user_meta()`         |
+| 评论 Meta      | `wp_commentmeta` 或 `zib_other_data` | 主题封装或 WordPress 原生函数 |
+| 菜单项配置     | 菜单项 post meta                     | `zib_menu_pz()`               |
+| 小工具配置     | widget instance                      | `$instance`                   |
+
+## `_pz()` 读取主题设置
+
+`_pz()` 定义在 `inc/dependent.php`：
+
+```php
+function _pz($name, $default = false, $subname = '')
+```
+
+它读取主题主配置 `zibll_options`。常见写法：
+
+```php
+if (_pz('shop_s')) {
+    // 商城功能已开启
+}
+
+$name = _pz('pay_user_vip_1_name', 'VIP');
+$class = _pz('checkin_header_user_option', 'c-yellow', 'class');
+```
+
+第三个参数用于读取数组字段里的子 key。
+
+## `zib_other_data`
+
+子比主题把部分 post/user/term/comment meta 聚合到 `zib_other_data` 数组里，减少零散 meta。这样做的结果是：直接用 WordPress 原生函数按单个 key 读取，可能读不到主题字段。
+
+主题提供了封装函数：
+
+```php
+zib_get_post_meta($id, $key, $single = false);
+zib_update_post_meta($id, $key, $value);
+
+zib_get_user_meta($id, $key, $single = false);
+zib_update_user_meta($id, $key, $value);
+
+zib_get_term_meta($id, $key, $single = false);
+zib_update_term_meta($id, $key, $value);
+```
+
+这些函数都在 `inc/dependent.php`。
+
+## 文章 Meta 读取
+
+主题文章页、页面模板、商城商品、论坛帖子都会读取 post meta。示例：
+
+```php
+$score_data = zib_get_post_meta($product_id, 'score_data', true);
+```
+
+保存：
+
+```php
+zib_update_post_meta($product_id, 'score_data', $score_data);
+```
+
+涉及主题已有字段时，优先用封装函数，不要直接 `get_post_meta()`。
+
+## 用户 Meta 读取
+
+用户资料、认证、等级、封禁、签到、绑定信息都可能走 user meta。示例：
+
+```php
+$auth_info = zib_get_user_meta($user_id, 'auth_info', true);
+```
+
+保存：
+
+```php
+zib_update_user_meta($user_id, 'auth_info', $auth_info);
+```
+
+用户字段尤其要注意权限，不要根据前端传入的任意 user id 写入。
+
+## Term Meta 读取
+
+分类、专题、商品分类、论坛分类等 term 配置优先用：
+
+```php
+$cover = zib_get_term_meta($term_id, 'cover_image', true);
+```
+
+如果是 WordPress 原生字段或确定不走主题聚合，也可以用 `get_term_meta()`。
+
+## 菜单项配置
+
+子比主题菜单项配置 prefix 是：
+
+```php
+zib_menu_options
+```
+
+读取函数在 `inc/functions/zib-header.php`：
+
+```php
+zib_menu_pz($id, $key = '', $default = '')
+```
+
+前台菜单会读取图标、徽章、高级子菜单等字段。如果字段挂到其它 prefix，`zib_menu_pz()` 读不到。
+
+## HTML 字段和 sanitize
+
+主题源码里有些字段会设置：
+
+```php
+'sanitize' => false,
+```
+
+这表示保存时不走默认过滤，常用于 HTML、富文本或特殊代码字段。它不是“前台可以直接原样输出”的意思。前台输出仍然要按场景处理：
+
+```php
+echo wp_kses_post($html);
+```
+
+如果是 SVG 或脚本类内容，只能允许可信管理员维护，并在输出时明确白名单和权限边界。
+
+## 调试读取为空
+
+按这个顺序查：
+
+1. 字段 ID 是否写错。
+2. 数据属于 options、post meta、term meta、user meta、comment meta 还是 widget instance。
+3. 是否保存到了 `zib_other_data`。
+4. 是否使用了正确的主题封装读取函数。
+5. 功能模块是否关闭导致字段未注册。
+6. 字段是否被 dependency 隐藏后没有提交。

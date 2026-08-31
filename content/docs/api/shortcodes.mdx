@@ -1,0 +1,283 @@
+---
+title: 短代码
+description: 按子比主题源码整理内置短代码、隐藏内容、文章列表、商品卡片、付费阅读和新增短代码的边界。
+---
+
+## 注册位置
+
+子比主题内置短代码主要在这些位置注册：
+
+| 短代码        | 注册位置                      | 回调                                  |
+| ------------- | ----------------------------- | ------------------------------------- |
+| `reply`       | `inc/functions/zib-theme.php` | `reply_to_read()`                     |
+| `postsbox`    | `inc/functions/zib-theme.php` | `add_shortcode_postsbox()`            |
+| `postslists`  | `inc/functions/zib-theme.php` | `add_shortcode_postslists()`          |
+| `hidecontent` | `inc/functions/zib-theme.php` | `add_shortcode_hidecontent()`         |
+| `productbox`  | `inc/functions/shop/shop.php` | `zib_shop_add_shortcode_productbox()` |
+| `payshow`     | `zibpay/functions.php`        | `zibpay_to_show()`                    |
+
+短代码适合在文章、页面、编辑器内容、小工具或可配置文本中插入可复用展示片段。它不适合承载复杂写入流程，也不适合直接处理支付回调、文件上传、订单状态变更。
+
+## `reply`
+
+`reply` 是评论可见短代码：
+
+```php
+add_shortcode('reply', 'reply_to_read');
+```
+
+核心判断：
+
+```php
+if (is_super_admin()) {
+    return '<div class="hidden-box show">...</div>';
+} else {
+    if (zib_user_is_commented()) {
+        return $_show;
+    } else {
+        return $_hide;
+    }
+}
+```
+
+`zib_user_is_commented()` 会按当前文章查询已审核评论。登录用户按 `user_id` 查，未登录用户按评论 cookie 里的邮箱查：
+
+```php
+$q_args = array(
+    'post_id' => $post_id,
+    'status'  => 'approve',
+    'number'  => 1,
+);
+```
+
+扩展评论可见时不要只看前端按钮状态，必须以服务端评论查询结果为准。
+
+## `hidecontent`
+
+`hidecontent` 是更完整的隐藏内容短代码：
+
+```php
+add_shortcode('hidecontent', 'add_shortcode_hidecontent');
+```
+
+默认参数：
+
+```php
+shortcode_atts(array(
+    'type'      => 'reply',
+    'is_logged' => '',
+    'password'  => '',
+    'img_id'    => '',
+    'img_url'   => '',
+    'desc'      => '',
+), $atts);
+```
+
+支持的核心类型：
+
+| type       | 判断            |
+| ---------- | --------------- |
+| `reply`    | 评论后可见      |
+| `payshow`  | 付费阅读可见    |
+| `logged`   | 登录后可见      |
+| `password` | 输入密码后可见  |
+| `vip1`     | VIP1 及以上可见 |
+| `vip2`     | VIP2 及以上可见 |
+
+显示优先级大致是：
+
+1. 管理员直接可见。
+2. `hidecontent_is_show` filter 强制放行。
+3. 文章作者直接可见。
+4. 按 `type` 进入评论、支付、登录、会员或密码判断。
+
+可用于服务端放行的入口：
+
+```php
+function zib_docs_hidecontent_is_show($is_show, $type)
+{
+    if ('logged' !== $type) {
+        return $is_show;
+    }
+
+    return current_user_can('edit_posts') ? true : $is_show;
+}
+add_filter('hidecontent_is_show', 'zib_docs_hidecontent_is_show', 10, 2);
+```
+
+`payshow` 类型会走 Zibpay 权限判断：
+
+```php
+$pay_mate = get_post_meta($post->ID, 'posts_zibpay', true);
+$paid     = zibpay_is_paid($post->ID);
+```
+
+未付费时还会经过：
+
+```php
+apply_filters('hidecontent_payshow_hide_content', $_hide, $content, $post);
+```
+
+如果要改付费隐藏提示，优先使用这个 filter，不要改订单判断。
+
+## `postsbox`
+
+`postsbox` 用于插入单篇文章卡片：
+
+```php
+add_shortcode('postsbox', 'add_shortcode_postsbox');
+```
+
+参数：
+
+```php
+shortcode_atts(array(
+    'post_id' => '0',
+), $atts);
+```
+
+渲染时会读取文章缩略图、标题、副标题、付费徽章和文章 meta：
+
+```php
+$_thumb = zib_post_thumbnail('', 'fit-cover radius8 no-imgbox', false, $post);
+$title  = zib_get_posts_list_pay_badge($post) . get_the_title($post) . get_the_subtitle(true, 'focus-color', $post->ID);
+$meta   = zib_get_posts_list_meta(true, true, $post);
+```
+
+如果文章不存在，只有管理员会看到短代码错误提示。普通用户不会看到调试信息。
+
+## `postslists`
+
+`postslists` 用于插入 Ajax 文章列表：
+
+```php
+add_shortcode('postslists', 'add_shortcode_postslists');
+```
+
+默认参数：
+
+```php
+$atts = shortcode_atts(array(
+    'orderby'  => 'date',
+    'cat'      => '',
+    'topics'   => '',
+    'style'    => 'text',
+    'count'    => 12,
+    'paginate' => false,
+    'blank'    => false,
+    'action'   => 'query_posts_lists',
+), $atts);
+```
+
+它不直接查询文章，而是构造 `zib_get_ias_ajaxpager()` 参数：
+
+```php
+$ias_args = array(
+    'type'   => 'ias',
+    'id'     => '',
+    'class'  => 'posts-mini-lists mb20',
+    'loader' => $placeholder,
+    'query'  => $atts,
+);
+
+return zib_get_ias_ajaxpager($ias_args);
+```
+
+所以扩展文章列表短代码时，要确认前端 Ajax action、分页参数和列表样式都能被主题已有 Ajax 列表处理。
+
+## `productbox`
+
+商城开启后才注册有效输出：
+
+```php
+if (!_pz('shop_s')) {
+    return '';
+}
+
+add_shortcode('productbox', 'zib_shop_add_shortcode_productbox');
+```
+
+参数：
+
+```php
+shortcode_atts(array(
+    'id' => '0',
+), $atts);
+```
+
+渲染时使用商城已有商品卡片：
+
+```php
+$shop_list_opt           = _pz('shop_list_opt');
+$card_args               = $shop_list_opt['list_style'] ?? array();
+$card_args['style']      = 'small';
+$card_args['show_price'] = 1;
+$card_args['show_desc']  = 0;
+
+$con = zib_shop_get_product_list_card($card_args, $post);
+```
+
+这说明商品短代码只是展示入口，不负责创建订单。订单创建、库存、优惠和支付仍然要走商城与 Zibpay 流程。
+
+## `payshow`
+
+`payshow` 是 Zibpay 里的付费可见短代码：
+
+```php
+add_shortcode('payshow', 'zibpay_to_show');
+```
+
+判断链路：
+
+1. 读取文章 `posts_zibpay`。
+2. 调用 `zibpay_is_paid($post->ID)`。
+3. 未启用付费阅读时直接显示内容。
+4. 管理员直接可见。
+5. 已支付或有有效权益时显示内容。
+6. 未支付时返回跳转到 `#posts-pay` 的隐藏提示。
+
+扩展付费阅读时不要直接信任前端参数。显示权限必须由服务端订单、会员、免费资源策略或资源权限判断决定。
+
+## 新增短代码示例
+
+新增短代码保持子比主题风格：命名函数、`array()` 参数、服务端转义、只做展示。
+
+```php
+function zib_docs_notice_shortcode($atts, $content = null)
+{
+    $atts = shortcode_atts(array(
+        'type' => 'info',
+    ), $atts);
+
+    $type = sanitize_html_class($atts['type']);
+    $body = do_shortcode(null === $content ? '' : $content);
+
+    return '<div class="zib-notice zib-notice-' . esc_attr($type) . '">' . wp_kses_post($body) . '</div>';
+}
+add_shortcode('zib_notice', 'zib_docs_notice_shortcode');
+```
+
+如果短代码输出登录态、用户权限、付费可见、会员可见、订单状态等动态内容，就不能被全页缓存错误固定。需要在缓存插件里排除对应页面，或复用主题已有动态加载方式。
+
+## 输出边界
+
+| 输出内容      | 推荐处理                |
+| ------------- | ----------------------- |
+| 普通文本      | `esc_html()`            |
+| HTML 属性     | `esc_attr()`            |
+| URL           | `esc_url()`             |
+| 允许少量 HTML | `wp_kses_post()`        |
+| class 名      | `sanitize_html_class()` |
+
+短代码里可以使用 `do_shortcode($content)` 递归处理内部短代码，但递归后的内容仍然要按场景转义。
+
+## 不适合放进短代码的事
+
+- 支付回调。
+- 文件上传。
+- 修改订单、余额、积分。
+- 长时间远程请求。
+- 后台批量操作。
+- 输出未转义的用户输入。
+
+短代码的定位是内容渲染。涉及写入、资产、权限变更的能力，应走 Ajax、后台 action、Zibpay 订单链路或主题已有业务 Hook。

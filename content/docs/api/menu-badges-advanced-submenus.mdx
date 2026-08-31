@@ -1,0 +1,423 @@
+---
+title: 菜单徽章与高级子菜单
+description: 拆解子比主题导航菜单项图标、徽章、高级子菜单、图文卡片、多栏目链接和前台 Walker 渲染扩展边界。
+---
+
+## 模块边界
+
+子比主题的菜单增强不是把 HTML 写进菜单标题，而是通过 Codestar Framework 给 WordPress 菜单项增加配置，再由自定义 `zib_walker_nav_menu` 在前台渲染。开发时要分清三件事：
+
+| 层级       | 负责内容                                          | 入口                              |
+| ---------- | ------------------------------------------------- | --------------------------------- |
+| 菜单项配置 | 图标、徽章、高级子菜单开关、图文卡片、多栏目链接  | `inc/options/metabox-options.php` |
+| 配置读取   | 从菜单项 post meta 读取 `zib_menu_options`        | `zib_menu_pz()`                   |
+| 前台渲染   | 修改标题 HTML、替换默认子菜单、输出高级子菜单结构 | `zib_walker_nav_menu`             |
+
+如果只是给菜单项加一个小标识，使用 `badge` 和 `badge_class`。如果要做大块图文入口或多列链接，使用高级子菜单。不要在 WordPress 菜单标题里塞复杂 HTML，也不要把菜单项指向对象 ID 当成菜单项配置 ID。
+
+## 核心文件
+
+| 文件                              | 作用                                                                |
+| --------------------------------- | ------------------------------------------------------------------- |
+| `inc/options/metabox-options.php` | 注册 `zib_menu_options`，给菜单项增加图标、徽章和高级子菜单字段     |
+| `inc/functions/zib-header.php`    | 定义 `zib_walker_nav_menu`、`zib_menu_pz()`，输出 PC 菜单和移动菜单 |
+| `inc/functions/zib-theme.php`     | 菜单缓存和主题加载相关能力                                          |
+| `inc/options/options-module.php`  | 后台菜单和官网教程提示入口                                          |
+
+Codestar 字段结构见 [导航菜单项配置](/docs/codestar-framework/menu-options)。本页更关注这些字段如何影响前台导航和二次开发时怎么接入。
+
+## 配置保存结构
+
+菜单项配置固定使用：
+
+```php
+$prefix = 'zib_menu_options';
+CSF::createNavMenuOptions($prefix, array(
+    'data_type' => 'serialize',
+));
+```
+
+它会保存到当前菜单项的 `post_meta`：
+
+```txt
+post_id  = 菜单项 ID
+meta_key = zib_menu_options
+```
+
+读取函数：
+
+```php
+function zib_menu_pz($id, $key = '', $default = '')
+{
+    static $options = array();
+    if (!isset($options[$id])) {
+        $options[$id] = get_post_meta($id, 'zib_menu_options', true);
+    }
+
+    return zib_get_array_value($options[$id], $key, $default);
+}
+```
+
+第一个参数必须是菜单项 ID：
+
+```php
+$icon = zib_menu_pz($item->ID, 'icon');
+```
+
+不要传 `$item->object_id`。`object_id` 是菜单项指向的页面、文章或分类 ID，不是菜单项自身 ID。
+
+## 基础字段
+
+主题注册的基础字段：
+
+| 字段                      | 类型       | 作用                          |
+| ------------------------- | ---------- | ----------------------------- |
+| `icon`                    | `icon`     | 菜单标题前图标                |
+| `badge`                   | `text`     | 菜单标题后徽章文字            |
+| `badge_class`             | `palette`  | 徽章背景色，依赖 `badge` 非空 |
+| `submenu_s`               | `switcher` | 是否启用高级子菜单            |
+| `submenu_type`            | `radio`    | 高级子菜单类型                |
+| `graphic_card_opts`       | `fieldset` | 图文卡片配置                  |
+| `multi_column_links_opts` | `fieldset` | 多栏目链接配置                |
+
+`zib_walker_nav_menu::start_el()` 会在输出菜单项前处理图标和徽章：
+
+```php
+$title       = '<span class="menu-item-title">' . $item->title . '</span>';
+$title_icon  = zib_menu_pz($item->ID, 'icon');
+$title_badge = zib_menu_pz($item->ID, 'badge');
+
+if ($title_icon) {
+    $title = zib_get_cfs_icon($title_icon, 'mr3 menu-item-icon') . $title;
+}
+
+if ($title_badge) {
+    $title .= ' <badge class="menu-item-badge ' . zib_menu_pz($item->ID, 'badge_class') . '">' . $title_badge . '</badge>';
+}
+
+$item->title = $title;
+```
+
+开发新增菜单展示字段时，尽量沿用这个路径：字段存进 `zib_menu_options`，前台 Walker 或过滤器读取字段，输出时使用主题已有 class。
+
+## 高级子菜单规则
+
+高级子菜单只在一级菜单生效：
+
+```php
+if (zib_menu_pz($item->ID, 'submenu_s') && $depth == 0) {
+    $submenu = self::submenu($item->ID);
+}
+```
+
+如果高级子菜单有内容，主题会：
+
+```php
+$item->classes[]     = 'menu-item-has-children';
+self::$submenu_ids[] = $item->ID;
+```
+
+随后 `display_element()` 会跳过这个菜单项原本的子项目：
+
+```php
+if (!empty($element->menu_item_parent) && in_array($element->menu_item_parent, self::$submenu_ids)) {
+    return '';
+}
+```
+
+这意味着高级子菜单是替换，不是追加。开启高级子菜单后，当前一级菜单下面原本拖拽出来的普通子菜单不会再显示，最终只显示 `graphic_card_opts` 或 `multi_column_links_opts` 里的配置。
+
+## 子菜单类型分发
+
+高级子菜单类型由 `submenu_type` 决定：
+
+```php
+public function submenu($item_ID)
+{
+    $type          = zib_menu_pz($item_ID, 'submenu_type');
+    $function_name = 'submenu_' . $type;
+    if (method_exists($this, $function_name)) {
+        return $this->$function_name($item_ID);
+    }
+    return '';
+}
+```
+
+当前源码支持：
+
+| `submenu_type`       | 渲染方法                       | 适合场景                                 |
+| -------------------- | ------------------------------ | ---------------------------------------- |
+| `graphic_card`       | `submenu_graphic_card()`       | 带图片的大入口、产品、专题、活动、资源卡 |
+| `multi_column_links` | `submenu_multi_column_links()` | 多列文字链接、分类导航、文档目录         |
+
+新增类型时要同时注册字段、补渲染方法、考虑移动端和缓存，不要只给 `submenu_type` 增加一个选项。
+
+## 图文卡片菜单
+
+图文卡片读取：
+
+```php
+$opts        = zib_menu_pz($item_ID, 'graphic_card_opts', array());
+$items       = $opts['items'] ?? array();
+$arrangement = $opts['arrangement'] ?? '';
+```
+
+没有 `items` 时不输出。每个卡片都会交给 `submenu_graphic_card_item()`，没有图片会直接丢弃：
+
+```php
+if (empty($args['img'])) {
+    return '';
+}
+```
+
+图文卡片支持：
+
+| 字段                  | 作用                                  |
+| --------------------- | ------------------------------------- |
+| `items.*.title`       | 卡片标题                              |
+| `items.*.img`         | 卡片图片，必填                        |
+| `items.*.link`        | 卡片链接                              |
+| `items.*.badge`       | 图片角标                              |
+| `items.*.badge_class` | 角标颜色                              |
+| `arrangement`         | 空为自动换行，`swiper` 为单行左右滚动 |
+| `img_scale`           | 图片比例，输出为 `--img-scale`        |
+| `size`                | 卡片尺寸 class                        |
+| `align`               | 自动换行时的对齐方式                  |
+
+最终结构大致是：
+
+```html
+<div
+  class="sub-menu senior-submenu submenu-graphic-card size-md"
+  style="--img-scale:1;"
+>
+  <div class="container">
+    <div class="graphic-card-items-box hh flex">
+      <div style="--ani-delay:0s;">
+        <div class="menu-graphic-card-item">
+          <a href="...">
+            <div class="img-box hover-zoom-img">
+              <img class="lazyload fit-cover" />
+              <div class="img-badg-box">
+                <span class="badg badg-sm jb-red">NEW</span>
+              </div>
+            </div>
+            <div class="title mt10 text-ellipsis">标题</div>
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+```
+
+卡片数量多时优先使用 `swiper`，但移动菜单最好单独配置，不要把 PC 的大图高级菜单原样搬到移动端。
+
+## 多栏目链接菜单
+
+多栏目链接读取：
+
+```php
+$opts    = zib_menu_pz($item_ID, 'multi_column_links_opts', array());
+$columns = $opts['columns'] ?? array();
+```
+
+没有栏目时不输出。每个栏目先输出栏目标题，再输出栏目内链接：
+
+```php
+$lists .= '<div class="links-column flex-auto">';
+$lists .= self::submenu_multi_column_links_item($column, 'column-title');
+$lists .= '<div class="links-items">';
+foreach ($column['items'] as $item) {
+    $lists .= self::submenu_multi_column_links_item($item, '');
+}
+$lists .= '</div></div>';
+```
+
+单个链接项要求标题存在。如果没有手动标题，会尝试使用链接字段里的 `text`：
+
+```php
+if (!$title && $link_title) {
+    $title = $link_title;
+}
+
+if (!$title) {
+    return '';
+}
+```
+
+字段能力：
+
+| 字段                      | 作用                        |
+| ------------------------- | --------------------------- |
+| `columns.*.title`         | 栏目标题                    |
+| `columns.*.icon`          | Font Awesome 或主题图标     |
+| `columns.*.img_icon`      | 图片图标，优先级高于 `icon` |
+| `columns.*.link`          | 栏目标题链接                |
+| `columns.*.items`         | 栏目内链接列表              |
+| `columns.*.items.*.title` | 链接标题                    |
+| `columns.*.items.*.link`  | 链接地址和打开方式          |
+
+最终结构：
+
+```html
+<div class="sub-menu senior-submenu submenu-multi-column-links">
+  <div class="container">
+    <div class="links-columns-box jsa hh flex">
+      <div class="links-column flex-auto" style="--ani-delay:0.08s;">
+        <div class="column-title link-item"><a href="...">栏目标题</a></div>
+        <div class="links-items">
+          <div class="link-item">
+            <a href="..."
+              >链接标题<i class="fa fa-angle-double-right icon-hover-show"></i
+            ></a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+```
+
+它适合做文档、功能、资源、分类导航，不适合放大图、视频或复杂业务状态。
+
+## 扩展菜单项字段
+
+新增字段时使用同一个 prefix，避免 `zib_menu_pz()` 读不到：
+
+```php
+function zib_docs_register_menu_extra_field()
+{
+    $prefix = 'zib_menu_options';
+
+    CSF::createSection($prefix, array(
+        'fields' => array(
+            array(
+                'id'      => 'docs_desc',
+                'type'    => 'text',
+                'title'   => __('菜单说明', 'zib_language'),
+                'default' => '',
+            ),
+        ),
+    ));
+}
+add_action('after_setup_theme', 'zib_docs_register_menu_extra_field', 30);
+```
+
+读取时仍然用菜单项 ID：
+
+```php
+function zib_docs_get_menu_desc($item)
+{
+    $desc = zib_menu_pz($item->ID, 'docs_desc', '');
+
+    if (!$desc) {
+        return '';
+    }
+
+    return '<small class="menu-item-desc muted-color">' . esc_html($desc) . '</small>';
+}
+```
+
+如果要把这个字段挂进前台菜单标题，优先过滤 Walker 输出或继承 Walker；不要直接修改菜单标题保存值。
+
+## 自定义高级子菜单类型
+
+新增类型需要三个步骤：
+
+1. 给 `submenu_type` 增加选项。
+2. 注册对应配置字段，例如 `docs_panel_opts`。
+3. 扩展 Walker，提供 `submenu_docs_panel()`。
+
+示例：
+
+```php
+class Zib_Docs_Walker_Nav_Menu extends zib_walker_nav_menu
+{
+    public function submenu_docs_panel($item_ID)
+    {
+        $opts  = zib_menu_pz($item_ID, 'docs_panel_opts', array());
+        $title = !empty($opts['title']) ? $opts['title'] : '';
+
+        if (!$title) {
+            return '';
+        }
+
+        return '<div class="sub-menu senior-submenu docs-panel-menu"><div class="container"><div class="theme-box padding-15">' . esc_html($title) . '</div></div></div>';
+    }
+}
+```
+
+调用菜单时指定 Walker：
+
+```php
+wp_nav_menu(array(
+    'theme_location' => 'topmenu',
+    'container'      => false,
+    'walker'         => new Zib_Docs_Walker_Nav_Menu(),
+));
+```
+
+如果只是新增一两种展示字段，继承 Walker 可能成本偏高。优先评估能否复用图文卡片或多栏目链接。
+
+## 菜单缓存与更新
+
+主题在菜单更新后会清理菜单缓存：
+
+```php
+add_action('wp_update_nav_menu_item', 'zib_cache_delete_nav_menu');
+```
+
+所以开发菜单相关能力时要注意：
+
+| 场景             | 建议                       |
+| ---------------- | -------------------------- |
+| 改字段配置       | 保存菜单后刷新前台         |
+| 改 Walker 输出   | 清理页面缓存和对象缓存     |
+| 改菜单项图片     | 检查懒加载、CDN 和图片尺寸 |
+| 改高级子菜单类型 | 同步 PC 菜单和移动菜单配置 |
+
+如果使用页面缓存，菜单 HTML 可能被缓存为旧结构。菜单字段保存成功不代表前台马上可见。
+
+## 移动端边界
+
+高级子菜单源码提示“PC 端和移动端最好分开创建菜单”。原因是：
+
+| 风险             | 说明                           |
+| ---------------- | ------------------------------ |
+| 图文卡片过多     | 移动菜单会变高，抽屉滚动体验差 |
+| 图片太大         | 首次打开菜单时加载压力大       |
+| 多栏目太宽       | 多列结构容易横向溢出           |
+| 普通子菜单被替换 | 移动端可能需要更简单的层级菜单 |
+| hover 依赖       | PC 菜单交互不一定适合触摸      |
+
+如果移动端只需要普通层级菜单，可以单独配置 `mobilemenu`，不要复用 PC 的高级子菜单。
+
+## 常见风险
+
+| 风险                         | 说明                                                   |
+| ---------------------------- | ------------------------------------------------------ |
+| 把 HTML 塞进菜单标题         | 会破坏后台可编辑性，也容易被 Walker 再包一层           |
+| 用 `object_id` 读取配置      | 读不到菜单项 post meta                                 |
+| 子菜单项开启高级子菜单       | 主题只在一级菜单 `depth == 0` 生效                     |
+| 同时维护普通子项和高级子菜单 | 高级子菜单会替换普通子项，运营容易误判                 |
+| 图文卡片缺图片               | `submenu_graphic_card_item()` 会直接返回空             |
+| 多栏目缺标题                 | `submenu_multi_column_links_item()` 会直接返回空       |
+| 字段 ID 冲突                 | 覆盖 `icon`、`badge`、`submenu_s` 等主题字段会影响导航 |
+| 忘记清缓存                   | 菜单保存、对象缓存、页面缓存、CDN 都可能影响前台显示   |
+
+## 调试入口
+
+| 现象             | 优先检查                                                    |
+| ---------------- | ----------------------------------------------------------- |
+| 图标不显示       | `icon` 字段、`zib_get_cfs_icon()`、菜单项 ID 是否正确       |
+| 徽章不显示       | `badge` 是否为空、`badge_class` 是否有效                    |
+| 高级子菜单不显示 | 是否一级菜单、`submenu_s`、`submenu_type`、字段组是否有内容 |
+| 普通子菜单消失   | 是否开启了高级子菜单，这是主题预期行为                      |
+| 图文卡片数量变少 | 是否有卡片缺少 `img`                                        |
+| 多栏目链接缺项   | 是否缺少标题或链接文本                                      |
+| 移动端错位       | 是否 PC/移动共用同一个高级菜单，图片和列数是否过多          |
+
+## 参考源码
+
+本页根据 `inc/options/metabox-options.php`、`inc/functions/zib-header.php`、`inc/options/options-module.php`，以及子比主题官网公开的菜单、徽章和高级子菜单教程蒸馏整理。

@@ -1,0 +1,29 @@
+{
+  "name": "zibll-docs",
+  "version": "0.1.0",
+  "description": "Use the Zibll theme development documentation from Codex.",
+  "author": {
+    "name": "子比主题开发文档"
+  },
+  "homepage": "https://dearlicy.github.io/zibll-docs/docs/ai/codex-plugin",
+  "keywords": ["zibll", "wordpress", "docs", "mcp", "codex"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "子比主题开发文档",
+    "shortDescription": "在 Codex 中检索子比主题开发文档。",
+    "longDescription": "为 Codex 接入子比主题开发文档 MCP，并提供面向插件、子主题、Codestar Framework、接口和部署任务的阅读策略。",
+    "developerName": "Zibll Docs",
+    "category": "Productivity",
+    "capabilities": ["Documentation", "MCP"],
+    "websiteURL": "https://dearlicy.github.io/zibll-docs",
+    "defaultPrompt": [
+      "按子比主题文档帮我写插件",
+      "搜索 Codestar 配置示例",
+      "读取 Zibpay 开发资料"
+    ],
+    "brandColor": "#1EBC44",
+    "composerIcon": "./assets/favicon.svg",
+    "logo": "./assets/favicon.svg"
+  },
+  "mcpServers": "./.mcp.json"
+}

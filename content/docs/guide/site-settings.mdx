@@ -1,0 +1,304 @@
+---
+title: 主题常用设置
+description: 将子比官网“主题常用功能设置”整理为可执行的内置知识，按源码配置域说明常用开关、依赖关系和排查顺序。
+---
+
+## 设置先按业务域找
+
+子比主题后台设置由 Codestar Framework 注册，源码集中在 `inc/options/admin-options.php`。不要只按页面视觉位置找字段，先按业务域判断：
+
+| 设置域   | 源码 section  | 典型内容                                                 |
+| -------- | ------------- | -------------------------------------------------------- |
+| 全局功能 | `basic`       | Logo、SEO、懒加载、搜索、邮件、自定义代码                |
+| 用户互动 | `user`        | 登录注册、第三方登录、消息、认证、徽章、等级、签到、短信 |
+| 内容设置 | `posts`       | 文章列表、文章页、评论、图片灯箱、短代码展示             |
+| 支付商城 | `pay`、`shop` | 付费阅读、下载、会员、余额、积分、商城商品               |
+| 论坛模块 | `bbs`         | 论坛开关、发帖、版块、帖子权限、版主                     |
+| 系统工具 | `tools`       | 缓存、导入导出、优化、调试类能力                         |
+
+如果不知道某个设置在哪里，优先在源码里搜字段标题、配置项 id 或 `_pz('配置项')`。例如邮箱设置会落到 `mail_smtps`、`mail_host`、`mail_port`；图片灯箱会落到 `imagelightbox`、`imagelightbox_type`。
+
+## 常用功能配置顺序
+
+上线前建议按这个顺序配置：
+
+1. 基础信息：站点名称、Logo、描述、备案、页脚信息。
+2. 链接结构：WordPress 固定链接、服务器伪静态。
+3. 邮件系统：SMTP、发件人、邮件模板、测试邮件。
+4. 用户系统：登录注册开关、验证码、协议、绑定邮箱或手机。
+5. 内容展示：文章列表、文章页、缩略图、图片灯箱、懒加载。
+6. 支付与会员：支付方式、订单回调、付费阅读、下载权限。
+7. 消息通知：站内消息、私信、邮件通知、微信模板消息。
+8. 缓存加速：页面缓存、对象缓存、CDN、静态资源。
+
+这个顺序能避免很多连锁问题。比如登录验证码依赖邮件或短信；支付回调依赖固定链接和 HTTPS；图片灯箱和懒加载又容易被缓存插件、JS 合并压缩影响。
+
+## 配置项不是孤立开关
+
+子比主题很多开关会牵动业务流程。比如：
+
+| 配置                     | 影响                                     |
+| ------------------------ | ---------------------------------------- |
+| `mail_smtps`             | WordPress 发信方式、验证码、通知邮件     |
+| `user_signup_captch`     | 注册表单字段、验证码发送、Ajax 校验      |
+| `user_signin_nopas_s`    | 免密登录 Tab、验证码登录 Ajax            |
+| `user_verification_type` | 滑块、图片、腾讯、极验等人机验证输入     |
+| `imagelightbox`          | 文章图片点击查看、灯箱配置、前端脚本行为 |
+| `lazy_other`             | 普通图片、头像、模块图片的懒加载         |
+| `message_s`、`private_s` | 消息中心、私信按钮、邮件私信通知         |
+
+改设置后要同时确认前台、Ajax 和缓存。只看后台保存成功不代表功能完整可用。
+
+## 基础显示字段地图
+
+子比主题“基础配置和前端显示配置”主要分散在 `basic`、`page`、`post` 三个一级 section。排查时不要只看后台页面标题，应先判断字段最终影响的是头部输出、正文结构、CSS 变量、搜索框还是邮件发送。
+
+| 配置域          | 关键字段                                                                                                                                       | 前台读取或输出                                                                                                                                                     |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Logo 与站点图标 | `favicon`、`iconpng`、`logo_src`、`logo_src_dark`                                                                                              | `zib_head_favicon()` 输出 favicon 和桌面图标，Logo 通过主题头部与自适应图片函数按明暗模式选择                                                                      |
+| SEO 基础        | `post_keywords_description_s`、`connector`、`hometitle`、`keywords`、`description`、`post_img_auto_alt`                                        | `zib_seo()` 输出标题、关键词、描述和 canonical；完整 head 与 robots 规则见 [SEO Head 与 robots](/docs/api/seo-head-robots)；`post_img_auto_alt` 会给正文图片补 alt |
+| 图片懒加载      | `lazy_posts_thumb`、`lazy_avatar`、`lazy_posts_content`、`lazy_comment`、`lazy_private`、`lazy_sider`、`lazy_cover`、`lazy_other`、`thumbnail` | `zib_is_lazy()` 和 `zib_get_lazy_attr()` 生成 `lazyload`、占位图和 `data-src`                                                                                      |
+| 页面布局        | `sidebar_layout`、`layout_max_width`、`show_layout`、页面 `layout_max_width` meta                                                              | `_bodyclass()` 输出 `site-layout-*`；`zib_get_page_max_width()` 输出 `--mian-max-width`                                                                            |
+| 明暗模式        | `theme_mode`、`theme_mode_button`、`logo_src_dark`、`dark_theme_skin_custom`、`dark_theme_img_bg`                                              | `zib_get_theme_mode()` 处理默认值、用户 Cookie 和时间自动切换；前台切换按钮会同步 body class、图片和代码高亮                                                       |
+| 主题视觉        | `theme_skin`、`theme_skin_custom`、`theme_main_radius`、`theme_img_bg`、`close_backdrop`                                                       | `zib_head_css()` 输出 CSS 变量和背景图；`close_backdrop` 会让 body 增加 `fps-accelerat`                                                                            |
+| 搜索入口        | `search_placeholder`、`search_popular_key`、`search_popular_title`、`search_cat`、`search_type`、`search_history`、`search_posts`              | `zib_get_main_search()` 和 `zib_get_search_box()` 构建搜索框、分类、类型、热门词、历史词和热门文章                                                                 |
+| 邮件系统        | `mail_smtps`、`mail_name`、`mail_smtp_name`、`mail_host`、`mail_port`、`mail_smtpauth`、`mail_smtpsecure`、`mail_showname`                     | `zib_mail_smtp()` 挂到 `phpmailer_init`；`zib_get_mail_content()` 统一包装邮件内容                                                                                 |
+| 自定义代码      | `csscode`、`javascriptcode`、`headcode`、`footcode`、`trackcode`                                                                               | `csscode` 进入头部 `<style>`，JS 和统计代码进入页脚；完整边界见 [自定义代码与安全注入](/docs/api/custom-code-injection)                                            |
+
+这些字段大多最终走 `_pz()` 读取。页面和文章的局部覆盖则走 `zib_get_post_meta()`，例如页面布局宽度、页面头部、页面背景和单篇文章显示布局。
+
+## 前台读取链路
+
+基础配置落地到前台时有几个固定入口：
+
+| 入口            | Hook                     | 负责内容                                                              |
+| --------------- | ------------------------ | --------------------------------------------------------------------- |
+| `zib_head()`    | `wp_head`                | favicon、动态 CSS、自定义头部代码、meta theme-color、全局加载动画 CSS |
+| `zib_seo()`     | `wp_head`，优先级 `1`    | SEO 标题、关键词、描述、canonical                                     |
+| `zib_win_var()` | `wp_footer`              | Ajax 地址、搜索、图片灯箱、代码高亮、上传限制、前台 JS 文案           |
+| `zib_footer()`  | `wp_footer`，优先级 `98` | 页脚代码、统计代码和自定义 JS                                         |
+| `_bodyclass()`  | body class 构建          | 明暗模式、侧栏布局、管理员标识、背景模糊降级                          |
+
+开发扩展时可以按这个顺序判断字段是否生效：后台字段保存成功，`_pz()` 能读到值，对应入口是否在当前页面执行，最终 HTML、body class 或 JS 变量是否输出。不要只在后台字段保存后就判断功能已完成。
+
+## Logo 与明暗模式
+
+Logo 不是简单读取一张图片。主题提供日间和夜间两套 Logo，明暗模式由 `zib_get_theme_mode()` 决定：
+
+```php
+function zib_get_theme_mode()
+{
+    $theme_mode = _pz('theme_mode');
+    if (_pz('theme_mode_button', true) && isset($_COOKIE['theme_mode'])) {
+        $theme_mode = $_COOKIE['theme_mode'];
+    } else {
+        $time = current_time('G');
+        if ('time-auto' == $theme_mode) {
+            if ($time >= 20 || $time < 8) {
+                $theme_mode = 'dark-theme';
+            } else {
+                $theme_mode = 'white-theme';
+            }
+        }
+    }
+    return apply_filters('zib_theme_mode', $theme_mode);
+}
+```
+
+这段逻辑有两个边界：
+
+- 如果开启了主题切换按钮，用户 Cookie 优先于后台默认值。
+- 如果后台设置为 `time-auto`，主题按站点当前时间早晚自动切换。
+
+需要输出跟随主题切换的图片时，优先复用 `zib_get_adaptive_theme_img()`，它会写入 `white-src` 和 `dark-src`，前台切换主题时能同步替换图片地址。
+
+```php
+function zib_docs_get_adaptive_logo($white_logo, $dark_logo)
+{
+    return zib_get_adaptive_theme_img($white_logo, $dark_logo, get_bloginfo('name'), 'class="custom-logo"');
+}
+```
+
+## 懒加载字段
+
+懒加载字段按图片出现位置拆分，不是一把总开关。主题底层判断：
+
+```php
+function zib_is_lazy($key, $default = false)
+{
+    if (zib_is_crawler()) {
+        return false;
+    }
+
+    return _pz($key, $default);
+}
+
+function zib_get_lazy_attr($key, $src, $class = '', $lazy_src = ZIB_TEMPLATE_DIRECTORY_URI . '/img/thumbnail.svg')
+{
+    return zib_is_lazy($key) ? ' class="lazyload ' . $class . '" src="' . $lazy_src . '" data-src="' . $src . '"' : ' class="' . $class . '" src="' . $src . '"';
+}
+```
+
+几个细节要保留：
+
+- 搜索引擎爬虫访问时会关闭懒加载，避免图片真实地址只存在于 `data-src`。
+- 不同场景使用不同字段，文章缩略图用 `lazy_posts_thumb`，头像用 `lazy_avatar`，正文图片用 `lazy_posts_content`，封面图用 `lazy_cover`。
+- `thumbnail` 是全局占位图，但很多模块会根据尺寸使用主题内置 `thumbnail.svg`、`thumbnail-sm.svg` 或 `thumbnail-lg.svg`。
+
+新增图片输出建议使用主题函数：
+
+```php
+function zib_docs_get_cover_img($src, $alt = '')
+{
+    if (!$src) {
+        return '';
+    }
+
+    $alt       = $alt ? $alt : get_bloginfo('name');
+    $lazy_attr = zib_get_lazy_attr('lazy_cover', esc_url($src), 'fit-cover radius8');
+
+    return '<img ' . $lazy_attr . ' alt="' . esc_attr($alt) . '">';
+}
+```
+
+## 布局与视觉字段
+
+`layout_max_width` 会被 `zib_get_page_max_width()` 限制到不低于 `1200px`，并输出为 `--mian-max-width`。页面自身也可以通过页面 meta 覆盖宽度，前提是页面 meta 的值大于 `1200`。
+
+侧栏布局由 `_bodyclass()` 统一输出：
+
+| 条件                                        | body class      |
+| ------------------------------------------- | --------------- |
+| 当前页面不显示侧栏                          | `site-layout-1` |
+| 单篇或页面 meta 为左侧栏                    | `site-layout-3` |
+| 单篇或页面 meta 为右侧栏                    | `site-layout-2` |
+| 未设置局部布局，后台 `sidebar_layout=left`  | `site-layout-3` |
+| 未设置局部布局，后台 `sidebar_layout=right` | `site-layout-2` |
+
+视觉字段大多在 `zib_head_css()` 输出 CSS 变量：
+
+| 字段                                 | 输出影响                                         |
+| ------------------------------------ | ------------------------------------------------ |
+| `theme_skin` / `theme_skin_custom`   | `--theme-color`、`--focus-*` 系列变量            |
+| `dark_theme_skin_custom`             | `body.dark-theme` 下的主题色变量                 |
+| `theme_main_radius`                  | `--main-radius`                                  |
+| `theme_img_bg` / `dark_theme_img_bg` | body 背景图和背景参数                            |
+| `close_backdrop`                     | 关闭背景高斯模糊，或低性能 Cookie 触发降级 class |
+
+扩展前台样式时优先消费这些 CSS 变量，而不是在模块里写死颜色和圆角。这样用户修改后台主题色、暗色主题色和圆角后，扩展模块能自然跟随。
+
+## 搜索字段
+
+搜索配置分为“搜索框展示”和“搜索执行”两层。
+
+| 字段                                                 | 影响                                                |
+| ---------------------------------------------------- | --------------------------------------------------- |
+| `search_placeholder`                                 | 搜索框浮动占位文案                                  |
+| `search_popular_key`                                 | 是否显示热门搜索词，并决定是否记录搜索词            |
+| `search_popular_title`                               | 热门搜索区域标题                                    |
+| `search_popular_sticky`                              | 固定展示的搜索词，支持 `&type=xxx`                  |
+| `search_popular_key_num`                             | 热门词最多显示数量                                  |
+| `search_cat`、`search_cat_in`、`search_more_cat_obj` | 分类搜索选择器和默认分类                            |
+| `search_type`、`search_type_in`                      | 搜索类型选择器和默认搜索类型                        |
+| `search_history`                                     | 用户本地历史搜索 Cookie                             |
+| `search_posts`                                       | 搜索框下方热门文章                                  |
+| `404_search_s`                                       | 404 页面是否追加搜索模块                            |
+| `search_facets`                                      | 普通搜索结果筛选，启用 Meilisearch 后由索引结果接管 |
+
+`zib_get_main_search()` 读取后台设置后交给 `zib_get_search_box()` 输出结构。搜索类型来自 `zib_get_search_types()`，并通过 `search_types` Filter 允许商城、论坛或自定义内容类型追加。
+
+```php
+function zib_docs_search_types($types)
+{
+    $types['docs'] = __('文档', 'zib_language');
+
+    return $types;
+}
+add_filter('search_types', 'zib_docs_search_types');
+```
+
+如果新增搜索类型，还要接管查询或结果 Tab。只加 `search_types` 只能让类型显示出来，不能保证 WordPress 主查询知道应该搜索什么内容。
+
+热门搜索词不是纯前端展示。主题会在搜索时调用 `zib_update_search_keywords()` 记录关键词，并保存到 `search_keywords` option；后台设置保存后，搜索筛选数据还会通过 `csf_zibll_options_saved` 清理缓存。
+
+## 邮件字段
+
+SMTP 开关和字段最终挂到 WordPress 邮件系统：
+
+```php
+function zib_mail_smtp($phpmailer)
+{
+    if (_pz('mail_smtps')) {
+        $phpmailer->IsSMTP();
+        $phpmailer->FromName   = _pz('mail_showname');
+        $phpmailer->Host       = _pz('mail_host', 'smtp.qq.com');
+        $phpmailer->Port       = _pz('mail_port', '465');
+        $phpmailer->Username   = _pz('mail_smtp_name') ?: _pz('mail_name');
+        $phpmailer->Sender     = _pz('mail_name', '88888888@qq.com');
+        $phpmailer->Password   = _pz('mail_passwd', '123456789');
+        $phpmailer->From       = _pz('mail_name', '88888888@qq.com');
+        $phpmailer->SMTPAuth   = _pz('mail_smtpauth', true);
+        $phpmailer->SMTPSecure = _pz('mail_smtpsecure', 'ssl');
+    }
+}
+add_action('phpmailer_init', 'zib_mail_smtp');
+```
+
+邮件配置会影响验证码、找回密码、私信通知、站内消息通知、认证审核、举报处理、论坛审核和商城通知等场景。排查邮件问题时应先用后台测试邮件确认 `wp_mail()` 可用，再去看具体业务流程。
+
+主题还通过 `wp_mail` Filter 包装邮件内容，使用 `mail_description`、`mail_more_content` 和 `logo_src` 生成统一邮件模板。扩展邮件通知时建议调用 `zib_send_email()` 或 `wp_mail()`，让它继续经过主题模板过滤，不要单独拼一套邮件 HTML。
+
+## 开启功能前先确认依赖
+
+| 功能           | 先确认                                      |
+| -------------- | ------------------------------------------- |
+| 邮箱验证码注册 | SMTP 测试邮件成功、发件邮箱授权码正确       |
+| 手机验证码     | 短信服务商、签名、模板、余额、接口可用      |
+| 腾讯验证码     | `CaptchaAppId`、`AppSecretKey`、域名白名单  |
+| 第三方登录     | 回调地址、应用密钥、固定链接、HTTPS         |
+| 支付回调       | 公网可访问、HTTPS、伪静态、支付平台回调记录 |
+| 图片灯箱       | 图片结构、懒加载、JS 优化排除               |
+| CDN 缓存       | 登录态、支付、用户中心、Ajax 排除缓存       |
+
+很多“设置开了没效果”并不是设置项没保存，而是依赖没有满足。
+
+## 保存设置后的排查
+
+如果后台保存设置后前台没有变化：
+
+1. 清理浏览器缓存。
+2. 清理 WordPress 缓存插件。
+3. 清理对象缓存，例如 Redis。
+4. 清理服务器缓存，例如 Nginx fastcgi_cache。
+5. 清理 CDN 缓存。
+6. 确认当前页面没有命中旧模板或旧配置。
+7. 搜索源码确认前台读取的是哪个 `_pz()` 配置项。
+
+如果后台保存失败、弹 `undefined` 或一直转圈，优先看 `admin-ajax.php` 请求状态码，再看 PHP 错误日志、WAF、安全插件和 `max_input_vars`。
+
+## 开发者查配置
+
+读取主题设置用 `_pz()`：
+
+```php
+$logo = _pz('logo_src');
+
+if (_pz('imagelightbox')) {
+    // 图片灯箱已开启
+}
+
+$smtp_host = _pz('mail_host', 'smtp.qq.com');
+```
+
+读取数组配置的子项：
+
+```php
+$captcha_appid = _pz('tcaptcha_option', '', 'appid');
+$bind_phone    = _pz('user_bind_option', false, 'bind_phone');
+```
+
+配置项默认值要在读取时兜底。用户可能从旧版本升级，数据库里没有新字段；也可能导入过不完整配置。
+
+## 参考来源
+
+本页吸收了子比官网“主题常用功能设置”类公开教程，并结合当前主题源码中的 `inc/options/admin-options.php`、`inc/options/options-module.php` 和 `_pz()` 读取方式整理为内置知识。

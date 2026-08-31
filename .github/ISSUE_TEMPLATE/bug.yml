@@ -1,0 +1,68 @@
+name: 可复现问题
+description: 报告子比主题、子主题、插件或文档相关的可复现问题
+title: 'bug: '
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先搜索文档和已有 Issue。只报告可以复现、可以定位的问题；敏感信息请使用 Security Advisories 私下提交。
+  - type: input
+    id: environment
+    attributes:
+      label: 版本与环境
+      description: 请填写子比主题、WordPress、PHP、浏览器和相关插件版本。
+      placeholder: 子比主题 7.x / WordPress 6.x / PHP 8.2 / Chrome
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 问题范围
+      options:
+        - 主题源码或子主题
+        - 插件或 Codestar Framework
+        - 用户、论坛或商城
+        - MCP 或 Codex 插件
+        - 文档页面或导航
+        - GitHub Pages 或构建
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: 相关文档或源码路径
+      placeholder: /docs/api/hooks 或 inc/functions/bbs/
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 按顺序写出输入、操作和实际结果。
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 实际结果与期望结果
+      description: 请分别说明现在发生了什么，以及你认为应该发生什么。
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 截图或日志
+      description: 可选。请先删除 API Key、Cookie、密码、个人信息和生产环境地址。
+      render: text
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索文档和已有 Issue，确认不是重复问题。
+          required: true
+        - label: 我已删除 API Key、Cookie、密码、个人信息和其他敏感数据。
+          required: true

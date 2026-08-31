@@ -1,0 +1,451 @@
+---
+title: 站点框架与导航
+description: 扩展子比主题页头、顶部导航、移动菜单、高级子菜单、右侧浮动按钮、手机底部 Tabbar、SEO head 和全局页面框架。
+---
+
+## 模块边界
+
+子比主题的站点框架由根模板和 `inc/functions/zib-*.php` 共同输出。二次开发时不要把顶部导航、移动菜单、底部 Tabbar、右侧浮动按钮和 head 资源当成互不相关的片段，它们共享主题设置、登录态、移动端判断、Ajax 弹窗和前端交互协议。
+
+| 文件                              | 作用                                                                             |
+| --------------------------------- | -------------------------------------------------------------------------------- |
+| `header.php`                      | 输出 HTML head、`wp_head()`、`body_class()`、SEO 预览图和 `zib_header()`         |
+| `inc/functions/zib-head.php`      | 输出 SEO 标题、关键词、描述、favicon、CSS 变量、head 自定义代码                  |
+| `inc/functions/zib-header.php`    | 输出 PC 顶部导航、移动端抽屉菜单、用户下拉卡片、搜索入口、高级子菜单、顶部幻灯片 |
+| `inc/functions/zib-footer.php`    | 输出底部版权区、全局 JS 变量、右侧浮动按钮、移动端底部 Tabbar                    |
+| `inc/options/metabox-options.php` | 注册导航菜单项的 CSF 配置字段                                                    |
+| `inc/options/admin-options.php`   | 注册手机底部 Tabbar、右侧悬浮按钮、页脚等主题设置                                |
+
+页面实际进入顺序是：
+
+```php
+wp_head();
+tb_xzh_head_var();
+body_class(_bodyclass());
+qj_dh_nr();
+zib_seo_image();
+zib_header();
+```
+
+所以扩展页面框架时要优先使用 Hook、Filter、主题设置和模板级 `remove_action()`，不要直接复制 `header.php` 或 `footer.php` 后长期维护两套结构。
+
+## Head 与 SEO 输出
+
+`zib_head()` 挂在 `wp_head`，依次输出：
+
+```php
+function zib_head()
+{
+    zib_head_favicon();
+    zib_head_css();
+    zib_head_code();
+    zib_head_other();
+}
+```
+
+SEO 标题、关键词、描述由 `zib_seo()` 在 `wp_head` 优先级 `1` 输出：
+
+```php
+add_action('wp_head', 'zib_seo', 1);
+```
+
+如果页面不是常规文章、分类或首页，但仍然要让主题输出 SEO 标题，可以使用：
+
+```php
+function zib_docs_enable_custom_page_seo_title()
+{
+    if (!is_page_template('pages/custom-page.php')) {
+        return false;
+    }
+
+    return true;
+}
+add_filter('echo_seo_title', 'zib_docs_enable_custom_page_seo_title');
+```
+
+如果只需要调整页面最大宽度，不要手写一段覆盖所有容器的 CSS。主题会把 `zib_get_page_max_width()` 写入 CSS 变量 `--mian-max-width`，可以通过 `page_max_width` 过滤：
+
+```php
+function zib_docs_custom_page_max_width($width)
+{
+    if (is_page_template('pages/custom-dashboard.php')) {
+        return '1400px';
+    }
+
+    return $width;
+}
+add_filter('page_max_width', 'zib_docs_custom_page_max_width');
+```
+
+`zib_head_code()` 会输出主题设置里的 head 自定义代码。二次开发里如果要追加结构化数据、预加载资源或业务 meta，推荐另挂一个 `wp_head`，并做页面条件判断：
+
+```php
+function zib_docs_output_product_schema()
+{
+    if (!is_singular('post')) {
+        return;
+    }
+
+    echo '<script type="application/ld+json">' . wp_json_encode(array(
+        '@context' => 'https://schema.org',
+        '@type'    => 'Article',
+        'headline' => get_the_title(),
+    ), JSON_UNESCAPED_UNICODE) . '</script>';
+}
+add_action('wp_head', 'zib_docs_output_product_schema', 20);
+```
+
+## 顶部导航结构
+
+`zib_header()` 会根据主题设置输出 PC 顶部导航和移动端抽屉菜单。核心逻辑包括：
+
+| 能力              | 函数或设置                            |
+| ----------------- | ------------------------------------- |
+| PC 导航布局       | `_pz('header_layout', '2')`           |
+| 移动端菜单位置    | `_pz('mobile_navbar_align', 'right')` |
+| 固定导航          | `_pz('nav_fixed', true)`              |
+| 下滚隐藏导航      | `_pz('nav_scroll_down_hide')`         |
+| Logo 与移动端按钮 | `zib_navbar_header()`                 |
+| PC 菜单           | `zib_menu_items('topmenu')`           |
+| 移动菜单          | `zib_nav_mobile('mobilemenu')`        |
+| 顶部搜索          | `zib_get_menu_search()`               |
+| 右侧按钮区        | `zib_menu_button()`                   |
+| 用户下拉卡片      | `zib_header_user_box()`               |
+
+移动菜单优先读取 `mobilemenu`，没有设置时回退到 `topmenu`：
+
+```php
+$args = array(
+    'theme_location' => $location,
+    'container'      => false,
+    'items_wrap'     => '<ul class="mobile-menus theme-box">%3$s</ul>',
+    'walker'         => new zib_walker_nav_menu(),
+);
+```
+
+移动端抽屉底部还会输出 `mobile_nav_fluid` 侧栏：
+
+```php
+dynamic_sidebar('mobile_nav_fluid');
+```
+
+如果只是想给移动菜单底部增加一块内容，优先注册并使用这个侧栏位置，而不是改 `zib_nav_mobile()`。
+
+## 顶部圆形按钮
+
+顶部右侧圆形按钮由 `zib_menu_button()` 组装，主题模式切换、翻译按钮、消息、购物车等都在这里汇合。扩展入口是 `zib_nav_radius_button`：
+
+```php
+$radius_but = apply_filters('zib_nav_radius_button', $radius_but, $user_id);
+```
+
+追加一个按钮时保持主题结构：`toggle-radius` 负责尺寸与圆角，`data-toggle="tooltip"` 负责桌面提示，移动端需要避免 hover 依赖。
+
+```php
+function zib_docs_append_nav_button($html, $user_id)
+{
+    if (!$user_id) {
+        return $html;
+    }
+
+    $url  = esc_url(zib_get_user_center_url('profile'));
+    $icon = zib_get_svg('user', '50 0 924 924');
+
+    $html .= '<a class="toggle-radius ml10" data-toggle="tooltip" title="' . esc_attr__('个人资料', 'zib_language') . '" href="' . $url . '">' . $icon . '</a>';
+
+    return $html;
+}
+add_filter('zib_nav_radius_button', 'zib_docs_append_nav_button', 20, 2);
+```
+
+需要弹窗时，复用主题已有触发类，例如登录用 `signin-loader`，注册用 `signup-loader`，会员支付用 `pay-vip`。不要给导航按钮自己绑定一套重复 Ajax 登录逻辑。
+
+## 用户下拉卡片
+
+`zib_header_user_box()` 会缓存本次请求内的 HTML：
+
+```php
+static $html = null;
+if (null != $html) {
+    return $html;
+}
+```
+
+已登录状态会展示头像、昵称、简介、VIP、徽章、钱包、消息、用户中心、订单、发布、退出；管理员还会显示主题设置、模块布局、商城中心和后台入口。未登录状态会展示登录、注册、找回密码和会员入口。
+
+如果要调整用户卡片内容，优先使用已有用户中心、消息、钱包、签到、发布按钮等函数组合，而不是直接查询订单或余额。这里是全站导航位置，任何慢查询都会影响所有页面首屏。
+
+## 菜单项配置
+
+主题通过 Codestar Framework 给 WordPress 菜单项增加 `zib_menu_options`：
+
+| 字段                      | 作用                                   |
+| ------------------------- | -------------------------------------- |
+| `icon`                    | 菜单标题前的图标                       |
+| `badge`                   | 菜单标题后的徽章                       |
+| `badge_class`             | 徽章颜色                               |
+| `submenu_s`               | 是否启用高级子菜单                     |
+| `submenu_type`            | `graphic_card` 或 `multi_column_links` |
+| `graphic_card_opts`       | 图文卡片菜单配置                       |
+| `multi_column_links_opts` | 多栏目链接菜单配置                     |
+
+读取菜单项配置统一使用：
+
+```php
+function zib_menu_pz($id, $key = '', $default = '')
+{
+    static $options = array();
+    if (!isset($options[$id])) {
+        $options[$id] = get_post_meta($id, 'zib_menu_options', true);
+    }
+
+    return zib_get_array_value($options[$id], $key, $default);
+}
+```
+
+新增菜单项展示能力时，应该扩展 `zib_menu_options` 的字段，然后在 Walker 或 Filter 中读取。不要把复杂业务数据塞进菜单标题 HTML。
+
+## 高级子菜单
+
+`zib_walker_nav_menu` 会处理图标、徽章和高级子菜单。高级子菜单只对一级菜单生效：
+
+```php
+if (zib_menu_pz($item->ID, 'submenu_s') && $depth == 0) {
+    $submenu = self::submenu($item->ID);
+}
+```
+
+当高级子菜单存在时，主题会把当前菜单项标记为 `menu-item-has-children`，并通过 `self::$submenu_ids` 跳过原始子项目：
+
+```php
+if (!empty($element->menu_item_parent) && in_array($element->menu_item_parent, self::$submenu_ids)) {
+    return '';
+}
+```
+
+这意味着高级子菜单不是“在原始子菜单后面追加一块内容”，而是替换当前一级菜单下的默认子项目。开发和运营配置时要避免同时维护两套子菜单来源。
+
+图文卡片菜单要求每个项目至少有图片：
+
+```php
+if (empty($args['img'])) {
+    return '';
+}
+```
+
+多栏目链接菜单要求栏目或链接项有标题：
+
+```php
+if (!$title) {
+    return '';
+}
+```
+
+因此配置数据要做完整性检查。不要期望空标题、空图片或空链接能在前台自动补齐。
+
+## 顶部幻灯片
+
+`zib_header_slide_is_show()` 决定是否显示顶部幻灯片。它会综合：
+
+- 页面独立设置。
+- 全局主题设置。
+- PC 或移动端显示范围。
+- 首页、分类页、标签页、专题页、论坛首页、论坛版块、论坛帖子等页面类型。
+
+`zib_header_slide()` 会把幻灯片、搜索框和卡片模块组合在 `.header-slider-container` 内。扩展顶部首屏时不要只判断 `is_home()`，还要考虑分类、论坛、专题和移动端显示条件。
+
+如果某个自定义页面不适合显示全局顶部幻灯片，可以在模板层决定不调用主题 header，或在更早的页面逻辑中通过页面 Meta/主题设置控制显示范围。不要用 CSS 把整块幻灯片隐藏掉，因为搜索模块、卡片模块和导航配色也会跟着变化。
+
+## 右侧浮动按钮
+
+右侧浮动按钮由 `zib_float_right()` 在 `wp_footer` 输出：
+
+```php
+add_action('wp_footer', 'zib_float_right');
+```
+
+主题设置里的按钮类型包括：主题模式、购物车、返回顶部、QQ、会员、微信二维码、页面二维码、发布按钮和自定义更多按钮。最终 HTML 会经过：
+
+```php
+$btn = apply_filters('zib_float_right', $btn);
+```
+
+追加按钮示例：
+
+```php
+function zib_docs_append_float_button($btn)
+{
+    if (wp_is_mobile()) {
+        return $btn;
+    }
+
+    $btn .= '<a class="float-btn" data-toggle="tooltip" data-placement="left" title="' . esc_attr__('帮助中心', 'zib_language') . '" href="' . esc_url(home_url('/help')) . '">';
+    $btn .= '<i class="fa fa-question-circle"></i>';
+    $btn .= '</a>';
+
+    return $btn;
+}
+add_filter('zib_float_right', 'zib_docs_append_float_button', 20);
+```
+
+如果按钮是二维码、说明卡片或浮层内容，使用主题已有结构：
+
+```php
+function zib_docs_append_float_hover_button($btn)
+{
+    $hover = '<div class="hover-show-con dropdown-menu"><div class="padding-10">' . esc_html__('客服时间：工作日 10:00-18:00', 'zib_language') . '</div></div>';
+
+    $btn .= '<span class="float-btn hover-show nowave">';
+    $btn .= '<i class="fa fa-info-circle"></i>' . $hover;
+    $btn .= '</span>';
+
+    return $btn;
+}
+add_filter('zib_float_right', 'zib_docs_append_float_hover_button', 25);
+```
+
+浮动按钮区域有滚动隐藏、下滚隐藏、移动端过滤、圆形或方形样式等主题设置。自定义按钮不要写固定 `position: fixed`，直接拼进 `$btn` 让主题容器统一控制。
+
+## 手机底部 Tabbar
+
+手机底部 Tabbar 由 `zib_footer_tabbar()` 在 `wp_footer` 输出，只在 `wp_is_mobile()` 为真时运行：
+
+```php
+if (!wp_is_mobile()) {
+    return;
+}
+```
+
+主题会先执行：
+
+```php
+$btn = apply_filters('footer_tabbar', false);
+```
+
+如果返回值仍是 `false`，才读取主题设置 `footer_tabbar` 自动生成默认按钮。因此：
+
+| 需求                       | 推荐做法                                          |
+| -------------------------- | ------------------------------------------------- |
+| 完全使用主题设置           | 不处理 `footer_tabbar`                            |
+| 某些页面替换底部按钮       | 在 `footer_tabbar` 返回完整按钮 HTML              |
+| 文章页追加文章动作         | 参考 `zib_get_single_footer_tabbar()`             |
+| 商品页、帖子页显示业务按钮 | 在业务模块里过滤 `footer_tabbar`                  |
+| 某些页面完全隐藏           | `remove_action('wp_footer', 'zib_footer_tabbar')` |
+
+主题官网公开教程对这个功能的定位很明确：它是移动端固定底部操作区，支持按钮排序、自定义图标、自定义文字、自定义尺寸、徽章、滚动隐藏、首页切换返回顶部、消息未读数量、投稿发帖入口，以及内容页自动显示评论、点赞、收藏、分享、购买等动作。
+
+自定义某个页面的底部按钮：
+
+```php
+function zib_docs_custom_footer_tabbar($btn)
+{
+    if (!is_page('help')) {
+        return $btn;
+    }
+
+    $btn = '';
+    $btn .= zib_get_footer_tabbar_btn(zib_get_svg('home'), __('首页', 'zib_language'), home_url(), 'tabbar-home');
+    $btn .= zib_get_footer_tabbar_btn('<i class="fa fa-search"></i>', __('搜索', 'zib_language'), home_url('/?s='), 'tabbar-search');
+    $btn .= zib_get_footer_tabbar_btn(zib_get_svg('user'), __('我的', 'zib_language'), zib_get_user_center_url(), 'tabbar-user', '', 24, ' rel="nofollow"');
+
+    return $btn;
+}
+add_filter('footer_tabbar', 'zib_docs_custom_footer_tabbar', 20);
+```
+
+`zib_get_footer_tabbar_btn()` 会生成统一结构：
+
+```php
+<a class="tabbar-item" href="...">
+    <icon>...</icon>
+    <text>...</text>
+    <badge>...</badge>
+</a>
+```
+
+按钮数量不宜过多。文字为空时最好所有按钮都为空，避免底部栏高度和视觉重心不一致。
+
+## 内容页底部动作
+
+文章页的底部 Tabbar 可以由 `footer_tabbar_single` 设置切换为内容动作。主题内置的 `zib_get_single_footer_tabbar()` 会输出：
+
+- 评论按钮。
+- 点赞按钮。
+- 收藏按钮。
+- 分享按钮。
+- 付费内容购买按钮。
+
+论坛帖子和商城商品也会在各自模块中过滤 `footer_tabbar`，输出帖子评分、评论、购买等业务动作。因此不要在全局 `footer_tabbar` 里无条件覆盖 `$btn`，否则会把文章页、帖子页、商品页的业务按钮覆盖掉。
+
+更稳妥的写法是只处理明确页面：
+
+```php
+function zib_docs_keep_business_tabbar($btn)
+{
+    if (is_singular(array('post', 'forum_post', 'shop_product'))) {
+        return $btn;
+    }
+
+    return $btn;
+}
+add_filter('footer_tabbar', 'zib_docs_keep_business_tabbar', 5);
+```
+
+## 全屏页面移除框架组件
+
+登录页、投稿页、论坛编辑页、购物车页等特殊页面会按需要移除底部 Tabbar、右侧浮动按钮或购物车导航按钮。自定义全屏页面也应该在页面条件明确后移除：
+
+```php
+function zib_docs_clean_fullscreen_frame()
+{
+    if (!is_page_template('pages/custom-fullscreen.php')) {
+        return;
+    }
+
+    remove_action('wp_footer', 'zib_footer_tabbar');
+    remove_action('wp_footer', 'zib_float_right');
+}
+add_action('wp', 'zib_docs_clean_fullscreen_frame', 20);
+```
+
+如果还需要移除模块自己加到导航的按钮，使用对应模块的 Filter 或 Action，而不是隐藏 `.navbar-form` 整个区域。整块隐藏会同时影响搜索、登录、消息、购物车、主题模式和翻译按钮。
+
+## 多语言按钮
+
+顶部和移动菜单会调用 `zib_get_translate_language_btn()`。它读取：
+
+```php
+_pz('translate_s');
+_pz('translate_buttons', array());
+```
+
+每个按钮会生成：
+
+```php
+<a href="javascript:;" class="translate-button translate-ignore flex ac" data-language="...">...</a>
+```
+
+扩展翻译或语言切换时保留 `translate-button`、`translate-ignore` 和 `data-language`，这样主题前端脚本才能接管点击行为。
+
+## 开发检查
+
+| 场景           | 应检查                                                           |
+| -------------- | ---------------------------------------------------------------- |
+| 顶部新增按钮   | 登录态、移动端 hover、暗黑模式、主题模式切换位置                 |
+| 菜单项新增字段 | CSF 字段、`zib_menu_pz()` 读取、菜单缓存清理                     |
+| 高级子菜单     | 是否一级菜单、是否会替换原始子项、移动端是否过宽                 |
+| 浮动按钮       | PC/移动显示开关、滚动隐藏、tooltip、二维码浮层宽度               |
+| 底部 Tabbar    | 只在移动端显示、内容页业务按钮是否被覆盖、按钮数量和安全区       |
+| 全屏模板       | 是否移除 Tabbar、浮动按钮、页面缓存和多余导航入口                |
+| Head 扩展      | 是否重复输出 title、canonical、description、favicon 或结构化数据 |
+
+## 常见误区
+
+- 不要复制 `zib_header()` 后改一份自己的导航，后续主题升级会很难合并。
+- 不要在菜单标题里塞复杂 HTML 和业务数据，应该用 `zib_menu_options`。
+- 不要把高级子菜单理解成默认子菜单的补充，它会替换当前一级菜单下的原始子项目。
+- 不要在全局 `footer_tabbar` 里无条件返回新 HTML，内容页业务动作会被覆盖。
+- 不要用 CSS 隐藏右侧浮动按钮或底部 Tabbar，应该在模板或 Hook 层移除。
+- 不要在 head 里重复输出 SEO 标签；特殊页面只需要开启 `echo_seo_title` 或单独补充缺失字段。
+
+本页根据 `header.php`、`inc/functions/zib-head.php`、`inc/functions/zib-header.php`、`inc/functions/zib-footer.php`、`inc/options/metabox-options.php`、`inc/options/admin-options.php`，以及子比主题官网公开的手机底部 Tabbar 教程蒸馏整理。

@@ -1,0 +1,29 @@
+{
+  "name": "zibll-wp-ai-dev",
+  "version": "0.1.0",
+  "description": "Specialized Codex guidance for WordPress AI Client, Abilities API, AI providers and Zibll AI feature development.",
+  "author": {
+    "name": "子比主题开发文档"
+  },
+  "homepage": "https://dearlicy.github.io/zibll-docs/docs/ai/codex-plugin",
+  "keywords": ["wordpress", "ai-client", "abilities-api", "zibll", "mcp"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "WordPress AI 开发助手",
+    "shortDescription": "专注 WP AI Client、Abilities API、Provider 和子比 AI 二开。",
+    "longDescription": "面向 WordPress AI Client 和子比主题 AI 功能二开的专业 Codex 插件。它会指导 Codex 读取本站 WordPress AI 开发分类，理解 Ability、AI Client、Provider、Connector、权限和自动化边界，并在用户只提供子比主题源码时继续定位主题字段、Hook、Ajax 和扩展落点。",
+    "developerName": "Zibll Docs",
+    "category": "Productivity",
+    "capabilities": ["Documentation", "MCP", "WordPress AI"],
+    "websiteURL": "https://dearlicy.github.io/zibll-docs",
+    "defaultPrompt": [
+      "根据子比源码写一个 AI SEO Ability",
+      "解释 WP AI Client 和 Provider 怎么接入",
+      "只给主题源码时帮我设计 AI 二开方案"
+    ],
+    "brandColor": "#1EBC44",
+    "composerIcon": "./assets/favicon.svg",
+    "logo": "./assets/favicon.svg"
+  },
+  "mcpServers": "./.mcp.json"
+}

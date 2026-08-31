@@ -1,0 +1,432 @@
+---
+title: 短信验证码服务
+description: 梳理子比主题手机验证码、ZibSMS 服务商分发、阿里云、腾讯云、短信宝、风吹雨配置、发送测试和二次开发边界。
+---
+
+## 模块定位
+
+短信验证码是用户系统的一部分，不是独立登录系统。注册验证码、免密登录验证码、绑定手机号、换绑手机号和旧账号验证都会先进入主题验证码层，再由 `ZibSMS` 把验证码交给具体短信服务商发送。
+
+| 位置                            | 作用                                                    |
+| ------------------------------- | ------------------------------------------------------- |
+| `inc/class/sms-class.php`       | `ZibSMS` 统一发送入口、手机号格式判断、各短信服务商适配 |
+| `action/function.php`           | 生成验证码、保存 session、发送间隔、验证码校验          |
+| `action/sign_register.php`      | 注册验证码、免密登录验证码、找回密码验证码              |
+| `action/user.php`               | 绑定手机、换绑手机、旧账号验证                          |
+| `inc/options/admin-options.php` | 后台短信接口配置、短信测试表单                          |
+
+读短信问题时要分三层看：
+
+| 层级     | 常见问题                                                           |
+| -------- | ------------------------------------------------------------------ |
+| 表单层   | 是否启用了手机验证码、手机号输入是否正确、nonce 和人机验证是否通过 |
+| 验证码层 | 60 秒发送间隔、30 分钟有效期、session 里绑定的接收对象是否一致     |
+| 服务商层 | 服务商选择、签名、模板、密钥、余额、平台审核和服务器外连           |
+
+## 发送链路
+
+主题发送短信验证码的入口不是直接调用某个服务商 SDK，而是先走 `zib_send_captcha()`：
+
+```php
+function zib_send_captcha($to, $type = 'email')
+{
+    @session_start();
+    $code = zib_get_captcha(6);
+
+    $_SESSION['zib_captcha']         = $code;
+    $_SESSION['zib_verification_to'] = $to;
+
+    switch ($type) {
+        case 'phone':
+            $result = ZibSMS::send($to, $code);
+            if (!empty($result['result'])) {
+                $result['msg'] = __('验证码短信已发送', 'zib_language');
+            }
+            return $result;
+    }
+}
+```
+
+验证码发送前会记录：
+
+| session key               | 作用                         |
+| ------------------------- | ---------------------------- |
+| `zib_captcha`             | 本次 6 位数字验证码          |
+| `zib_verification_to`     | 本次验证码绑定的邮箱或手机号 |
+| `zib_captcha_time`        | 最近一次发送时间             |
+| `zib_captcha_check_count` | 验证码检查次数               |
+| `zib_captcha_check_time`  | 最近一次检查时间             |
+
+同一会话 60 秒内不能重复发送。验证码校验时还会检查接收对象，所以“给 A 手机号发验证码，再拿来绑定 B 手机号”会失败。
+
+## ZibSMS 统一入口
+
+`ZibSMS::send()` 负责手机号格式检查、读取后台服务商配置，并分发到具体发送函数：
+
+```php
+class ZibSMS
+{
+    public static $to   = '';
+    public static $code = '';
+    public static $time = '30';
+
+    public static function send($to, $code, $sdk = '')
+    {
+        if (!self::is_phonenumber($to)) {
+            return array('error' => 1, 'ys' => 'danger', 'to' => $to, 'msg' => __('手机号码格式有误', 'zib_language'));
+        }
+
+        $sdk = $sdk ? $sdk : _pz('sms_sdk');
+        if (!$sdk) {
+            return array('error' => 1, 'ys' => 'danger', 'to' => $to, 'msg' => __('暂无短信接口，请与客服联系', 'zib_language'));
+        }
+
+        self::$to   = $to;
+        self::$code = $code;
+
+        switch ($sdk) {
+            case 'ali':
+                $result = self::ali_send($to, $code);
+                break;
+            case 'tencent':
+                $result = self::tencent_send($to, $code);
+                break;
+            case 'smsbao':
+                $result = self::smsbao_send();
+                break;
+            case 'fcykj':
+                $result = self::fcykj_send();
+                break;
+        }
+
+        return $result;
+    }
+}
+```
+
+`$sdk` 可以显式传入，也可以读取后台配置 `_pz('sms_sdk')`。正常业务流程都应该让后台配置决定当前服务商，只有后台测试、临时迁移或扩展适配时才考虑显式传值。
+
+## 后台配置项
+
+后台短信接口配置在“用户互动 / 短信接口”下，核心字段是：
+
+| 配置项                | 作用                                                |
+| --------------------- | --------------------------------------------------- |
+| `sms_sdk`             | 当前短信服务商：`ali`、`tencent`、`smsbao`、`fcykj` |
+| `sms_number_limit_ch` | 是否限制为中国大陆手机号格式                        |
+| `sms_ali_option`      | 阿里云短信或号码认证配置                            |
+| `sms_tencent_option`  | 腾讯云短信配置                                      |
+| `sms_smsbao_option`   | 短信宝配置                                          |
+| `sms_fcykj_option`    | 风吹雨短信配置                                      |
+
+短信接口配置只决定“验证码能不能发出去”。要让用户真正能使用手机号，还需要回到注册登录和用户设置里开启对应功能，例如手机验证码注册、手机号登录、免密登录、手机绑定等。
+
+## 手机号格式
+
+手机号校验由 `ZibSMS::is_phonenumber()` 控制：
+
+```php
+public static function is_phonenumber($to)
+{
+    $sms_number_limit_ch = _pz('sms_number_limit_ch', true);
+
+    return $sms_number_limit_ch
+        ? preg_match("/^1[3-9]{1}\d{9}$/", $to)
+        : preg_match("/^(?:\d{5,}|\+\d{6,}|[\+]?\d{2,}[\-\s]\d{2,}[0-9|\-|\s]{0,15})$/", $to);
+}
+```
+
+开启 `sms_number_limit_ch` 时，只允许中国大陆 11 位手机号。关闭后会放宽为国际号码、带 `+`、空格或短横线的号码。
+
+如果服务商只开通了国内短信，不要为了让前端格式通过而关闭国内手机号限制；否则表单可以提交，但服务商仍可能因为目标号码、签名或模板范围不支持而失败。
+
+## 阿里云短信
+
+阿里云配置保存在 `sms_ali_option`。主题支持两种产品：
+
+| 产品             | `api_type` | 适用场景                             |
+| ---------------- | ---------- | ------------------------------------ |
+| 短信服务         | `sms`      | 企业认证、备案站点、自定义签名和模板 |
+| 号码认证短信认证 | `verify`   | 个人或企业均可用，签名由阿里云分配   |
+
+普通短信服务要求：
+
+| 字段            | 说明                                        |
+| --------------- | ------------------------------------------- |
+| `keyid`         | AccessKey Id                                |
+| `keysecret`     | AccessKey Secret                            |
+| `sign_name`     | 已审核通过的短信签名                        |
+| `template_code` | 已审核通过的模板 CODE，例如 `SMS_207952000` |
+
+发送时会请求 `dysmsapi.aliyuncs.com`，模板参数只有 `code`：
+
+```php
+$params['PhoneNumbers']  = $to;
+$params['SignName']      = $sign_name;
+$params['TemplateCode']  = $template_code;
+$params['TemplateParam'] = json_encode(array(
+    'code' => $code,
+));
+```
+
+号码认证短信认证会请求 `dypnsapi.aliyuncs.com`，模板 Code 固定为 `100001`，模板参数包含验证码和有效时间：
+
+```php
+$params['PhoneNumber']   = $to;
+$params['SignName']      = $sign_name;
+$params['TemplateCode']  = '100001';
+$params['TemplateParam'] = json_encode(array(
+    'code' => $code,
+    'min'  => self::$time,
+));
+```
+
+阿里云失败时通常返回 `Code` 和 `Message`。主题会把它们拼入前台错误消息：
+
+```php
+$toArray['msg'] = $toArray['Message'] . ' | ' . __('错误码:', 'zib_language') . ' ' . $toArray['Code'];
+```
+
+排查时优先看：
+
+| 现象         | 检查                                                                  |
+| ------------ | --------------------------------------------------------------------- |
+| 缺少配置参数 | `keyid`、`keysecret`、`sign_name`、`template_code` 是否保存           |
+| 签名错误     | 平台签名是否已审核，填写时是否包含多余空格                            |
+| 模板错误     | `template_code` 是否是模板 CODE，不是模板名称                         |
+| 地域问题     | 主题普通发送最终固定 `RegionId=cn-hangzhou`，不要把失败误判为前端问题 |
+| 服务商拒绝   | 控制台是否有资质、签名、模板、余额和频率限制提示                      |
+
+## 腾讯云短信
+
+腾讯云配置保存在 `sms_tencent_option`。当前主题实际使用的是旧版 `Qcloud\Sms\SmsSingleSender` 路径：
+
+| 字段          | 说明           |
+| ------------- | -------------- |
+| `app_id`      | SDK AppID      |
+| `app_key`     | App Key        |
+| `sign_name`   | 已审核短信签名 |
+| `template_id` | 已审核模板 ID  |
+
+发送时固定国家码为 `86`，模板参数是验证码和有效时间：
+
+```php
+$ssender = new SmsSingleSender($app_id, $app_key);
+$result  = $ssender->sendWithParam('86', $to, $template_id, array($code, '30'), $sign_name);
+```
+
+腾讯云模板需要两个变量，类似“您的验证码为 {1}，{2} 分钟内有效”。如果模板只有一个变量，主题仍会传两个参数，平台可能返回模板参数不匹配。
+
+主题内还保留了 `tencent_send_2()`，它使用腾讯云 PHP SDK 3.0 的 `SmsClient`、`SecretId` 和 `SecretKey`。但默认 `send()` 分支调用的是 `tencent_send()`，后台字段也以 SDK AppID 和 AppKey 为主。扩展时不要误把 `SecretId` 填到 `App Key` 字段里。
+
+## 短信宝
+
+短信宝配置保存在 `sms_smsbao_option`：
+
+| 字段       | 说明                                   |
+| ---------- | -------------------------------------- |
+| `userame`  | 短信宝用户名，源码字段名就是 `userame` |
+| `password` | 短信宝密码                             |
+| `api_key`  | 可选，优先作为接口密钥                 |
+| `template` | 模板内容，必须包含 `{code}`            |
+
+主题会把 `{code}` 替换为验证码，把 `{time}` 替换为 `ZibSMS::$time`：
+
+```php
+$content = str_replace('{code}', self::$code, $cofig['template']);
+$content = str_replace('{time}', self::$time, $content);
+$sendurl = $smsapi . 'sms?u=' . $user . '&p=' . $pass . '&m=' . self::$to . '&c=' . urlencode($content);
+```
+
+短信宝返回数字状态码。主题已内置常见错误文案：
+
+| 状态码 | 含义                         |
+| ------ | ---------------------------- |
+| `0`    | 发送成功                     |
+| `-1`   | 参数不全                     |
+| `-2`   | 服务器不支持 curl 或 fsocket |
+| `30`   | 密码错误                     |
+| `40`   | 账号不存在                   |
+| `41`   | 余额不足                     |
+| `42`   | 账号过期                     |
+| `43`   | IP 地址限制                  |
+| `50`   | 内容含敏感词                 |
+| `51`   | 手机号码不正确               |
+
+短信宝最容易出错的是模板没有 `{code}`。主题会直接返回：
+
+```php
+return array('error' => 1, 'ys' => 'danger', 'msg' => __('短信宝：模板内容缺少{code}变量符', 'zib_language'));
+```
+
+## 风吹雨短信
+
+风吹雨配置保存在 `sms_fcykj_option`：
+
+| 字段          | 说明       |
+| ------------- | ---------- |
+| `appid`       | Appid      |
+| `auth_token`  | Auth Token |
+| `template_id` | 模板 ID    |
+
+发送接口是：
+
+```txt
+https://sms.fcykj.net/api.php/Interfaced/sms_single
+```
+
+主题后台已经提示此接口因平台调整可能无法使用。保留这个分支更多是兼容历史站点，新站优先使用阿里云、腾讯云或短信宝。
+
+## 后台发送测试
+
+后台短信接口配置末尾有测试表单，会提交 `test_send_sms`，并发送验证码 `888888` 给输入手机号。这个测试可以验证：
+
+- `sms_sdk` 是否选中。
+- 服务商配置是否完整。
+- 服务器是否能访问服务商接口。
+- 签名和模板是否已审核通过。
+- 手机号格式是否被 `sms_number_limit_ch` 拦截。
+- 平台余额、IP 白名单和发送频率是否正常。
+
+后台测试成功只能说明“服务商通道可用”。注册、登录和绑定手机仍然可能因为 nonce、人机验证、发送间隔、手机号已绑定、旧账号未验证等业务条件失败。
+
+## 前台使用场景
+
+短信验证码会被这些功能复用：
+
+| 场景           | Ajax action             | 说明                                       |
+| -------------- | ----------------------- | ------------------------------------------ |
+| 注册验证码     | `signup_captcha`        | 由 `captch_type` 决定是否允许手机          |
+| 免密登录验证码 | `signin_captcha`        | 由 `user_signin_nopas_type` 决定短信或邮箱 |
+| 找回密码验证码 | `resetpassword_captcha` | 由 `user_repas_captch_type` 决定           |
+| 绑定手机验证码 | `bind_phone_captcha`    | 已登录用户绑定或换绑手机                   |
+| 旧账号验证     | `verify_user_captcha`   | 换绑前验证当前已绑定手机                   |
+
+注册登录表单由 `zib_get_sign_captch()` 输出。它不只是一个验证码输入框，还会输出接收对象输入、人机验证、发送按钮、`captcha_type` 隐藏字段和 nonce。扩展时不要只复制其中一段 HTML。
+
+## 绑定手机流程
+
+绑定手机分为“发送新手机号验证码”和“提交绑定”两步。
+
+发送验证码：
+
+```php
+function zib_ajax_bind_phone_captcha()
+{
+    $captcha = zib_ajax_captcha_form_judgment('phone');
+    $phone   = get_user_meta($cuid, 'phone_number', true);
+
+    if ($phone == $_POST['phone']) {
+        echo(json_encode(array('error' => 1, 'msg' => __('手机号不能与现手机号相同', 'zib_language'))));
+        exit();
+    }
+
+    zib_ajax_man_machine_verification('img_yz_bind_phone_captcha');
+    zib_ajax_verify_nonce();
+
+    if (zib_get_user_by('phone', $_POST['phone'])) {
+        echo(json_encode(array('error' => 1, 'msg' => __('该手机号已被绑定', 'zib_language'))));
+        exit();
+    }
+
+    zib_ajax_send_captcha('phone', $_POST['phone'], false);
+}
+```
+
+提交绑定时还会校验验证码、旧手机验证状态，并写入 `phone_number` 用户 meta。绑定成功后会触发：
+
+```php
+do_action('zib_user_update_bind_phone', $cuid, $captcha_val, $old_phone);
+do_action('zib_user_bind_phone', $cuid, $captcha_val, $old_phone);
+```
+
+扩展同步外部系统时挂 Hook：
+
+```php
+function zib_docs_user_phone_bound($user_id, $phone, $old_phone)
+{
+    if (!$user_id || !$phone) {
+        return;
+    }
+
+    zib_update_user_meta($user_id, 'docs_phone_sync_time', current_time('mysql'));
+}
+add_action('zib_user_bind_phone', 'zib_docs_user_phone_bound', 10, 3);
+```
+
+不要在前端传 `user_id` 后直接更新 `phone_number`。手机绑定是敏感操作，必须以当前登录用户、nonce、人机验证、验证码和唯一性校验为准。
+
+## 扩展新短信服务商
+
+推荐做法是保留主题验证码层，只替换服务商发送层。可以通过子主题或插件在确认类存在后包一层自己的发送函数，或者在主题可控的扩展环境中增加新的 `sdk` 分支。
+
+扩展时返回结构要与主题一致：
+
+```php
+function zib_docs_sms_send($to, $code)
+{
+    if (!ZibSMS::is_phonenumber($to)) {
+        return array('error' => 1, 'ys' => 'danger', 'msg' => __('手机号码格式有误', 'zib_language'));
+    }
+
+    $response = array(
+        'ok'      => true,
+        'message' => '',
+    );
+
+    if (!empty($response['ok'])) {
+        return array(
+            'error'  => 0,
+            'result' => true,
+            'msg'    => __('短信已发送', 'zib_language'),
+        );
+    }
+
+    return array(
+        'error'  => 1,
+        'ys'     => 'danger',
+        'result' => false,
+        'msg'    => __('短信发送失败', 'zib_language'),
+    );
+}
+```
+
+重点是不要重写注册、登录、绑定手机 Ajax。否则很容易漏掉人机验证、发送间隔、session 接收对象绑定、手机号唯一性和错误频率限制。
+
+## 缓存和安全边界
+
+短信验证码依赖 PHP session、nonce 和动态 Ajax，不能被页面缓存固定。至少排除：
+
+```txt
+/wp-admin/admin-ajax.php
+/wp-login.php
+/user
+/oauth
+```
+
+这些场景不要做：
+
+- 不要把验证码、短信平台密钥、平台完整响应写到前台 HTML。
+- 不要把 `sms_ali_option`、`sms_tencent_option` 等配置输出给浏览器。
+- 不要让游客调用任意手机号短信测试接口。
+- 不要在错误消息里暴露服务器路径、SDK 堆栈或完整请求参数。
+- 不要把短信验证码有效期改得过长。
+
+## 故障速查
+
+| 现象                     | 优先检查                                                               |
+| ------------------------ | ---------------------------------------------------------------------- |
+| 提示暂无短信接口         | `sms_sdk` 是否选择服务商                                               |
+| 提示缺少配置参数         | 当前服务商的必填字段是否保存                                           |
+| 提示手机号格式错误       | `sms_number_limit_ch` 和目标号码格式                                   |
+| 60 秒内不能重发          | `zib_captcha_time` 发送间隔正常生效                                    |
+| 验证码发送成功但校验失败 | session 是否一致、接收手机号是否变化、验证码是否过期                   |
+| 阿里云发送失败           | AccessKey、签名、模板 CODE、产品类型、余额、平台审核                   |
+| 腾讯云发送失败           | SDK AppID、AppKey、签名、模板 ID、模板变量数量                         |
+| 短信宝发送失败           | 用户名、密码或 ApiKey、模板 `{code}`、余额、IP 限制                    |
+| 后台测试成功但前台失败   | nonce、人机验证、手机号已绑定、旧手机未验证                            |
+| 前端按钮无反应           | Network 是否有 `admin-ajax.php`，表单是否带正确 `action` 和 `_wpnonce` |
+
+## 参考来源
+
+本页根据 `inc/class/sms-class.php`、`action/function.php`、`action/sign_register.php`、`action/user.php`、`inc/options/admin-options.php`、[账户与验证码](/docs/guide/account-verification)、[邮件、SMTP 与验证码](/docs/api/email-smtp-notifications) 和 [用户系统](/docs/api/user-system) 蒸馏整理。

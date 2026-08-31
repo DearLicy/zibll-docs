@@ -1,0 +1,73 @@
+import type { Locale } from '@/lib/i18n';
+
+export const uiTranslations: Record<Locale, Record<string, string>> = {
+  zh: {
+    'Back to Home(404 page)': '返回首页',
+    'Choose a language(language switcher)': '选择语言',
+    'Choose a language(language switcher)(aria-label)': '选择语言',
+    'Close Banner(banner)(aria-label)': '关闭横幅',
+    'Close Search(search dialog)(aria-label)': '关闭搜索',
+    'Collapse Sidebar(sidebar)(aria-label)': '收起侧边栏',
+    'Copied Text(code block)(aria-label)': '已复制文本',
+    'Copy Anchor Link(heading anchor)(aria-label)': '复制锚点链接',
+    'Copy Link(accordion)(aria-label)': '复制链接',
+    'Copy Markdown(page actions)': '复制 Markdown',
+    'Copy Text(code block)(aria-label)': '复制文本',
+    'Dark(theme switcher)(aria-label)': '深色',
+    'Default(type table)': '默认值',
+    'Edit on GitHub(edit page)': '在 GitHub 上编辑',
+    'Last updated on(page footer)': '最后更新于',
+    'Light(theme switcher)(aria-label)': '浅色',
+    'Next Page(pagination)': '下一页',
+    'No Headings(table of contents)': '暂无目录',
+    'No results found(search dialog)': '没有找到结果',
+    'On this page(table of contents)': '本页目录',
+    'Open Search(search trigger)(aria-label)': '打开搜索',
+    'Open Sidebar(sidebar)(aria-label)': '打开侧边栏',
+    'Open in ChatGPT(page actions)': '在 ChatGPT 中打开',
+    'Open in Claude(page actions)': '在 Claude 中打开',
+    'Open in Cursor(page actions)': '在 Cursor 中打开',
+    'Open in GitHub(page actions)': '在 GitHub 中打开',
+    'Open in Scira AI(page actions)': '在 Scira AI 中打开',
+    'Open(page actions)': '打开',
+    'Page Not Found(404 page)': '页面不存在',
+    'Parameters(type table)': '参数',
+    'Previous Page(pagination)': '上一页',
+    'Prop(type table)': '属性',
+    'Read {url}, I want to ask questions about it.(page actions)':
+      '请阅读 {url}，我想围绕这个页面提问。',
+    'Returns(type table)': '返回值',
+    'Search(search dialog)': '搜索',
+    'Search(search trigger)': '搜索文档',
+    'System(theme switcher)(aria-label)': '跟随系统',
+    'Table of Contents(inline table of contents)': '目录',
+    'The page you are looking for might have been removed, had its name changed, or is temporarily unavailable.(404 page)':
+      '你访问的页面可能已被删除、改名或暂时不可用。',
+    'Toggle Menu(mobile menu)(aria-label)': '展开或收起菜单',
+    'Toggle Theme(theme switcher)(aria-label)': '切换主题',
+    'Type(type table)': '类型',
+    'View as Markdown(page actions)': '查看 Markdown',
+    displayName: '简体中文',
+  },
+  en: {
+    'Choose a language(language switcher)': 'Choose a language',
+    'Choose a language(language switcher)(aria-label)': 'Choose a language',
+    'Copy Markdown(page actions)': 'Copy Markdown',
+    'Search(search trigger)': 'Search docs',
+    displayName: 'English',
+  },
+  ja: {
+    'Choose a language(language switcher)': '言語を選択',
+    'Choose a language(language switcher)(aria-label)': '言語を選択',
+    'Copy Markdown(page actions)': 'Markdownをコピー',
+    'Search(search trigger)': 'ドキュメントを検索',
+    displayName: '日本語',
+  },
+};
+
+export const localeOptions = (Object.keys(uiTranslations) as Locale[]).map(
+  (locale) => ({
+    locale,
+    name: uiTranslations[locale].displayName,
+  }),
+);

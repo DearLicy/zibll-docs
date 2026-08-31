@@ -1,0 +1,709 @@
+---
+title: 媒体上传
+description: 说明子比主题前台上传、分片上传、图片审核、媒体库隔离、附件归属、特色媒体编辑和下载计数的开发边界。
+---
+
+## 模块入口
+
+媒体上传贯穿文章、论坛、评论、私信、用户头像、封面、收款码、商品评价和附件下载。
+
+| 文件                               | 作用                                               |
+| ---------------------------------- | -------------------------------------------------- |
+| `inc/functions/zib-attachment.php` | 上传限制、MIME、媒体库隔离、上传封装、附件数据整理 |
+| `action/main.php`                  | 前台普通上传、当前用户附件列表、搜索框             |
+| `action/media.php`                 | 图片上传、分片上传、附件下载                       |
+| `action/user.php`                  | 头像、封面、收款码上传保存                         |
+| `inc/functions/bbs/inc/edit.php`   | 论坛发帖封面、幻灯片和视频编辑入口                 |
+| `inc/functions/zib-footer.php`     | 前端上传配置、nonce、大小限制                      |
+| `inc/functions/functions.php`      | 图片选择、上传按钮和编辑器媒体扩展                 |
+
+不要直接调用 `move_uploaded_file()` 写入 `uploads`。主题已经把权限、大小、MIME、审核、WordPress attachment、媒体库隔离和前端返回结构串起来了。
+
+## 上传配置下发
+
+主题在页脚下发前端上传配置：
+
+```php
+upload_img_size: '<?php echo zib_get_current_user_can_number('upload_img_size', 3); ?>',
+img_upload_multiple: '<?php echo _pz('image_upload_multiple', 6); ?>',
+user_upload_nonce: '<?php echo wp_create_nonce('user_upload'); ?>',
+is_split_upload: '<?php echo (bool) _pz('split_upload_s', true); ?>',
+comment_upload_img: '<?php echo(_pz('comment_img') && _pz('comment_upload_img')); ?>',
+```
+
+上传限制不是固定数值，而是按当前用户能力读取：
+
+```php
+zib_get_current_user_can_number('upload_img_size', 3);
+zib_get_current_user_can_number('upload_video_size', 30);
+zib_get_current_user_can_number('upload_file_size', 30);
+```
+
+开发上传能力时要按当前用户重新计算大小限制，不要只信前端传入的 `file_size`。
+
+## 上传权限配置
+
+上传大小和格式限制在后台“功能&权限 / 上传权限”中配置。这个 section 由论坛后台配置文件追加到全局 `cap` 分组，但它不是论坛专属权限；前台投稿、发帖、评论图片、私信、用户头像、封面、收款码、商品评价、编辑器附件都会受影响。
+
+| 字段                              | 类型             | 作用                                                 |
+| --------------------------------- | ---------------- | ---------------------------------------------------- |
+| `upload_img_size`                 | repeater         | 前端图片最大上传大小，单位 M                         |
+| `image_upload_multiple`           | spinner          | 图片单次批量上传数量，`0` 不限制，`1` 表示不允许批量 |
+| `upload_video_size`               | repeater         | 前端视频最大上传大小，单位 M                         |
+| `upload_file_size`                | repeater         | 前端普通文件最大上传大小，单位 M                     |
+| `upload_file_mimes`               | repeater         | 按用户类型额外允许或禁止上传的文件格式               |
+| `split_upload_s`                  | switcher         | 后台和前台大文件分片上传开关                         |
+| `split_minimum_size`              | spinner          | 前台大于该大小才使用分片上传，最小会被限制为 `4M`    |
+| `newfilename`、`newfilename_type` | switcher / radio | 上传文件自动重命名，减少重名查询                     |
+| `disabled_large_thumbnail`        | switcher         | 禁止 WordPress 生成部分大尺寸缩略图                  |
+
+三个大小字段都是“按用户类型细分”的 repeater。主题读取时会取当前用户满足条件中的最大值：
+
+```php
+function zib_get_user_can_number($user_id, $capability, $default = '')
+{
+    $options = _pz($capability);
+
+    if (empty($options[0]['type'])) {
+        return $default;
+    }
+
+    $args = array();
+    foreach ($options as $opt) {
+        $opt['val'] = (float) $opt['val'];
+        if ($opt['type'] === 'default') {
+            $default = $opt['val'];
+        }
+
+        if ((!isset($args[$opt['type']]) || $args[$opt['type']] < $opt['val']) && (!$default || $opt['val'] > $default)) {
+            $args[$opt['type']] = (float) $opt['val'];
+        }
+    }
+
+    if (!$user_id || !$args) {
+        return $default;
+    }
+
+    arsort($args);
+
+    return zib_screen_user_can_val($user_id, $args) ?: $default;
+}
+```
+
+支持的用户类型来自权限系统，常见值包括：
+
+| 类型                         | 判断               |
+| ---------------------------- | ------------------ |
+| `default` / `all`            | 默认或所有用户     |
+| `logged`                     | 已登录用户         |
+| `admin`                      | 超级管理员         |
+| `auth`                       | 认证用户           |
+| `vip_level_1`、`vip_level_2` | 指定会员等级及以上 |
+| `user_level_5` 等            | 指定用户等级及以上 |
+
+如果一个用户同时满足认证用户、VIP、用户等级和管理员等多个条件，主题会按数值降序筛选，返回第一个匹配值。因此配置上传大小时必须保留基础默认值，并把高权限用户的值设置得更大。
+
+## 系统工具开关
+
+除了上传权限分组，系统工具里还有几个会改变上传和附件行为的开关：
+
+| 字段                       | 位置                | 源码行为                                                                |
+| -------------------------- | ------------------- | ----------------------------------------------------------------------- |
+| `newfilename`              | 扩展增强 / 系统工具 | 开启后挂 `wp_handle_upload_prefilter` 和 `wp_handle_sideload_prefilter` |
+| `newfilename_type`         | 扩展增强 / 系统工具 | `time` 为时间加原文件名，`random` 为 MD5 片段加时间                     |
+| `disabled_large_thumbnail` | 扩展增强 / 系统工具 | 禁止 WordPress 生成 `medium_large`、`1536x1536`、`2048x2048` 等尺寸     |
+| `close_attachment_page`    | 扩展增强 / 安全相关 | 非管理员访问附件页时转为 404                                            |
+
+自动重命名逻辑在 `zib_new_filename()`：
+
+```php
+function zib_new_filename($file)
+{
+    if (_pz('newfilename_type') !== 'random') {
+        $file['name'] = current_time('YmdHis') . mt_rand(10, 99) . mt_rand(0, 9) . '-' . $file['name'];
+    } else {
+        $info         = pathinfo($file['name']);
+        $ext          = empty($info['extension']) ? '' : '.' . $info['extension'];
+        $md5          = md5($file['name']);
+        $file['name'] = substr($md5, 0, 10) . current_time('YmdHis') . $ext;
+    }
+
+    return $file;
+}
+```
+
+它改的是上传入库前的文件名，不会回头改已经存在的附件 URL。对接对象存储、CDN 或外部文件同步时，要以 WordPress 最终返回的 attachment URL 为准，不要提前用原文件名拼地址。
+
+图片 CDN、防盗链、CORS、海报跨域和付费附件下载要以 WordPress 最终生成的 attachment URL 和对应业务权限为准。
+
+关闭附件页逻辑在 `template_redirect`：
+
+```php
+function zib_close_attachment_page()
+{
+    if (_pz('close_attachment_page')) {
+        global $wp_query;
+        if (is_attachment() && !is_super_admin()) {
+            $wp_query->is_404 = (true);
+        }
+    }
+}
+add_action('template_redirect', 'zib_close_attachment_page');
+```
+
+这不影响文件本身 URL，也不影响附件下载 Ajax。它只是不让非管理员访问 WordPress attachment 页面。付费资源、私密文件和订单权限仍然要走 Zibpay 或业务权限校验。
+
+## 文件格式限制
+
+`upload_file_mimes` 用来给不同用户额外允许或禁止 MIME。后台格式是：
+
+```txt
+扩展名=MIME类型
+```
+
+多个规则用英文逗号分隔：
+
+```txt
+mp3=audio/mpeg,svg=image/svg+xml
+```
+
+主题会把当前用户匹配到的规则拆成三组：
+
+| 分组                      | 来源                          | 用途                                                              |
+| ------------------------- | ----------------------------- | ----------------------------------------------------------------- |
+| `allow`                   | `pattern=allow`               | 合并到 WordPress `upload_mimes`                                   |
+| `prohibit`                | `pattern=prohibit`            | 从 WordPress `upload_mimes` 中移除                                |
+| `allow_image_mime_to_ext` | 允许规则中 MIME 包含 `image/` | 合并到 `getimagesize_mimes_to_exts`，让图片 MIME 能被识别为扩展名 |
+
+核心过滤链路：
+
+```php
+add_filter('upload_mimes', 'zib_upload_mimes_filter');
+add_filter('getimagesize_mimes_to_exts', 'zib_upload_image_mimes_to_exts_filter');
+```
+
+`prohibit` 的优先级高于 `allow`。如果某个用户同时命中“允许 svg”和“禁止 svg”，最终会被禁止。
+
+扩展示例：给认证用户允许上传 `webp`，但所有用户禁止上传 `svg`：
+
+```php
+function zib_docs_upload_mimes_filter($mimes)
+{
+    if (zib_user_is_val_role('auth', get_current_user_id())) {
+        $mimes['webp'] = 'image/webp';
+    }
+
+    if (isset($mimes['svg'])) {
+        unset($mimes['svg']);
+    }
+
+    return $mimes;
+}
+add_filter('upload_mimes', 'zib_docs_upload_mimes_filter', 20);
+```
+
+真正项目里优先用后台 `upload_file_mimes` 配置；只有需要按业务对象、临时状态或额外安全策略判断时，再加 Filter。
+
+## 大小校验链路
+
+前台 `window._win` 里的 `upload_img_size`、`upload_video_size`、`upload_file_size` 只用于上传组件提示和选择限制。服务端会在 `user_upload` 和分片上传入口重新校验。
+
+普通上传入口中按 `file_type` 分支：
+
+```php
+switch ($file_type) {
+    case 'image':
+        $max_size = zib_get_current_user_can_number('upload_img_size', 3);
+        if ($_FILES[$file_id]['size'] > $max_size * 1024000) {
+            zib_send_json_error(sprintf(__('图片大小超过限制，最大%sM，请重新选择', 'zib_language'), $max_size));
+        }
+        break;
+
+    case 'video':
+        $max_size = zib_get_current_user_can_number('upload_video_size', 30);
+        if ($_FILES[$file_id]['size'] > $max_size * 1024000) {
+            zib_send_json_error(sprintf(__('视频大小超过限制，最大%sM，请重新选择', 'zib_language'), $max_size));
+        }
+        break;
+
+    default:
+        $max_size = zib_get_current_user_can_number('upload_file_size', 30);
+        if ($_FILES[$file_id]['size'] > $max_size * 1024000) {
+            zib_send_json_error(sprintf(__('文件大小超过限制，最大%sM，请重新选择', 'zib_language'), $max_size));
+        }
+        break;
+}
+```
+
+后台媒体库分片上传会把三类限制换算成字节后取最大值，用作 WordPress `upload_size_limit`：
+
+```php
+$upload_file_size  = zib_get_current_user_can_number('upload_file_size', 30) * 1024 * 1024;
+$upload_video_size = zib_get_current_user_can_number('upload_video_size', 30) * 1024 * 1024;
+$upload_img_size   = zib_get_current_user_can_number('upload_img_size', 30) * 1024 * 1024;
+
+return max($upload_file_size, $upload_video_size, $upload_img_size);
+```
+
+这表示“后台媒体库能选多大文件”取三类中的最大值，但前台业务入口仍会按图片、视频、文件各自限制判断。扩展上传时不要只看 WordPress 全局上传上限。
+
+## 普通前台上传
+
+普通上传入口在 `action/main.php`：
+
+```php
+add_action('wp_ajax_user_upload', 'zib_ajax_user_upload_file');
+add_action('wp_ajax_nopriv_user_upload', 'zib_ajax_user_upload_file');
+```
+
+流程：
+
+1. 检查 `$_FILES['file']`。
+2. 必须登录。
+3. 调用 `zib_ajax_verify_nonce()`。
+4. 根据 `file_type` 判断 image、video 或 file。
+5. 检查 MIME 和大小。
+6. 调用 `zib_php_upload()`。
+7. 用 `zib_prepare_attachment_for_js()` 返回附件数据。
+
+前端提交图片、视频、附件都应该走这个入口或复用同样的服务端逻辑。
+
+## 图片上传
+
+评论、私信、编辑器图片常用 `user_upload_image`：
+
+```php
+add_action('wp_ajax_user_upload_image', 'zib_ajax_user_upload_image');
+add_action('wp_ajax_nopriv_user_upload_image', 'zib_ajax_user_upload_image');
+```
+
+它要求：
+
+```php
+wp_verify_nonce($_POST['upload_image_nonce'], 'upload_image');
+```
+
+上传成功后返回指定尺寸图片 URL：
+
+```php
+$img_id  = zib_php_upload();
+$size    = !empty($_REQUEST['size']) ? $_REQUEST['size'] : 'large';
+$img_url = wp_get_attachment_image_src($img_id, $size)[0];
+```
+
+如果只是拿图片 ID 给后续业务使用，优先使用 `user_upload` 返回的 attachment 数据；如果只是把图片插入输入框或编辑器，可以使用 `user_upload_image`。
+
+## 分片上传
+
+大文件分片上传在 `action/media.php`：
+
+| Ajax action                 | 说明                      |
+| --------------------------- | ------------------------- |
+| `user_split_upload`         | 上传单个分片              |
+| `user_split_upload_merge`   | 合并分片并创建 attachment |
+| `user_split_uploaded_chunk` | 查询已上传分片            |
+
+分片上传会：
+
+1. 检查登录态。
+2. 前两个分片验证 `user_upload` nonce。
+3. 按 `file_type` 检查图片、视频、普通文件大小限制。
+4. 将分片写入 `ZIB_TEMP_DIR`。
+5. 合并时重新构造 `$_FILES['file']`。
+6. 调用 `zib_php_upload($file_id, 0, 'auto', '', true)`。
+7. 删除已合并的临时分片。
+8. 返回 `zib_prepare_attachment_for_js()` 数据。
+
+如果自定义前端上传组件，要保持这些参数：
+
+```txt
+file
+file_type
+file_size
+file_name
+split_chunks_count
+split_current_chunk
+```
+
+不要让用户可控路径进入临时文件路径。主题用 `md5($file_name)`、`get_current_blog_id()` 和固定 `.part` 后缀组织分片，避免直接使用原始文件名作为路径。
+
+后台媒体库的分片上传由 `zib_file_chunk` 接管：
+
+```php
+if (_pz('split_upload_s', true)) {
+    add_action('init', array('zib_file_chunk', 'init'));
+}
+```
+
+它会修改 Plupload：
+
+```php
+$plupload_settings['url']                      = admin_url('admin-ajax.php');
+$plupload_settings['filters']['max_file_size'] = $this->get_upload_limit() . 'b';
+$plupload_settings['chunk_size']               = $this->chunk_size . 'kb';
+$plupload_settings['max_retries']              = 1;
+```
+
+临时分片写入 `ZIB_TEMP_DIR`，并在首个分片时创建 `index.php` 防止目录浏览，同时清理超过 48 小时的 `.part` 文件。服务器排查时要确认 `ZIB_TEMP_DIR` 可写，而不是只看 `uploads` 目录。
+
+### 分片上传失败排查
+
+分片上传的问题要分清“单片上传失败”“合并失败”和“合并后入库失败”。前两步还在 `ZIB_TEMP_DIR`，最后一步才进入 WordPress attachment。
+
+| 现象                        | 对应阶段                                        | 优先检查                                                                                                       |
+| --------------------------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| 第一个分片就失败            | `user_split_upload`                             | 登录态、`user_upload` nonce、`file_type`、`file_size`、当前用户上传大小权限                                    |
+| 中途提示大小超过限制        | `user_split_upload` 累计分片大小                | PHP 限制、主题 `upload_img_size` / `upload_video_size` / `upload_file_size`，以及重复上传的旧 `.part` 是否还在 |
+| 返回 `文件移动失败`         | 分片写入 `ZIB_TEMP_DIR`                         | 临时目录权限、磁盘空间、PHP `open_basedir`、Web 用户是否能写入                                                 |
+| 合并时提示缺少分片          | `user_split_upload_merge`                       | 前端是否调用 `user_split_uploaded_chunk` 续传；网络中断后缺失分片是否重新上传                                  |
+| 合并成功但创建附件失败      | `zib_php_upload($file_id, 0, 'auto', '', true)` | MIME、文件扩展名、图片审核、WordPress 媒体处理依赖和 `uploads` 目录权限                                        |
+| 大文件本地成功，过 CDN 失败 | 上传请求链路                                    | CDN/WAF 是否限制 POST、请求体大小、超时时间或 `admin-ajax.php`                                                 |
+| 后台媒体库大文件失败        | `zib_file_chunk` / Plupload                     | `split_upload_s` 是否开启、`chunk_size`、`upload_size_limit`、PHP 和 Web 服务器限制                            |
+
+排查时不要只看浏览器提示。Network 里至少要确认三个 action 的响应：`user_split_upload`、`user_split_upload_merge`、`user_split_uploaded_chunk`。如果缺片自愈分支返回 `chunk_loss=true`，说明服务端还能识别已上传分片，问题多半在网络中断、前端重试或临时目录清理；如果服务端直接报错，优先看 PHP 错误日志和临时目录权限。
+
+## 上传封装
+
+核心上传函数：
+
+```php
+function zib_php_upload($file = 'file', $post_id = 0, $ajax_audit = 'auto', $msg_prefix = '', $is_split_upload = false)
+```
+
+它会加载 WordPress 媒体处理依赖：
+
+```php
+require_once ABSPATH . 'wp-admin' . '/includes/image.php';
+require_once ABSPATH . 'wp-admin' . '/includes/file.php';
+require_once ABSPATH . 'wp-admin' . '/includes/media.php';
+```
+
+并调用：
+
+```php
+$attach_id = media_handle_upload($file, $post_id, [], $overrides);
+```
+
+当 `_pz('audit_upload_img')` 开启且上传的是图片时，会调用：
+
+```php
+ZibAudit::ajax_image($file, $msg_prefix);
+```
+
+所以图片审核能力应该接在 `zib_php_upload()` 之前或复用它，不要绕过这层封装。
+
+## MIME 和媒体库隔离
+
+上传格式限制来自：
+
+```php
+zib_get_user_upload_mimes_limit($user_id);
+add_filter('upload_mimes', 'zib_upload_mimes_filter');
+add_filter('getimagesize_mimes_to_exts', 'zib_upload_image_mimes_to_exts_filter');
+```
+
+媒体库隔离：
+
+```php
+add_action('pre_get_posts', 'zib_upload_media');
+add_filter('parse_query', 'zib_media_library');
+```
+
+非管理员、且没有 `manage_media_library` 能力的用户，只能看到自己上传的附件。自定义附件列表时也要保留 author 限制。
+
+当前用户附件列表入口：
+
+```php
+add_action('wp_ajax_current_user_attachments', 'zib_ajax_current_user_attachments');
+add_action('wp_ajax_nopriv_current_user_attachments', 'zib_ajax_current_user_attachments');
+```
+
+它会按当前用户、类型、搜索、排除列表、分页返回附件数据。管理员可查看全部。
+
+## 附件数据返回
+
+主题统一用 `zib_prepare_attachment_for_js()` 整理附件数据：
+
+```php
+$attachment_data = wp_prepare_attachment_for_js($attachment);
+
+if ($attachment_data['type'] === 'image') {
+    $attachment_data['large_url']     = !empty($attachment_data['sizes']['large']['url']) ? $attachment_data['sizes']['large']['url'] : $attachment_data['url'];
+    $attachment_data['medium_url']    = !empty($attachment_data['sizes']['medium']['url']) ? $attachment_data['sizes']['medium']['url'] : $attachment_data['large_url'];
+    $attachment_data['thumbnail_url'] = !empty($attachment_data['sizes']['thumbnail']['url']) ? $attachment_data['sizes']['thumbnail']['url'] : $attachment_data['medium_url'];
+}
+```
+
+它还会移除 `authorLink`、`editLink`、`icon`、`link`、`nonces` 等字段，避免把后台链接和 nonce 直接暴露给前端。
+
+## 附件归属
+
+前台投稿或论坛发帖后，主题会把内容里的附件挂到文章上：
+
+```php
+add_action('new_edit_posts', 'zib_new_post_media_attach_action');
+add_action('new_add_posts', 'zib_new_post_media_attach_action');
+add_action('bbs_edit_posts', 'zib_new_post_media_attach_action');
+add_action('bbs_add_posts', 'zib_new_post_media_attach_action');
+```
+
+底层调用：
+
+```php
+zib_media_attach_action($media, $parent_id);
+do_action('wp_media_attach_action', $action, $attachment_id, $parent_id);
+```
+
+需要同步附件关系或清理临时附件时，挂 `wp_media_attach_action`，不要在投稿保存前直接改 attachment `post_parent`。
+
+主题只会从正文里识别两类属性：
+
+```php
+preg_match_all('/(data-edit-file-id|data-download-file)="(\d+)"/', $post_content, $matches);
+```
+
+所以自定义编辑器块、下载块或插入按钮时，要保留 `data-edit-file-id="{attachment_id}"` 或 `data-download-file="{attachment_id}"`。如果把附件 ID 放进自定义 JSON、隐藏字段或短代码属性里，默认归属逻辑不会自动发现它。
+
+### 附件归属与清理排查
+
+附件归属只发生在文章或论坛内容保存之后。主题在 `new_add_posts`、`new_edit_posts`、`bbs_add_posts`、`bbs_edit_posts` 上扫描正文，再批量把命中的 attachment `post_parent` 更新为当前内容 ID。
+
+| 现象                                   | 原因                                                   | 处理方向                                                  |
+| -------------------------------------- | ------------------------------------------------------ | --------------------------------------------------------- |
+| 发帖后媒体库仍显示未归属               | 正文里没有 `data-edit-file-id` 或 `data-download-file` | 检查编辑器最终保存的 HTML，而不是只看前端编辑态           |
+| 自定义短代码里的附件没归属             | 默认正则不会解析短代码参数或 JSON                      | 保存后自行解析附件 ID，再调用 `zib_media_attach_action()` |
+| 特色封面上传后不归属正文               | 特色媒体保存走 `featured_data`，不属于正文扫描范围     | 需要强归属时在保存后挂业务 Hook 处理，不要改上传入口      |
+| 删除正文图片后 attachment 仍挂在旧文章 | 主题只负责保存时 attach，不会自动 detach 已删除引用    | 可在 `wp_media_attach_action` 或保存后自建差异清理        |
+| 迁移旧内容后附件归属混乱               | 旧 HTML 缺少主题识别属性                               | 迁移脚本补属性，或批量从正文 URL 反查 attachment 再归属   |
+| 前端能下载，后台归属不对               | 下载块使用了外链或丢失 `data-download-file`            | 付费/下载块保留 attachment ID，外链资源另建业务记录       |
+
+`zib_media_attach_action()` 会直接更新 `wp_posts.post_parent`，然后触发 `wp_media_attach_action`。扩展同步对象存储、清理未使用附件或写审计日志时，挂这个 Action 比在上传时处理更稳，因为此时已经知道附件最终属于哪篇文章或论坛帖子。
+
+## 前台特色媒体编辑框
+
+`zib_get_post_featured_edit_box($post_id, $class, $options)` 是前台编辑封面、幻灯片和视频的统一入口。它不会默认开放所有能力，而是通过三个 Filter 判断：
+
+```php
+$can_video = apply_filters('featured_video_edit', false, $post_id);
+$can_slide = apply_filters('featured_slide_edit', false, $post_id);
+$can_image = apply_filters('featured_image_edit', false, $post_id);
+```
+
+如果三个能力都为 false，函数直接返回空。允许后，主题会按优先级读取当前已有数据：
+
+| 能力                  | 读取字段                               | 返回类型 |
+| --------------------- | -------------------------------------- | -------- |
+| `featured_video_edit` | `featured_video`，封面取 `cover_image` | `video`  |
+| `featured_slide_edit` | `featured_slide` 附件 ID 列表          | `slide`  |
+| `featured_image_edit` | `cover_image` 或 `thumbnail_url`       | `image`  |
+
+最终输出：
+
+```php
+return '<div class="' . $class . ' featured-edit" featured-args=\'' . json_encode($args) . '\'><div class="btns-full flex jc"></div></div>';
+```
+
+论坛发帖就是按权限临时打开这些 Filter：
+
+```php
+function zib_docs_posts_featured($post_id = 0)
+{
+    if (zib_bbs_current_user_can('posts_image_cover', $post_id)) {
+        add_filter('featured_image_edit', '__return_true');
+    }
+
+    if (zib_bbs_current_user_can('posts_slide_cover', $post_id)) {
+        add_filter('featured_slide_edit', '__return_true');
+    }
+
+    if (zib_bbs_current_user_can('posts_video_cover', $post_id)) {
+        add_filter('featured_video_edit', '__return_true');
+    }
+
+    $options = array(
+        'image_ratio' => 50,
+        'slide_ratio' => 50,
+        'video_ratio' => 50,
+    );
+
+    return zib_get_post_featured_edit_box($post_id, 'mb20', $options);
+}
+```
+
+二开前台投稿或自定义内容类型时，不要自己拼一套封面上传 UI。优先用这三个 Filter 控制能力，再调用 `zib_get_post_featured_edit_box()`，这样能复用主题现有上传、附件选择、特色图数据结构和前端交互。
+
+### 特色媒体保存与显示排查
+
+前台特色媒体不是上传成功就一定会显示。上传只负责生成 attachment 或外链数据；真正写入文章、论坛帖子和列表封面的，是保存 Ajax 里的 `featured_data`。
+
+| 场景                 | 保存函数                             | 写入字段                                                                  | 显示入口                           |
+| -------------------- | ------------------------------------ | ------------------------------------------------------------------------- | ---------------------------------- |
+| 文章前台投稿图片封面 | `zib_ajax_newpost_save_featured()`   | `cover_image`、`thumbnail_url`，并清空 `featured_video`、`featured_slide` | 文章顶部图片封面、通用文章缩略图   |
+| 文章前台投稿视频封面 | `zib_ajax_newpost_save_featured()`   | `featured_video`，有 `pic` 时写 `cover_image`、`thumbnail_url`            | `zib_single_cover()`、列表视频预览 |
+| 文章前台投稿幻灯片   | `zib_ajax_newpost_save_featured()`   | `featured_slide`，并清空 `featured_video`                                 | 文章顶部幻灯片、列表幻灯片         |
+| 论坛帖子图片封面     | `zib_bbs_ajax_edit_posts_featured()` | `cover_image`，并清空 `featured_video`、`featured_slide`                  | 论坛帖子详情、论坛列表封面         |
+| 论坛帖子视频封面     | `zib_bbs_ajax_edit_posts_featured()` | `featured_video`，有 `pic` 时写 `cover_image`                             | 论坛帖子详情、论坛列表视频封面     |
+| 论坛帖子图集封面     | `zib_bbs_ajax_edit_posts_featured()` | `featured_slide`，并清空 `featured_video`                                 | 论坛帖子详情、论坛列表图集         |
+
+排查时按“按钮是否显示 -> 上传是否成功 -> `featured_data` 是否提交 -> meta 是否写入 -> 前台开关是否启用”的顺序看：
+
+| 现象                         | 优先检查                                                                                                                                      |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| 前台封面编辑框不显示         | `featured_image_edit`、`featured_slide_edit`、`featured_video_edit` 是否被权限 Filter 打开；文章看 `new_post_*_cover`，论坛看 `posts_*_cover` |
+| 上传成功但保存后没变         | Ajax 请求里是否有 `featured_data[type]` 和 `featured_data[data]`；没有这个字段时保存函数会直接返回                                            |
+| 视频能播放但封面空白         | `featured_data[data][pic]` 是否提交；视频封面图依赖 `cover_image`，缺省时只在部分入口回退到缩略图                                             |
+| 文章列表仍显示旧图           | 文章投稿图片会写 `thumbnail_url`，清空封面时只清 `cover_image`；排查通用缩略图时也要看 `thumbnail_url` 和对象缓存                             |
+| 论坛列表图不跟文章一致       | 论坛帖子保存特色媒体主要写 `cover_image`、`featured_slide`、`featured_video`，不要照文章投稿逻辑强依赖 `thumbnail_url`                        |
+| 幻灯片保存后视频仍在列表出现 | 检查是否走了主题保存函数；主题在保存 `slide` 时会清空 `featured_video`                                                                        |
+| 图片审核阻断封面上传         | `audit_upload_img` 开启时，图片上传会在 `zib_php_upload()` 内走 `ZibAudit::ajax_image()`；外链图片不会自动变成已审核 attachment               |
+| CDN 后封面或灯箱异常         | 检查图片 URL 是否被改写、懒加载属性是否保留、灯箱脚本是否被延迟、动态 Ajax 内容是否重新执行前端初始化                                         |
+
+自定义保存时不要只更新一个字段。比如视频封面至少要考虑 `featured_video` 和 `cover_image`；文章封面还要注意 `thumbnail_url`；论坛封面则要跟随论坛列表函数读取的字段。图片、视频、幻灯片三种形态互斥，切换类型时应清理旧类型字段，避免顶部封面、列表缩略图和分享图读取到不同来源。
+
+### 特色媒体在分享图和 SEO 图里的读取边界
+
+前台顶部封面、文章列表缩略图、分享海报、微信分享图、SEO 搜索结果图和订单商品缩略图不是同一条读取链。排查“详情页封面正常，但分享或 SEO 无图”时，先区分写入字段和读取入口：
+
+| 入口                           | 主要读取链                                                                                                                                 |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| 文章详情顶部封面               | `zib_single_cover()` 先看 `featured_video`、`featured_slide`、`cover_image`，视频封面缺省时再回退 `zib_post_thumbnail('full', 0, true)`    |
+| 通用文章缩略图                 | `zib_post_thumbnail()` 先看 WordPress 特色图，再看 `thumbnail_url`，再取正文首图，最后取分类图；它不直接读取 `cover_image`                 |
+| 普通分享按钮与文章海报         | 单页图片通常来自 `zib_post_thumbnail('full', '', true, $post)`，海报 Ajax 返回前还会经过 `poster_share_data` 过滤                          |
+| 微信 JS-SDK 分享图             | taxonomy 用分类图，single 用 `zib_post_thumbnail('full', '', true, $obj_id)`，author 用 `custom_avatar`；`only_logo` 开启时统一用站点图标  |
+| SEO 搜索结果图                 | `zib_seo_image()` 的 `post` 走 `zib_post_thumbnail('medium', ..., true, $post)`；`shop_product` 走商品配置；论坛分支主要看 `thumbnail_url` |
+| 商品图与订单商品图             | 商品不读文章 `cover_image`，走 `product_config.main_image`、`product_config.cover_images[0]`，再走商城默认图                               |
+| 论坛列表、论坛海报和论坛订单图 | 论坛缩略图函数主要看 `thumbnail_url`，按当前函数分支可从正文首图兜底；论坛详情封面另读 `cover_image`、`featured_video`、`featured_slide`   |
+
+文章前台投稿图片和视频封面会同步写 `thumbnail_url`，所以通常能进入 `zib_post_thumbnail()`、分享海报、微信分享和 SEO 图。论坛特色媒体保存函数主要写 `cover_image`，不一定写 `thumbnail_url`；因此论坛详情封面正常，不代表论坛列表、海报、SEO 或订单图一定能读取到同一张图。
+
+| 现象                              | 优先检查                                                                                                    | 处理方向                                                                  |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| 文章顶部封面正常但分享无图        | 是否只写了 `cover_image`，`thumbnail_url` 或 WordPress 特色图是否为空                                       | 保存时同步 `thumbnail_url`，或用 `poster_share_data` / 分享过滤器补图     |
+| 论坛详情封面正常但列表或 SEO 无图 | 论坛保存是否只写 `cover_image`；`zib_bbs_get_thumbnail_url()`、`zib_seo_image()` 是否能拿到 `thumbnail_url` | 保存时同步 `thumbnail_url`，或让列表/SEO 明确从正文首图、论坛封面字段兜底 |
+| 商品海报或订单图仍是旧图          | 商品图读取 `product_config.main_image` 和 `cover_images`，不是文章 `cover_image`                            | 更新商品配置字段，并清理 `post_thumbnail_url_*` 对象缓存                  |
+| CDN 后海报生成失败                | 图片域名是否允许 canvas 跨域，防盗链是否拦截 `poster-share.js` 加载图片                                     | 配置 CORS；仍异常时启用 `share_img_compatible_s` 作为兜底                 |
+| 微信分享图不是当前封面            | `only_logo` 是否开启，`wechat_share_s` 是否生效，single 是否能通过 `zib_post_thumbnail()` 拿图              | 关闭仅 Logo，或同步缩略图来源，确保图片 HTTPS 可访问                      |
+| SEO 搜索结果图旧图                | `seo_list_img_s`、`zib_seo_image()`、对象缓存、页面缓存和 CDN 缓存                                          | 清理对象缓存、页面缓存、CDN，并按入口重新抽查                             |
+
+对象存储或 CDN 迁移后，不要只测文章正文图。至少要打开文章详情顶部封面、文章列表缩略图、分享海报、微信内分享、SEO 隐藏图、论坛列表、论坛帖子详情、商城商品详情、商品海报和订单商品图各抽查一次。
+
+## 头像、封面和收款码
+
+用户资料上传走专门 Ajax：
+
+| Ajax action          | 说明                                               |
+| -------------------- | -------------------------------------------------- |
+| `user_upload_avatar` | 上传头像，保存 `custom_avatar_id`、`custom_avatar` |
+| `user_upload_cover`  | 上传个人封面，保存 `cover_image_id`、`cover_image` |
+| `user_set_rewards`   | 保存打赏收款码和说明                               |
+
+头像成功后触发：
+
+```php
+do_action('user_save_custom_avatar', $cuid, $img_id, $image_url[0]);
+```
+
+主题会监听这个 Hook 清理头像缓存：
+
+```php
+add_action('user_save_custom_avatar', function ($user_id) {
+    wp_cache_delete(zib_get_avatar_cache_key($user_id), 'user_avatar');
+    zib_get_data_avatar($user_id);
+});
+```
+
+扩展头像同步时挂 `user_save_custom_avatar`，不要直接更新 `custom_avatar` 后忘记清缓存。
+
+## 下载附件
+
+下载入口：
+
+```php
+add_action('wp_ajax_download_file', 'zib_ajax_download_file');
+add_action('wp_ajax_nopriv_download_file', 'zib_ajax_download_file');
+```
+
+下载前校验：
+
+```php
+wp_verify_nonce($_REQUEST['nonce'], 'download_file_' . $file_id);
+```
+
+成功后会更新：
+
+```php
+update_post_meta($file_id, 'download_amount', $download_amount + 1);
+```
+
+如果是付费下载或权限下载，不要直接给 `download_file` 链接。应先走 Zibpay 下载权限判断，再生成有时效 nonce 的下载链接。
+
+## 新增上传入口示例
+
+新增一个只允许登录用户上传图片并记录业务来源的 Ajax：
+
+```php
+function zib_docs_upload_image()
+{
+    if (!is_user_logged_in()) {
+        zib_send_json_error(__('请先登录', 'zib_language'));
+    }
+
+    zib_ajax_verify_nonce('user_upload');
+
+    if (empty($_FILES['file']) || !stristr($_FILES['file']['type'], 'image')) {
+        zib_send_json_error(__('请选择图片文件', 'zib_language'));
+    }
+
+    $img_id = zib_php_upload('file', 0, 'auto', __('业务图片', 'zib_language'));
+    if (!empty($img_id['error'])) {
+        zib_send_json_error($img_id['msg']);
+    }
+
+    update_post_meta($img_id, '_docs_upload_source', 'docs');
+    zib_send_json_success(zib_prepare_attachment_for_js($img_id));
+}
+add_action('wp_ajax_docs_upload_image', 'zib_docs_upload_image');
+```
+
+示例保留了登录态、nonce、类型判断、图片审核和 attachment 返回结构。真正业务里还要按场景限制上传数量、归属对象和是否允许删除。
+
+## 常见风险
+
+- 只在前端限制大小，服务端没有重新校验。
+- 只修改 PHP `upload_max_filesize`，却没有同步主题上传权限字段。
+- 只修改主题上传权限字段，服务器 `post_max_size`、网关、CDN 或对象存储仍然限制大文件。
+- 允许 `php`、`sh`、`exe` 等可执行文件进入 `upload_file_mimes`。
+- 同时配置允许和禁止同一 MIME，却没有意识到禁止优先。
+- 绕过 `zib_php_upload()`，导致图片审核、MIME、attachment 数据缺失。
+- 把后台媒体库 nonce、编辑链接、服务器路径返回给前端。
+- 普通用户查询附件时没有限制 author，导致看到别人上传的文件。
+- 分片上传允许用户控制临时路径。
+- 上传成功后没有把附件挂到文章、论坛帖子或业务对象上。
+- 自定义编辑器没有输出 `data-edit-file-id` 或 `data-download-file`，导致附件不会自动归属。
+- 只改附件页面访问，却误以为真实文件 URL 已经受保护。
+- 自定义前台封面上传绕过 `featured_*_edit`，导致视频、幻灯片、封面图数据结构和主题列表缩略图不一致。
+- 上传重命名前提前拼接对象存储 URL，最终文件名和 WordPress attachment URL 不一致。
+- 头像、封面更新后没有清理缓存。
+- 付费附件绕过 Zibpay 权限直接下载。
+
+## 调试入口
+
+| 现象                       | 优先检查                                                                          |
+| -------------------------- | --------------------------------------------------------------------------------- |
+| 上传提示登录失效           | 登录 Cookie、缓存、`user_upload` nonce                                            |
+| 图片上传失败               | `fileinfo`、`gd/imagick`、图片大小、`audit_upload_img`                            |
+| 大文件分片失败             | `ZIB_TEMP_DIR` 权限、分片缺失、PHP 上传大小                                       |
+| 后台媒体库仍提示过大       | `upload_size_limit`、`split_upload_s`、三类上传大小最大值                         |
+| 某类文件无法选择           | `upload_file_mimes`、WordPress `upload_mimes`、浏览器 accept                      |
+| 已允许图片 MIME 仍无法识别 | `getimagesize_mimes_to_exts` 是否补了图片 MIME 到扩展名                           |
+| 媒体库看不到文件           | author 限制、`manage_media_library` 能力                                          |
+| 返回图片没有缩略图         | WordPress 缩略图生成、图片尺寸设置                                                |
+| 附件下载过期               | `download_file_{id}` nonce                                                        |
+| 附件页面变 404             | `close_attachment_page` 是否开启、当前用户是否管理员                              |
+| 上传后文件名变化           | `newfilename`、`newfilename_type`                                                 |
+| 前台特色媒体编辑框不显示   | `featured_image_edit`、`featured_slide_edit`、`featured_video_edit` 是否返回 true |
+| 发帖后媒体库仍是未归属     | 正文是否保留 `data-edit-file-id` 或 `data-download-file`                          |
+
+## 参考源码
+
+本页根据 `inc/functions/zib-attachment.php`、`inc/functions/user/user-cap.php`、`inc/functions/bbs/admin/option.php`、`inc/functions/bbs/inc/edit.php`、`action/main.php`、`action/media.php`、`action/user.php`、`inc/functions/zib-footer.php`、`inc/functions/functions.php` 蒸馏整理。

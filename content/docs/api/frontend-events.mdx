@@ -1,0 +1,585 @@
+---
+title: 前端交互协议
+description: 梳理子比主题 RefreshModal、wp-ajax-submit、ajaxpager、ajax tab、远程盒子、动态模块加载和前端事件监听方式。
+---
+
+## 它解决什么
+
+子比主题的很多前端功能不是每个按钮单独写一段 JavaScript，而是约定一组 HTML 属性、CSS class 和 Ajax 响应格式，由 `js/main.js` 统一接管。
+
+二次开发时，优先复用这些前端协议，可以少写很多重复脚本，并保持主题原有的加载动画、弹窗、提示、分页、路由、移动端底部弹出和自动初始化行为。
+
+## 核心文件
+
+```txt
+js/main.js
+action/ajax.php
+inc/functions/functions.php
+action/function.php
+```
+
+| 文件                          | 作用                                                 |
+| ----------------------------- | ---------------------------------------------------- |
+| `js/main.js`                  | 前端事件委托、弹窗、Ajax 表单、Ajax 分页、自动初始化 |
+| `action/ajax.php`             | `zib_send_json_error()`、`zib_send_json_success()`   |
+| `inc/functions/functions.php` | 弹窗链接、远程盒子、Ajax 分页 HTML 辅助函数          |
+| `action/function.php`         | 通用 Ajax 列表、分享弹窗、浏览记录等动作             |
+
+## 前端协议总览
+
+| 协议         | 标记                                                  | 用途                             |
+| ------------ | ----------------------------------------------------- | -------------------------------- |
+| 刷新弹窗     | `data-toggle="RefreshModal"`                          | 点击后远程加载弹窗内容           |
+| Ajax 表单    | `.wp-ajax-submit` 或 `[zibajax="submit"]`             | 提交表单或按钮携带的数据         |
+| Ajax 列表    | `.ajaxpager`、`.ajax-item`、`.ajax-pag`、`.ajax-next` | 加载更多、数字分页、替换列表     |
+| Ajax Tab     | `data-ajax`、`ajax-tab`、`ajax-target`                | Tab 首次打开或点击时异步加载内容 |
+| 远程盒子     | `remote-box="url"`                                    | 元素出现或点击时加载远程 HTML    |
+| 点赞收藏关注 | `data-action`、`data-pid`                             | 走主题内置互动动作               |
+| 通用动作     | `ajax-action`、`data-id`、`data-nonce`                | 走 `admin-ajax.php` 的轻量动作   |
+| 自动初始化   | `auto_fun()`、`auto_fun` 事件                         | 新内容插入后重新初始化组件       |
+
+这些协议依赖事件委托，后插入的 HTML 也会生效。动态内容加载完成后，主题通常会调用 `auto_fun()`，重新初始化 tooltip、popover、上传、支付、评论、验证码、灯箱、代码高亮、Swiper 等组件。
+
+## RefreshModal 弹窗
+
+点击带有 `data-toggle="RefreshModal"` 的元素时，主题会读取：
+
+| 属性            | 含义                                                     |
+| --------------- | -------------------------------------------------------- |
+| `data-remote`   | 远程 URL，通常是 `admin-ajax.php?action=xxx`             |
+| `data-action`   | 未提供 `data-remote` 时拼接为 `_win.ajax_url?action=xxx` |
+| `data-class`    | 追加到 `.modal-dialog` 的 class                          |
+| `data-height`   | 弹窗初始高度                                             |
+| `mobile-bottom` | 移动端从底部弹出                                         |
+| `new`           | 每次创建新的弹窗 DOM                                     |
+| `no-touch`      | 禁用移动端触摸关闭                                       |
+
+服务端推荐使用主题辅助函数构建按钮：
+
+```php
+function zib_docs_get_demo_modal_link($post_id)
+{
+    $args = array(
+        'tag'           => 'a',
+        'class'         => 'but c-blue',
+        'data_class'    => 'modal-mini',
+        'mobile_bottom' => true,
+        'height'        => 320,
+        'text'          => '打开弹窗',
+        'query_arg'     => array(
+            'action'  => 'zib_docs_demo_modal',
+            'post_id' => $post_id,
+        ),
+    );
+
+    return zib_get_refresh_modal_link($args);
+}
+```
+
+远程内容动作直接输出弹窗 HTML：
+
+```php
+add_action('wp_ajax_zib_docs_demo_modal', 'zib_docs_demo_modal');
+
+function zib_docs_demo_modal()
+{
+    $post_id = !empty($_REQUEST['post_id']) ? (int) $_REQUEST['post_id'] : 0;
+    if (!$post_id || !current_user_can('read_post', $post_id)) {
+        zib_ajax_notice_modal('danger', '没有权限进行此操作');
+    }
+
+    echo '<div class="border-title touch"><div class="flex jc"><b>弹窗标题</b></div></div>';
+    echo '<form>';
+    echo '<div class="box-body">';
+    echo '<input type="text" name="demo_text" class="form-control">';
+    echo '<input type="hidden" name="post_id" value="' . esc_attr($post_id) . '">';
+    echo '<input type="hidden" name="action" value="zib_docs_demo_save">';
+    echo zib_nonce_field('zib_docs_demo_save');
+    echo '</div>';
+    echo '<div class="modal-buts but-average"><button type="submit" class="but c-blue wp-ajax-submit">确认保存</button></div>';
+    echo '</form>';
+    exit;
+}
+```
+
+弹窗内容加载后会触发：
+
+```js
+$('#refresh_modal').on('loaded.bs.modal', function () {
+  // 弹窗内容已经插入，可以初始化弹窗内组件
+});
+```
+
+如果只是普通内容提示，使用 `zib_ajax_notice_modal()` 可以保持主题弹窗样式。
+
+## wp-ajax-submit
+
+`.wp-ajax-submit` 会调用 `zib_ajax()`。数据来源顺序：
+
+1. 按钮上的 `form-data` JSON。
+2. 最近的 `form` 序列化数据。
+3. 按钮上的 `form-action` 会覆盖或补充 `data.action`。
+4. 按钮上的 `ajax-href` 会作为请求地址，否则走 `_win.ajax_url`。
+
+常用属性：
+
+| 属性           | 含义                 |
+| -------------- | -------------------- |
+| `form-action`  | 指定 Ajax action     |
+| `form-data`    | 直接传 JSON 数据     |
+| `data-confirm` | 提交前确认文案       |
+| `next-tab`     | 成功后切换到指定 Tab |
+| `ajax-href`    | 自定义提交 URL       |
+
+按钮式提交：
+
+```php
+function zib_docs_get_action_button($post_id)
+{
+    $data = array(
+        'action'  => 'zib_docs_demo_save',
+        'post_id' => $post_id,
+        '_wpnonce' => wp_create_nonce('zib_docs_demo_save'),
+    );
+
+    return '<a href="javascript:;" class="but c-blue wp-ajax-submit" form-data="' . esc_attr(json_encode($data)) . '">保存</a>';
+}
+```
+
+表单式提交：
+
+```php
+echo '<form>';
+echo '<input type="text" name="demo_text" class="form-control">';
+echo '<input type="hidden" name="action" value="zib_docs_demo_save">';
+echo zib_nonce_field('zib_docs_demo_save');
+echo '<button type="submit" class="but c-blue wp-ajax-submit">提交</button>';
+echo '</form>';
+```
+
+服务端响应使用子比格式：
+
+```php
+add_action('wp_ajax_zib_docs_demo_save', 'zib_docs_demo_save');
+
+function zib_docs_demo_save()
+{
+    zib_ajax_verify_nonce();
+
+    $post_id = !empty($_POST['post_id']) ? (int) $_POST['post_id'] : 0;
+    if (!$post_id || !current_user_can('edit_post', $post_id)) {
+        zib_send_json_error('没有权限进行此操作');
+    }
+
+    $text = !empty($_POST['demo_text']) ? sanitize_text_field($_POST['demo_text']) : '';
+    update_post_meta($post_id, 'demo_text', $text);
+
+    zib_send_json_success(array(
+        'msg'        => '保存成功',
+        'hide_modal' => true,
+        'reload'     => false,
+    ));
+}
+```
+
+前端会在成功回调后触发：
+
+```js
+$(document).on(
+  'zib_ajax.success',
+  '.wp-ajax-submit',
+  function (event, response) {
+    if (!response.error) {
+      // 可以同步刷新按钮、列表或局部 UI
+    }
+  },
+);
+```
+
+常见响应字段：
+
+| 字段         | 作用                                          |
+| ------------ | --------------------------------------------- |
+| `error`      | `true` 表示失败                               |
+| `msg`        | 通知文案                                      |
+| `ys`         | 通知颜色，常见 `danger`、`warning`、`success` |
+| `hide_modal` | 成功后关闭最近的弹窗                          |
+| `reload`     | 成功后刷新页面                                |
+| `goto`       | 配合 `reload` 跳转到指定地址                  |
+
+### 登录注册前端触发
+
+登录和注册按钮不需要自己绑定点击事件。只要输出 `.signin-loader` 或 `.signup-loader`，`js/main.js` 会统一接管：
+
+```js
+_win.bd.on('click', '.signin-loader', function () {
+  if (_win.sign_type == 'page') {
+    window.location.href = _win.signin_url;
+    window.location.reload;
+  } else {
+    $('.modal:not(#u_sign)').modal('hide');
+    $('#u_sign').modal('show');
+    $('a[href="#tab-sign-in"]').tab('show');
+  }
+});
+```
+
+| class            | 行为                                             |
+| ---------------- | ------------------------------------------------ |
+| `.signin-loader` | 打开登录弹窗，或在 `sign_type=page` 时跳转登录页 |
+| `.signup-loader` | 打开注册 Tab，或在 `sign_type=page` 时跳转注册页 |
+| `.qrcode-signin` | 打开扫码登录 Tab，并请求二维码 HTML              |
+
+论坛、评论、隐藏内容、付费内容、商城购买、浮动按钮等位置都复用 `.signin-loader`。扩展未登录提示时，优先输出这个 class，不要自己手写一套弹窗打开脚本。
+
+扫码登录按钮会请求它自己的 `href`，把返回的 `html` 放进 `.qrcode-signin-container`：
+
+```js
+_win.bd.on('click', '.qrcode-signin', function () {
+  var url = $(this).attr('href');
+  var container = $('.qrcode-signin-container');
+
+  $.post(
+    url,
+    null,
+    function (n) {
+      if (n && n.html) {
+        container.html(n.html);
+        _win.qrcode_signin = {
+          url: n.url,
+          state: n.state,
+        };
+        checkLogin();
+      }
+    },
+    'json',
+  );
+});
+```
+
+如果返回内容里有 `get-only-one`，主题会认为这是未认证订阅号的验证码表单，只清空验证码输入，不重复生成二维码。认证服务号模式才会把 `url` 和 `state` 保存到 `_win.qrcode_signin`，再由 `checkLogin()` 轮询 OAuth 回调。OAuth 服务端状态机见 [社交登录](/docs/api/oauth)。
+
+### 自动初始化
+
+`auto_fun()` 是主题前端初始化入口。它会在页面初始、窗口变化、折叠展开、Ajax 内容插入和部分模块加载后被调用：
+
+```js
+window.auto_fun = debounce(z_auto_fun, 100);
+
+function z_auto_fun() {
+  $(document).trigger('auto_fun');
+  $('.auto-search').AutoSearch();
+  $('.cloneable').cloneable();
+  $('[machine-verification]').length && tbquire(['captcha']);
+  $('.signsubmit-loader').length && tbquire(['sign-register']);
+  $("[data-toggle='tooltip']").tooltip({ container: 'body' });
+}
+```
+
+新增动态 HTML 时，如果里面包含这些组件，插入后要触发 `auto_fun()`：
+
+| 标记                      | 需要初始化的能力               |
+| ------------------------- | ------------------------------ |
+| `[machine-verification]`  | 滑块、图片、腾讯、极验人机验证 |
+| `.signsubmit-loader`      | 登录注册表单脚本               |
+| `.auto-search`            | 自动搜索                       |
+| `.cloneable`              | 可克隆字段                     |
+| `[zibupload]`             | 迷你上传                       |
+| `[data-toggle="tooltip"]` | 提示工具                       |
+
+常见坑是 Ajax 弹窗里输出了验证码或上传控件，但没有在内容插入后执行 `auto_fun()`。主题的 `RefreshModal` 和 `zib_ajax()` 成功链路通常已经做了初始化；如果你自己用 `$.post()` 插入 HTML，就要手动补这一句。
+
+### Ajax 提交细节
+
+`zib_ajax()` 的数据来源顺序是：
+
+```js
+var _data = _this.attr('form-data');
+if (_data) {
+  data = $.parseJSON(_data);
+}
+if (!data) {
+  var form = _this.parents('form');
+  data = form.serializeObject();
+}
+
+var _action = _this.attr('form-action');
+if (_action) {
+  data.action = _action;
+}
+```
+
+所以按钮级 `form-data` 优先级最高，最近的 `form` 次之，`form-action` 会覆盖 `data.action`。`ajax-href` 可以把请求发到非默认地址；没有 `ajax-href` 时统一走 `_win.ajax_url`。
+
+人机验证在 `zib_ajax()` 内部被拦截处理：
+
+```js
+if (data.captcha_mode && is_captcha(data.captcha_mode)) {
+  tbquire(['captcha'], function () {
+    CaptchaOpen(_this, data.captcha_mode);
+  });
+  return !1;
+}
+
+if (window.captcha) {
+  data.captcha = JSON.parse(JSON.stringify(window.captcha));
+  window.captcha = {};
+}
+```
+
+这表示验证码数据只能使用一次。登录、注册、找回密码这类表单如果第一次提交失败，用户可能需要重新完成验证码；不要把旧的 `window.captcha` 缓存在自定义脚本里重复提交。
+
+成功响应会恢复按钮文案、触发 `zib_ajax.success`，并根据返回字段关闭弹窗或刷新页面：
+
+```js
+_this.attr('disabled', false).html(_text).trigger('zib_ajax.success', n);
+
+if (n.hide_modal) {
+  _this.closest('.modal').modal('hide');
+}
+if (n.reload) {
+  n.goto ? (window.location.href = n.goto) : window.location.reload();
+}
+```
+
+如果按钮“点了一次之后一直转圈”，通常是请求没有返回 JSON、JS 抛错中断，或服务器返回了 HTML 错误页。先看 Network，再看 Console。
+
+### 按钮无反应排查
+
+| 现象             | 优先检查                                                                                   |
+| ---------------- | ------------------------------------------------------------------------------------------ |
+| 点击登录没有弹窗 | 页面是否有 `#u_sign`，`_win.sign_type` 是 `modal` 还是 `page`，按钮是否有 `.signin-loader` |
+| 点击注册没有反应 | 是否关闭注册，按钮是否有 `.signup-loader`，登录注册弹窗是否被页面缓存裁掉                  |
+| 点击提交没有请求 | 按钮是否是 `.wp-ajax-submit` 或 `[zibajax="submit"]`，是否在 `form` 内或有 `form-data`     |
+| 请求发错 action  | `form-action` 是否覆盖了隐藏字段 `action`                                                  |
+| 验证码弹窗不出   | DOM 是否有 `[machine-verification]`，`auto_fun()` 是否执行，`captcha.js` 是否加载          |
+| 请求 200 但报错  | 响应 JSON 里的 `error`、`msg`、`ys`                                                        |
+| 请求 403/HTML    | WAF、安全插件、缓存页、登录页或 nonce 过期                                                 |
+
+扩展交互时优先复用事件委托。不要在 Ajax 新内容里用一次性 `$('.xxx').click(...)` 绑定，否则后续分页、弹窗和动态插入内容很容易失效。
+
+## Ajax 列表与分页
+
+主题的 Ajax 列表默认结构：
+
+```html
+<div class="ajaxpager">
+  <div class="ajax-item">...</div>
+  <div class="ajax-pag">
+    <div class="next-page ajax-next">
+      <a href="下一页地址">加载更多</a>
+    </div>
+  </div>
+</div>
+```
+
+后端可以用：
+
+```php
+zib_get_ajax_next_paginate()
+zib_get_ajax_number_paginate()
+zib_ajax_send_ajaxpager()
+zib_get_ajax_ajaxpager_one_centent()
+zib_get_ias_ajaxpager()
+```
+
+标准列表动作：
+
+```php
+add_action('wp_ajax_zib_docs_demo_list', 'zib_docs_demo_list');
+add_action('wp_ajax_nopriv_zib_docs_demo_list', 'zib_docs_demo_list');
+
+function zib_docs_demo_list()
+{
+    $paged = zib_get_the_paged();
+    $count = 20;
+    $per_page = 10;
+    $html = '';
+
+    for ($i = 1; $i <= $per_page; $i++) {
+        $html .= '<div class="ajax-item muted-box padding-10 mb10">列表项</div>';
+    }
+
+    $ajax_url = add_query_arg(array(
+        'action' => 'zib_docs_demo_list',
+    ), admin_url('admin-ajax.php'));
+
+    $html .= zib_get_ajax_next_paginate($count, $paged, $per_page, $ajax_url);
+
+    zib_ajax_send_ajaxpager($html);
+}
+```
+
+首次输出可以用自动加载容器：
+
+```php
+function zib_docs_get_demo_ajaxpager()
+{
+    $args = array(
+        'type'  => 'ias',
+        'query' => array(
+            'action' => 'zib_docs_demo_list',
+        ),
+    );
+
+    return zib_get_ias_ajaxpager($args);
+}
+```
+
+如果分页点击后需要替换列表而不是追加，给链接加：
+
+```html
+ajax-replace="true"
+```
+
+如果目标容器不是默认 `.ajaxpager`，使用：
+
+```html
+ajaxpager-target=".custom-ajaxpager" ajaxitem-target=".custom-ajax-item"
+```
+
+列表加载完成后，容器会触发：
+
+```js
+$(document).on('post_ajax.ed', '.ajaxpager', function (event, html) {
+  // 新列表已经插入，html 是本次远程响应解析后的内容
+});
+```
+
+## Ajax Tab
+
+Bootstrap Tab 可以通过 `data-ajax` 首次加载内容：
+
+```html
+<ul class="list-inline tab-nav-theme">
+  <li class="active">
+    <a
+      href="#tab-demo"
+      data-toggle="tab"
+      data-ajax="/wp-admin/admin-ajax.php?action=zib_docs_demo_list"
+      >示例</a
+    >
+  </li>
+</ul>
+<div class="tab-content">
+  <div class="tab-pane fade active in" id="tab-demo"></div>
+</div>
+```
+
+点击其他按钮加载指定目标：
+
+```html
+<a
+  href="javascript:;"
+  ajax-target="#tab-demo"
+  data-ajax="/wp-admin/admin-ajax.php?action=zib_docs_demo_list"
+  ajax-replace="true"
+  >刷新</a
+>
+```
+
+主题会临时插入 `.post_ajax_trigger .ajax-next` 并触发点击。响应内容仍要包含 `.ajaxpager`、`.ajax-item`、`.ajax-pag`，或者使用 `zib_ajax_send_ajaxpager()` 输出。
+
+## 远程盒子
+
+`zib_get_remote_box()` 用于输出一个延迟加载的 HTML 容器：
+
+```php
+function zib_docs_get_remote_box()
+{
+    $args = array(
+        'type'  => 'ias',
+        'class' => 'zib-widget',
+        'query' => array(
+            'action' => 'zib_docs_demo_box',
+        ),
+    );
+
+    return zib_get_remote_box($args);
+}
+```
+
+它会输出 `remote-box="url"`。前端加载完成后会插入远程 HTML 并调用 `auto_fun()`。
+
+## data-action 互动动作
+
+`data-action` 是主题内置点赞、评论点赞、收藏、关注等轻量互动的协议，通常会提交到主题的 `action/action.php`：
+
+```html
+<a href="javascript:;" data-action="like" data-pid="123"
+  ><text>点赞</text><count>0</count></a
+>
+```
+
+这类动作由主题内部维护 nonce、登录态、本地未登录去重和计数更新。扩展业务不要随便复用 `data-action` 名称，避免和主题原有互动动作冲突。自定义写入类动作优先使用 `wp-ajax-submit`。
+
+## ajax-action 轻量动作
+
+`ajax-action` 会请求 `_win.ajax_url`，携带：
+
+| 属性          | 参数       |
+| ------------- | ---------- |
+| `ajax-action` | `action`   |
+| `data-id`     | `id`       |
+| `data-nonce`  | `_wpnonce` |
+
+服务端如果返回 `wp_send_json_success()` 结构，前端会读取 `data.text`、`data.active`、`data.show_modal`、`data.modal`、`data.modal_config` 等字段。它适合简单切换状态或弹出结果，不适合复杂表单。
+
+## 动态模块加载
+
+主题通过 `tbquire()` 按需加载脚本模块。例如：
+
+```js
+tbquire(['mini-upload']);
+tbquire(['captcha']);
+tbquire(['pay']);
+tbquire(['input-expand']);
+tbquire(['message']);
+```
+
+`auto_fun()` 会根据页面中存在的元素自动判断是否加载对应模块：
+
+| 元素或状态                                        | 加载模块       |
+| ------------------------------------------------- | -------------- |
+| `[zibupload]`                                     | `mini-upload`  |
+| `[machine-verification]`                          | `captcha`      |
+| `.initiate-pay,.cashier-link,.pay-vip`            | `pay`          |
+| `.dropdown-smilie,.dropdown-code,.dropdown-image` | `input-expand` |
+| `.from-private,.msg-center`                       | `message`      |
+| `[poster-share]`                                  | `poster-share` |
+| `[data-clipboard-text]`                           | `clipboard`    |
+
+Ajax 插入新内容后，如果新增元素依赖这些模块，应调用：
+
+```js
+auto_fun();
+```
+
+或监听主题事件：
+
+```js
+$(document).on('auto_fun', function () {
+  // 每次主题自动初始化时执行
+});
+```
+
+## 扩展建议
+
+- 弹窗优先使用 `zib_get_refresh_modal_link()`，不要手写一套不兼容移动端的弹窗结构。
+- 表单提交优先使用 `.wp-ajax-submit` 和 `zib_send_json_success()` / `zib_send_json_error()`。
+- 列表分页优先使用 `.ajaxpager` 结构和 `zib_ajax_send_ajaxpager()`。
+- 新内容插入后调用 `auto_fun()`，确保 tooltip、上传、验证码、支付、灯箱等组件重新初始化。
+- 自定义事件监听使用 delegated binding，例如 `$(document).on('zib_ajax.success', '.selector', callback)`。
+- 需要替换列表时使用 `ajax-replace="true"`，需要保留浏览器地址时使用 `route="true"` 和 `route-title`。
+
+## 常见风险
+
+| 风险                        | 说明                                        |
+| --------------------------- | ------------------------------------------- |
+| 弹窗内容不调用 `exit`       | Ajax 响应可能混入页面尾部内容               |
+| Ajax 列表缺少 `.ajaxpager`  | 前端无法找到插入和分页位置                  |
+| 列表项缺少 `.ajax-item`     | 加载更多时无法正确追加或替换                |
+| 成功响应不用子比格式        | `wp-ajax-submit` 不能正确显示提示或关闭弹窗 |
+| 动态内容不执行 `auto_fun()` | tooltip、上传、验证码、支付按钮可能失效     |
+| 复用内置 `data-action` 名称 | 可能触发主题点赞、收藏、关注等已有动作      |
+| 只在初始 DOM 绑定事件       | Ajax 加载出来的新元素不会响应               |

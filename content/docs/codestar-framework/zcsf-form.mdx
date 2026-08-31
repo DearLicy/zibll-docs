@@ -1,0 +1,432 @@
+---
+title: ZCSF 表单渲染
+description: 解释子比主题自带 ZCSF 渲染器的参数、加载资源、取值、隐藏字段、保存方式和适用场景。
+---
+
+## ZCSF 是什么
+
+`ZCSF` 是子比主题在 `inc/csf-framework/classes/zib-csf.class.php` 中封装的轻量表单渲染器。它复用 Codestar Framework 的字段类和样式脚本，但不负责把字段保存到某个固定 option。
+
+主题用它做这些场景：
+
+- 文章编辑页里渲染自定义字段。
+- 页面模板配置里渲染字段。
+- 用户资料页里渲染额外资料。
+- 需要自己控制保存位置的后台表单。
+
+和 `CSF::createOptions()` 的区别是：
+
+| 能力             | `CSF::createOptions()` | `ZCSF::instance()` |
+| ---------------- | ---------------------- | ------------------ |
+| 创建后台菜单     | 是                     | 否                 |
+| 自动保存 option  | 是                     | 否                 |
+| 复用 CSF 字段    | 是                     | 是                 |
+| 可控制 form 标签 | 间接                   | 直接               |
+| 适合 Meta 表单   | 一般                   | 很适合             |
+| 保存位置         | 一个 option            | 由调用方决定       |
+
+## 构造参数
+
+`ZCSF` 默认参数：
+
+```php
+public $args = array(
+    'class'  => '',
+    'form'   => true,
+    'nonce'  => true,
+    'method' => '',
+    'action' => '',
+    'fields' => array(),
+    'value'  => array(),
+    'hidden' => array(),
+);
+```
+
+最常用的是：
+
+```php
+ZCSF::instance('profile_options', array(
+    'value'  => $value,
+    'form'   => false,
+    'nonce'  => false,
+    'fields' => $fields,
+));
+```
+
+这里的第一个参数 `profile_options` 是 unique，会影响这些 Hook：
+
+```php
+apply_filters("csf_{$this->unique}_args", $args, $this);
+apply_filters("csf_{$this->unique}_save", $new_instance, $this->args, $this);
+do_action("csf_{$this->unique}_save_before", $new_instance, $this->args, $this);
+```
+
+## 资源加载
+
+实例化时会自动加载 CSF 需要的资源：
+
+```php
+wp_enqueue_media();
+wp_enqueue_style('wp-color-picker');
+wp_enqueue_script('wp-color-picker');
+wp_enqueue_style('csf', CSF::include_plugin_url('assets/css/style.min.css'), array(), CSF::$version, 'all');
+wp_enqueue_script('csf', CSF::include_plugin_url('assets/js/main.min.js'), array('csf-plugins'), CSF::$version, true);
+```
+
+它还会遍历 `fields`，对每个字段调用对应字段类的 `enqueue()`。所以 `upload`、`color`、`icon`、`select` 这类字段不需要手动加载额外脚本。
+
+## 字段渲染流程
+
+核心渲染逻辑是：
+
+```php
+foreach ($this->args['fields'] as $field) {
+    if (!empty($field['id'])) {
+        $field['default'] = $this->get_default($field);
+    }
+    CSF::field($field, $this->get_value($field), $field_unique);
+}
+```
+
+字段取值来自 `value`：
+
+```php
+public function get_value($field)
+{
+    $id = isset($field['id']) ? $field['id'] : '';
+    if ($id) {
+        $default = $this->get_default($field);
+        return isset($this->args['value'][$id]) ? $this->args['value'][$id] : $default;
+    }
+    return '';
+}
+```
+
+所以调用方必须先把旧值整理成数组：
+
+```php
+$value = array(
+    'cover_image' => zib_get_post_meta($post->ID, 'cover_image', true),
+    'subtitle'    => zib_get_post_meta($post->ID, 'subtitle', true),
+);
+```
+
+## 表单外壳
+
+`form` 为 true 时，ZCSF 会自己输出 `<form>`：
+
+```php
+ZCSF::instance('zib_custom_form', array(
+    'method' => 'post',
+    'action' => admin_url('admin-post.php'),
+    'fields' => $fields,
+    'hidden' => array(
+        array('name' => 'action', 'value' => 'zib_save_custom_form'),
+    ),
+));
+```
+
+`form` 为 false 时，只输出字段区域，适合嵌入 WordPress 已经存在的表单：
+
+```php
+ZCSF::instance('post_meta', array(
+    'form'   => false,
+    'nonce'  => false,
+    'value'  => $value,
+    'fields' => $fields,
+));
+```
+
+文章编辑页、用户编辑页本身已经有 `<form>`，所以主题通常设置 `form => false`。
+
+## Nonce
+
+`nonce` 为 true 时会输出：
+
+```php
+wp_nonce_field('zcsf_nonce', 'zcsf_nonce');
+```
+
+子比主题的文章 Meta 和用户 Meta 保存通常使用 WordPress 页面已有的权限与 nonce 流程，或者自己在保存函数里判断上下文。因此源码里常见：
+
+```php
+'nonce' => false,
+```
+
+如果你创建独立提交表单，应开启 nonce 或自己输出更具体的 nonce。
+
+## 隐藏字段
+
+`hidden` 会被渲染成隐藏输入：
+
+```php
+ZCSF::instance('zib_post_action_form', array(
+    'method' => 'post',
+    'action' => admin_url('admin-post.php'),
+    'hidden' => array(
+        array('name' => 'action', 'value' => 'zib_post_action_save'),
+        array('name' => 'post_id', 'value' => $post->ID),
+    ),
+    'fields' => $fields,
+));
+```
+
+输出逻辑：
+
+```php
+foreach ($hidden_input as $input) {
+    $name  = isset($input['name']) ? $input['name'] : $input[0];
+    $value = isset($input['value']) ? $input['value'] : $input[1];
+    $html .= '<input type="hidden" name="' . $name . '" value="' . $value . '">';
+}
+```
+
+实际输出到属性时要确保值来自可信来源，或提前用 `esc_attr()` 处理。
+
+## `save()` 的真实边界
+
+`ZCSF` 有 `save()` 方法，但它不是完整的数据保存器。源码里它只做两件事：
+
+```php
+public function save($new_instance, $old_instance)
+{
+    foreach ($this->args['fields'] as $field) {
+        if (!empty($field['id']) && (!isset($new_instance[$field['id']]) || is_null($new_instance[$field['id']]))) {
+            $new_instance[$field['id']] = '';
+        }
+    }
+
+    $new_instance = apply_filters("csf_{$this->unique}_save", $new_instance, $this->args, $this);
+
+    do_action("csf_{$this->unique}_save_before", $new_instance, $this->args, $this);
+
+    return $new_instance;
+}
+```
+
+它不会自动调用 `update_option()`、`update_post_meta()`、`update_user_meta()` 或 `zib_update_*_meta()`。子比主题的真实保存逻辑通常写在 WordPress 的保存 Hook 里：
+
+| 保存位置                       | 常见 Hook                                             | 保存函数                 |
+| ------------------------------ | ----------------------------------------------------- | ------------------------ |
+| 文章、页面、商品、论坛帖子     | `save_post`                                           | `zib_update_post_meta()` |
+| 用户资料                       | `personal_options_update`、`edit_user_profile_update` | `zib_update_user_meta()` |
+| 分类、标签、论坛板块、商城分类 | taxonomy options 内部保存或自定义保存流程             | `zib_update_term_meta()` |
+| 独立表单                       | `admin_post_*` 或 Ajax action                         | 调用方自己决定           |
+
+所以使用 ZCSF 时要把“渲染”和“保存”分开理解：
+
+```php
+function zib_docs_render_post_meta($post)
+{
+    $fields = array(
+        array(
+            'id'    => 'subtitle',
+            'type'  => 'text',
+            'title' => __('副标题', 'zib_language'),
+        ),
+    );
+
+    $value = array(
+        'subtitle' => zib_get_post_meta($post->ID, 'subtitle', true),
+    );
+
+    ZCSF::instance('post_meta', array(
+        'value'  => $value,
+        'form'   => false,
+        'nonce'  => false,
+        'fields' => $fields,
+    ));
+}
+
+function zib_docs_save_post_meta($post_id)
+{
+    if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) {
+        return;
+    }
+
+    if (!current_user_can('edit_post', $post_id)) {
+        return;
+    }
+
+    if (isset($_POST['subtitle'])) {
+        zib_update_post_meta($post_id, 'subtitle', sanitize_text_field($_POST['subtitle']));
+    }
+}
+add_action('save_post', 'zib_docs_save_post_meta');
+```
+
+这段写法保留了子比主题的习惯：字段渲染交给 `ZCSF::instance()`，保存交给命名函数挂载到对应 Hook，读取与写入优先使用主题封装函数。
+
+## 保存时的字段补空
+
+`save()` 会把字段数组中缺失或 `null` 的字段补成空字符串。这个行为适合普通文本、开关、选择字段，但复杂字段要额外小心：
+
+| 字段类型            | 补空后的风险                                       |
+| ------------------- | -------------------------------------------------- |
+| `group`             | 可能把原本应为数组的值变成空字符串                 |
+| `accordion`         | 子字段未提交时可能只剩空值                         |
+| `upload`、`gallery` | 清空和未提交需要区分                               |
+| `code_editor`       | 空字符串可能表示用户主动清空，也可能表示字段没提交 |
+
+因此主题源码在文章 Meta、用户 Meta 里更常见的是按字段 id 从 `$_POST` 判断，再调用 `zib_update_*_meta()`。如果字段会被 `dependency` 隐藏，不要只根据“本次没有提交”判断用户一定想清空它。
+
+## unique 与 Hook 命名
+
+`ZCSF::instance($unique, $params)` 的 `$unique` 会直接拼进 Hook 名。比如：
+
+```php
+ZCSF::instance('profile_options', array(
+    'value'  => $value,
+    'form'   => false,
+    'nonce'  => false,
+    'fields' => $fields,
+));
+```
+
+会产生：
+
+```php
+csf_profile_options_args
+csf_profile_options_save
+csf_profile_options_save_before
+```
+
+如果你要在主题内部过滤字段参数，可以按子比风格写成命名函数：
+
+```php
+function zib_docs_profile_options_args($args, $zcsf)
+{
+    if (!current_user_can('edit_users')) {
+        return $args;
+    }
+
+    $args['fields'][] = array(
+        'id'    => 'docs_note',
+        'type'  => 'textarea',
+        'title' => __('内部备注', 'zib_language'),
+    );
+
+    return $args;
+}
+add_filter('csf_profile_options_args', 'zib_docs_profile_options_args', 10, 2);
+```
+
+不要把 `$unique` 写成随机值。它既影响 Hook，也影响排查时搜索源码的关键词。
+
+## 文章 Meta 中的用法
+
+`inc/options/metabox-options.php` 会先根据字段 id 读取旧值：
+
+```php
+$option_meta_keys = zib_get_option_meta_keys('post_meta');
+$zib_meta         = get_post_meta($post->ID, 'zib_other_data', true);
+
+foreach ($fields as $field) {
+    if (!empty($field['id'])) {
+        if (in_array($field['id'], $option_meta_keys)) {
+            if (isset($zib_meta[$field['id']])) {
+                $value[$field['id']] = $zib_meta[$field['id']];
+            }
+        } else {
+            $value[$field['id']] = get_post_meta($post->ID, $field['id'], true);
+        }
+    }
+}
+```
+
+然后渲染：
+
+```php
+$csf_args = array(
+    'class'  => 'zib-post-meta',
+    'value'  => $value,
+    'form'   => false,
+    'nonce'  => false,
+    'fields' => $fields,
+);
+
+ZCSF::instance('post_meta', $csf_args);
+```
+
+保存时再逐个写入：
+
+```php
+foreach ($fields as $field) {
+    if (isset($_POST[$field])) {
+        zib_update_post_meta($post_id, $field, $_POST[$field]);
+    }
+}
+```
+
+这就是子比文章 Meta 的关键：字段渲染和字段保存是分开的，保存走 `zib_update_post_meta()`。
+
+## 用户 Meta 中的用法
+
+`inc/options/profile-options.php` 也是同样思路：
+
+```php
+$option_meta_keys = zib_get_option_meta_keys('user_meta');
+$zib_meta         = get_user_meta($profile_user->ID, 'zib_other_data', true);
+
+foreach ($fields as $field) {
+    if (!empty($field['id'])) {
+        if (in_array($field['id'], $option_meta_keys)) {
+            if (isset($zib_meta[$field['id']])) {
+                $value[$field['id']] = $zib_meta[$field['id']];
+            }
+        } else {
+            $value[$field['id']] = get_user_meta($profile_user->ID, $field['id'], true);
+        }
+    }
+}
+
+ZCSF::instance('profile_options', array(
+    'value'  => $value,
+    'form'   => false,
+    'nonce'  => false,
+    'fields' => $fields,
+));
+```
+
+保存：
+
+```php
+foreach ($fields as $field) {
+    if (isset($_POST[$field])) {
+        zib_update_user_meta($cuid, $field, $_POST[$field]);
+    }
+}
+```
+
+## 适合与不适合
+
+适合使用 ZCSF：
+
+- 需要把字段嵌入已有表单。
+- 保存目标不是单个 option。
+- 想沿用 CSF 字段样式和脚本。
+- 需要自己控制权限、nonce、清洗和保存。
+
+不适合使用 ZCSF：
+
+- 只是创建完整后台设置页，直接用 `CSF::createOptions()`。
+- 只是创建 taxonomy 字段，优先用 `CSF::createTaxonomyOptions()`。
+- 只是创建小工具，优先用 `CSF::createWidget()`。
+
+## 排错
+
+字段不显示时检查：
+
+1. `class_exists('ZCSF')` 是否为 true。
+2. 当前后台页面是否加载了 `inc/csf-framework/classes/zib-csf.class.php`。
+3. `fields` 是否为空。
+4. 字段类型对应的 CSF field class 是否存在。
+5. `form => false` 时，外层页面是否真的有 `<form>`。
+
+保存失败时检查：
+
+1. 保存 Hook 是否执行。
+2. `$_POST['字段id']` 是否存在。
+3. 是否传了正确的 post id、user id 或 term id。
+4. 是否应该走 `zib_update_post_meta()`、`zib_update_user_meta()` 或 `zib_update_term_meta()`。
+5. 字段 id 是否在 `zib_get_option_meta_keys()` 中，导致保存位置和预期不同。

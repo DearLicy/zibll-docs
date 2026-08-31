@@ -1,0 +1,23 @@
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+  categories:
+    - title: 文档内容
+      labels:
+        - documentation
+    - title: 站点与交互
+      labels:
+        - frontend
+    - title: MCP 与 Codex 插件
+      labels:
+        - mcp
+        - codex-plugin
+    - title: 社区与自动化
+      labels:
+        - community
+        - github-actions
+        - workers
+    - title: 其他变更
+      labels:
+        - '*'

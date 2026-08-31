@@ -1,0 +1,147 @@
+---
+title: Abilities API
+description: 注册 Ability 分类、Ability、输入输出 schema，并理解 WP_Ability 的执行流程。
+---
+
+## Ability 名称规则
+
+Ability 名称使用 `namespace/name` 格式：
+
+| 项       | 规则                                                    |
+| -------- | ------------------------------------------------------- |
+| 完整名称 | `namespace/ability-name`                                |
+| 命名字符 | 小写字母、数字、短横线                                  |
+| 斜杠数量 | 只保留一层命名空间                                      |
+| 推荐     | `zibll-ai-ext/read-post-context`                        |
+| 不推荐   | `Site/read_post`、`site/seo/title`、`site_ai/read_post` |
+
+分类 slug 也建议使用小写字母、数字和短横线，例如 `zibll-ai-ext`。
+
+## 注册分类
+
+Ability 使用前要先注册分类。分类注册挂在 `wp_abilities_api_categories_init`：
+
+```php
+add_action( 'wp_abilities_api_categories_init', function () {
+    wp_register_ability_category(
+        'zibll-ai-ext',
+        array(
+            'label'       => __( 'Zibll AI Extension', 'zibll-ai-ext-demo' ),
+            'description' => __( 'AI abilities for this WordPress site.', 'zibll-ai-ext-demo' ),
+        )
+    );
+} );
+```
+
+如果分类没有注册，后面注册 Ability 会失败，并触发 `_doing_it_wrong()`。
+
+## 最小只读 Ability
+
+下面这个能力读取文章标题、摘要和纯文本正文。它本身不调用 AI，但后面的摘要、SEO、标题建议都可以复用它。
+
+```php
+add_action( 'wp_abilities_api_init', function () {
+    wp_register_ability(
+        'zibll-ai-ext/read-post-context',
+        array(
+            'label'       => __( 'Read post context', 'zibll-ai-ext-demo' ),
+            'description' => __( 'Reads the title, excerpt and plain text content of a WordPress post.', 'zibll-ai-ext-demo' ),
+            'category'    => 'zibll-ai-ext',
+
+            'input_schema' => array(
+                'type'                 => 'object',
+                'required'             => array( 'post_id' ),
+                'properties'           => array(
+                    'post_id' => array(
+                        'type'        => 'integer',
+                        'description' => __( 'The post ID to read.', 'zibll-ai-ext-demo' ),
+                    ),
+                ),
+                'additionalProperties' => false,
+            ),
+
+            'output_schema' => array(
+                'type'                 => 'object',
+                'required'             => array( 'post_id', 'title', 'excerpt', 'content' ),
+                'properties'           => array(
+                    'post_id' => array( 'type' => 'integer' ),
+                    'title'   => array( 'type' => 'string' ),
+                    'excerpt' => array( 'type' => 'string' ),
+                    'content' => array( 'type' => 'string' ),
+                ),
+                'additionalProperties' => false,
+            ),
+
+            'permission_callback' => function ( array $input ) {
+                return current_user_can( 'edit_post', absint( $input['post_id'] ) );
+            },
+
+            'execute_callback' => function ( array $input ) {
+                $post_id = absint( $input['post_id'] );
+                $post    = get_post( $post_id );
+
+                if ( ! $post ) {
+                    return new WP_Error( 'post_not_found', __( 'Post not found.', 'zibll-ai-ext-demo' ) );
+                }
+
+                $content = wp_strip_all_tags( (string) $post->post_content );
+                $content = preg_replace( '/\s+/u', ' ', $content );
+
+                return array(
+                    'post_id' => $post_id,
+                    'title'   => get_the_title( $post_id ),
+                    'excerpt' => get_the_excerpt( $post_id ),
+                    'content' => trim( (string) $content ),
+                );
+            },
+
+            'meta' => array(
+                'annotations'  => array(
+                    'readonly'    => true,
+                    'destructive' => false,
+                    'idempotent'  => true,
+                ),
+                'show_in_rest' => true,
+            ),
+        )
+    );
+} );
+```
+
+## 关键字段
+
+| 字段                   | 为什么重要                            |
+| ---------------------- | ------------------------------------- |
+| `label`                | 给人看的短名称                        |
+| `description`          | 说明用途、输入来源、是否保存数据      |
+| `input_schema`         | 防止调用方乱传参数                    |
+| `output_schema`        | 让返回结果稳定                        |
+| `permission_callback`  | 不让 AI 或外部调用绕过 WordPress 权限 |
+| `execute_callback`     | 真正执行业务逻辑                      |
+| `annotations.readonly` | 说明这个能力只读取数据                |
+| `meta.show_in_rest`    | 是否暴露到 REST 调试和外部调用        |
+
+## 执行流程
+
+`WP_Ability::execute()` 的执行顺序是固定的：
+
+1. `normalize_input()`：没有输入时尝试使用 schema 顶层默认值。
+2. `validate_input()`：用 WordPress REST JSON Schema 校验输入。
+3. `check_permissions()`：执行权限回调。
+4. 触发 `wp_before_execute_ability`。
+5. 执行 `execute_callback`。
+6. `validate_output()`：如果写了输出 schema，会校验返回值。
+7. 触发 `wp_after_execute_ability`。
+8. 返回结果或 `WP_Error`。
+
+## 常见错误
+
+| 错误                           | 常见原因                              |
+| ------------------------------ | ------------------------------------- |
+| `ability_missing_input_schema` | 没写 `input_schema`，但调用时传了输入 |
+| `ability_invalid_input`        | 输入类型、必填字段、范围不符合 schema |
+| `ability_invalid_output`       | 返回结果不符合 `output_schema`        |
+| `ability_invalid_permissions`  | 当前用户权限不足                      |
+| `ability_callback_exception`   | 执行回调抛出异常                      |
+
+schema 负责校验，不等于自动清洗。真正写数据库前仍然要用 `absint()`、`sanitize_text_field()`、`wp_kses_post()` 等函数处理。

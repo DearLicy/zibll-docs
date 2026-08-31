@@ -1,0 +1,610 @@
+---
+title: 账户与验证码
+description: 蒸馏子比官网登录注册、找回密码、SMTP、绑定邮箱手机、腾讯验证码和极验行为验证教程，说明配置顺序、源码入口和排查方法。
+---
+
+## 先配置邮件，再配置验证码
+
+登录、注册、找回密码、绑定邮箱和邮件验证码都依赖 WordPress 发信能力。子比主题在 `inc/functions/zib-email.php` 中接管 SMTP：
+
+```php
+add_action('phpmailer_init', 'zib_mail_smtp');
+add_filter('wp_mail_from_name', 'zib_mail_from_name');
+add_filter('wp_mail', 'zib_get_mail_content');
+```
+
+开启 `mail_smtps` 后会设置：
+
+| 配置项              | 作用                            |
+| ------------------- | ------------------------------- |
+| `mail_name`         | 发件邮箱                        |
+| `mail_smtp_name`    | SMTP 用户名，留空时使用发件邮箱 |
+| `mail_passwd`       | SMTP 授权码或密码               |
+| `mail_host`         | SMTP 服务器，默认 `smtp.qq.com` |
+| `mail_port`         | SMTP 端口，默认 `465`           |
+| `mail_smtpauth`     | 是否开启 SMTPAuth               |
+| `mail_smtpsecure`   | 加密方式，常见 `ssl` 或 `tls`   |
+| `mail_showname`     | 发件人昵称                      |
+| `mail_title_prefix` | 邮件标题前缀                    |
+
+后台 `CFS_Module::email_test()` 提供测试邮件。验证码收不到时，先测试 SMTP，不要直接改注册表单。
+
+## SMTP 排查顺序
+
+1. 邮箱服务商是否开启 SMTP。
+2. 是否使用授权码，而不是邮箱登录密码。
+3. `mail_host`、`mail_port`、`mail_smtpsecure` 是否匹配。
+4. 发件邮箱和 SMTP 用户名是否属于同一邮箱或同一域名邮箱。
+5. 服务器是否允许外连 `465`、`587`、`25`。
+6. 域名邮箱是否配置 SPF、DKIM、DMARC。
+7. 测试邮件是否进入垃圾箱。
+8. 是否同时启用了其它 SMTP 插件。
+
+子比后台提示里也说明：主题 SMTP 功能和 SMTP 插件作用一致，不要同时开启两套 SMTP。
+
+## 登录注册入口
+
+表单渲染在 `inc/functions/zib-user.php`：
+
+```php
+zib_signup_form($oauth_bind = false);
+zib_signin_form($oauth_bind = false);
+zib_resetpassword_form($type = '');
+zib_get_sign_captch($captcha_type = 'email', $action = 'signup_captcha');
+zib_get_machine_verification_input($id = 'img_verification', $name = 'canvas_yz');
+```
+
+Ajax 处理在 `action/sign_register.php`：
+
+| Ajax action             | 用途                                 |
+| ----------------------- | ------------------------------------ |
+| `user_signup`           | 注册                                 |
+| `user_signin`           | 账号密码登录                         |
+| `user_signin_nopas`     | 免密验证码登录                       |
+| `signup_captcha`        | 注册验证码                           |
+| `signin_captcha`        | 登录验证码                           |
+| `resetpassword_captcha` | 找回密码验证码                       |
+| `reset_password`        | `zib_ajax_reset_password()` 重置密码 |
+
+注册会经过 WordPress 原生校验：
+
+```php
+$errors = apply_filters('registration_errors', $errors, $sanitized_user_login, $email);
+```
+
+登录成功后触发：
+
+```php
+do_action('wp_login', $user->user_login, $user);
+```
+
+扩展登录后逻辑优先挂 `wp_login`，限制注册优先挂 `registration_errors`。
+
+### 登录注册表单渲染矩阵
+
+登录弹窗由 `zib_sign_modal()` 挂到页脚：
+
+```php
+add_action('wp_footer', 'zib_sign_modal');
+```
+
+它只在未登录用户且登录注册未关闭时输出。已经登录的用户不会渲染登录弹窗；登录注册页 `pages/user-sign.php` 本身也会避免重复弹窗：
+
+```php
+function zib_is_close_sign($but = false)
+{
+    if (is_super_admin()) {
+        return false;
+    }
+
+    if (_pz('close_sign', false)) {
+        return true;
+    }
+
+    if ($but && is_page_template('pages/user-sign.php')) {
+        return true;
+    }
+
+    return false;
+}
+```
+
+登录、注册、找回密码和扫码登录都由 `zib_user_signtab_content()` 拼成 Tab。这个函数有两个重要参数：
+
+| 参数       | 说明                                           |
+| ---------- | ---------------------------------------------- |
+| `$tab`     | 默认激活 `signin`、`signup` 或 `resetpassword` |
+| `$is_page` | 为 `true` 时才把找回密码表单作为 Tab 输出      |
+
+所以弹窗里通常只有登录、注册和扫码登录；完整找回密码流程更多走登录注册页面或跳转链接。`zib_get_repas_link()` 会根据当前是否在 `pages/user-sign.php` 决定输出 Tab 链接还是带 `redirect_to` 的页面链接。
+
+扫码登录 Tab 只是登录注册容器的一部分。微信公众号二维码、`check_callback` 轮询、`weixingzh_event_data` 临时事件、未认证订阅号验证码模式和最终 `zib_oauth_update_user()` 登录/绑定逻辑，都属于 [社交登录](/docs/api/oauth) 的 OAuth 流程。排查时先分清是“弹窗没有打开”，还是“二维码打开后 OAuth 回调没有完成”。
+
+账号密码注册表单由 `zib_signup_form()` 输出，受这些开关影响：
+
+| 条件                                           | 表单变化                                                           |
+| ---------------------------------------------- | ------------------------------------------------------------------ |
+| `zib_is_close_signup()` 为真                   | 普通注册表单不输出                                                 |
+| `$oauth_bind` 不为空                           | 输出隐藏字段 `oauth_bind`，按钮文案变为绑定                        |
+| `_pz('user_signup_captch')` 开启               | 使用 `zib_get_sign_captch(_pz('captch_type'))` 输出邮箱/手机验证码 |
+| `_pz('user_signup_captch')` 关闭               | 输出 `zib_get_machine_verification_input('img_yz_signup_captcha')` |
+| `_pz('user_signup_no_repas')` 且启用注册验证码 | 不再要求重复输入密码                                               |
+| `invit_code_s=open`                            | 注册表单里显示选填邀请码                                           |
+| `invit_code_s=must`                            | 先显示邀请码验证表单，通过后才切到注册表单                         |
+
+必须邀请码注册不是直接在注册表单里加一个必填字段，而是先输出独立的 `invit_code_must_verify` 表单：
+
+```php
+$input .= '<input type="hidden" name="action" value="invit_code_must_verify">';
+$input .= wp_nonce_field($action, '_wpnonce', false, false);
+```
+
+这个预检只验证邀请码是否可用，不应该提前消耗邀请码。真正注册成功后才会把邀请码标记为已用，详见 [用户成长与权限体系](/docs/api/user-growth-permissions) 的邀请码章节。
+
+登录表单由 `zib_signin_form()` 输出，账号密码登录和免密登录是两个内层 Tab：
+
+| 配置                                  | 行为                                                         |
+| ------------------------------------- | ------------------------------------------------------------ |
+| `close_signin`                        | 关闭账号密码登录，但 `$oauth_bind` 场景仍可输出绑定表单      |
+| `user_signin_phone_s`                 | 账号输入占位改为“用户名/手机号/邮箱”，服务端允许手机号查用户 |
+| `user_signin_nopas_s`                 | 增加免密验证码登录                                           |
+| `user_signin_nopas_active=only_nopas` | 只显示免密登录，不显示账号密码登录                           |
+| `user_signin_nopas_active=pas`        | 默认显示账号密码登录                                         |
+| 其它 `user_signin_nopas_active`       | 默认显示免密登录                                             |
+
+账号密码登录无论是否启用免密登录，都会输出人机验证：
+
+```php
+$input .= zib_get_machine_verification_input('img_yz_signin');
+```
+
+免密登录则走验证码输入：
+
+```php
+$nopas_type = _pz('user_signin_nopas_type', 'email');
+$nopas_input .= zib_get_sign_captch($nopas_type, 'signin_captcha');
+```
+
+`zib_get_sign_captch()` 会同时输出邮箱/手机号输入框、人机验证、验证码输入框、发送验证码按钮、`captcha_type` 隐藏字段和 nonce：
+
+```php
+$input .= '<input type="hidden" name="captcha_type" value="' . $captcha_type . '">';
+$input .= wp_nonce_field($action, '_wpnonce', false, false);
+```
+
+这里的 `$action` 必须和发送验证码的 Ajax action 对齐，例如 `signup_captcha`、`signin_captcha`、`resetpassword_captcha`。扩展新验证码表单时，不能只复制输入框，还要保证 `form-action`、nonce action、人机验证 ID 和服务端 Ajax action 一致。
+
+### 密码登录服务端顺序
+
+账号密码登录由 `zib_ajax_user_signin()` 处理。服务端不是直接把表单交给 `wp_signon()`，而是先做一轮主题自己的判断：
+
+```php
+function zib_ajax_user_signin()
+{
+    if (is_user_logged_in()) {
+        echo(json_encode(array('error' => 1, 'msg' => __('你已经登录，请刷新页面', 'zib_language'))));
+        exit;
+    }
+
+    if (empty($_POST['username'])) {
+        echo(json_encode(array('error' => 1, 'msg' => __('请输入登录账号', 'zib_language'))));
+        exit();
+    }
+
+    if (_pz('verification_signin_exclude') !== $_POST['username']) {
+        zib_ajax_man_machine_verification('img_yz_signin');
+    }
+}
+```
+
+账号查找按输入类型分支：
+
+| 输入   | 条件                                                       | 查找方式                                                                      | 找不到时                     |
+| ------ | ---------------------------------------------------------- | ----------------------------------------------------------------------------- | ---------------------------- |
+| 邮箱   | `FILTER_VALIDATE_EMAIL`                                    | `get_user_by('email', $_POST['username'])`                                    | 返回“未找到此邮箱注册账户”   |
+| 手机号 | `_pz('user_signin_phone_s')` 且 `ZibSMS::is_phonenumber()` | `zib_get_user_by('phone', $_POST['username'])`                                | 返回“未找到此手机号注册账户” |
+| 用户名 | 其它情况                                                   | `zib_ajax_username_judgment('username', true)` 后 `get_user_by('login', ...)` | 返回“未找到此用户名注册账户” |
+
+找到用户后，主题才检查 `signin` 频率限制并调用 `wp_signon()`：
+
+```php
+$is_frequency_limit = zib_is_error_frequency_limit('signin');
+if ($is_frequency_limit['error']) {
+    echo(json_encode(array('error' => 1, 'msg' => $is_frequency_limit['msg'])));
+    exit();
+}
+
+$login_data = array(
+    'user_login'    => $user_data->user_login,
+    'user_password' => $_POST['password'],
+    'remember'      => !empty($_POST['remember']) ? true : false,
+);
+
+$user_verify = wp_signon($login_data);
+```
+
+登录成功后，如果当前处在 OAuth 绑定页，会先执行 `zib_ajax_oauth_bind($user_verify->ID)`；随后重置 `signin` 频率限制，返回 `reload=1`，并在有 `redirect_to` 时返回 `goto`。
+
+```php
+zib_ajax_oauth_bind($user_verify->ID);
+zib_reset_error_frequency_limit('signin');
+
+$result = array('error' => 0, 'reload' => 1, 'msg' => __('成功登录，页面跳转中', 'zib_language'));
+```
+
+扩展登录失败提示时，不要在前端根据“邮箱不存在”“手机号不存在”“密码错误”自己拼一套判断。主题已经在服务端把账号查找、人机验证、频率限制、OAuth 绑定和 WordPress 密码校验串起来；二开只需要在 `wp_login` 之后做登录成功联动，或在更前面的表单/验证码阶段增加明确校验。
+
+### 错误频率限制
+
+错误频率限制由 `error_frequency_limit` 开关控制，状态保存在 PHP session：
+
+```php
+function zib_is_error_frequency_limit($key, $msg = '')
+{
+    if (!_pz('error_frequency_limit', false)) {
+        return array('error' => 0);
+    }
+
+    @session_start();
+    $count        = $_SESSION['zib_check_count_' . $key] ?? 1;
+    $last_time    = $_SESSION['zib_check_time_' . $key] ?? 0;
+    $current_time = current_time('timestamp');
+}
+```
+
+主题内置使用的 key 包括：
+
+| key                    | 场景                       | 成功后重置                                                |
+| ---------------------- | -------------------------- | --------------------------------------------------------- |
+| `signin`               | 账号密码登录错误           | `zib_reset_error_frequency_limit('signin')`               |
+| `captcha`              | 邮箱/手机验证码校验错误    | `zib_reset_error_frequency_limit('captcha')`              |
+| `change_password`      | 修改密码旧密码错误         | `zib_reset_error_frequency_limit('change_password')`      |
+| `weixingzh_code_check` | 公众号未认证模式验证码错误 | `zib_reset_error_frequency_limit('weixingzh_code_check')` |
+
+限制策略按源码实际值执行：
+
+| 次数          | 限制            |
+| ------------- | --------------- |
+| 前 5 次       | 不限制          |
+| 第 6 到 10 次 | 需要间隔 30 秒  |
+| 第 11 次后    | 需要间隔 180 秒 |
+
+注意源码注释里有“后面 5 分钟一次”的旧说明，但当前判断用的是 `180` 秒。写扩展文档或后台提示时以代码为准。
+
+自定义敏感 Ajax 可以复用这套机制：
+
+```php
+function zib_docs_secure_login_check()
+{
+    $limit = zib_is_error_frequency_limit('docs_secure_login');
+    if ($limit['error']) {
+        echo json_encode($limit);
+        exit();
+    }
+
+    if (empty($_POST['token']) || 'ok' !== $_POST['token']) {
+        echo(json_encode(array('error' => 1, 'msg' => __('验证失败', 'zib_language'))));
+        exit();
+    }
+
+    zib_reset_error_frequency_limit('docs_secure_login');
+    zib_send_json_success(__('验证成功', 'zib_language'));
+}
+```
+
+不同业务要使用不同 key。不要把所有错误都塞进 `signin`，否则验证码、修改密码、登录会互相影响。
+
+## 登录注册相关配置
+
+常见配置项在 `inc/options/admin-options.php` 的用户互动区域：
+
+| 配置项                                    | 作用                             |
+| ----------------------------------------- | -------------------------------- |
+| `close_sign`                              | 关闭用户登录注册功能             |
+| `close_signup`                            | 关闭账号密码注册                 |
+| `close_signin`                            | 关闭账号密码登录                 |
+| `user_signup_captch`                      | 注册是否启用邮箱/手机验证码      |
+| `captch_type`                             | 注册验证码类型：邮箱、手机或二者 |
+| `user_signin_nopas_s`                     | 启用免密登录                     |
+| `user_signin_nopas_type`                  | 免密登录验证码类型               |
+| `user_signin_nopas_active`                | 默认显示密码登录还是免密登录     |
+| `user_repas_captch_type`                  | 找回密码验证码类型               |
+| `invit_code_s`                            | 是否启用邀请码                   |
+| `user_email_limit_type`、`user_email_out` | 邮箱白名单或黑名单规则           |
+
+如果启用邮箱验证码登录，但 SMTP 不通，用户会表现为“验证码发不出去”；如果启用手机验证码，但短信接口未配置，注册和绑定手机会一起受影响。
+
+## 人机验证
+
+子比主题的人机验证输入由 `zib_get_machine_verification_input()` 输出。配置项是：
+
+```php
+$yz = _pz('user_verification_type', 'slider');
+```
+
+支持的方向包括：
+
+| 类型       | 配置                                 |
+| ---------- | ------------------------------------ |
+| `slider`   | 主题内置滑动验证                     |
+| `image`    | 图片验证码                           |
+| `tcaptcha` | 腾讯智能验证，读取 `tcaptcha_option` |
+| `geetest`  | 极验行为验，读取 `geetest_option`    |
+| `null`     | 关闭人机验证                         |
+
+腾讯验证码配置读取：
+
+```php
+$option = _pz('tcaptcha_option');
+```
+
+后台字段包括 `CaptchaAppId` 和 `AppSecretKey`。配置时要确认当前访问域名已经加入腾讯验证码后台白名单，HTTP/HTTPS 和 `www` 域名要一致。
+
+为了避免参数错误导致管理员无法登录，主题提供“登录人机验证排除账号”配置。配置第三方验证前，建议先保留一个可排除的人机验证管理员用户名。
+
+这个排除只跳过服务端 `zib_ajax_man_machine_verification('img_yz_signin')`，前端登录表单仍会显示验证输入。并且它只在输入的登录名和 `verification_signin_exclude` 完全相同时生效；如果用邮箱或手机号登录，即使属于同一个管理员，也不会命中这个排除值。建议填管理员的 WordPress 登录用户名，而不是邮箱。
+
+## 极验行为验证
+
+极验行为验证是 `user_verification_type=geetest` 时启用的第三方人机验证。后台参数保存在 `geetest_option`：
+
+| 字段  | 作用                                   |
+| ----- | -------------------------------------- |
+| `id`  | 极验四代验证 ID，前端用作 `captchaId`  |
+| `key` | 极验四代验证 Key，服务端生成签名时使用 |
+
+前台表单不会直接输出一整套极验 HTML，而是输出一个隐藏 input：
+
+```php
+function zib_get_machine_verification_input($id = 'img_verification', $name = 'canvas_yz')
+{
+    $yz = _pz('user_verification_type', 'slider');
+
+    if ('geetest' === $yz) {
+        $option = _pz('geetest_option');
+        if (!empty($option['id']) && !empty($option['key'])) {
+            return '<input machine-verification="geetest" type="hidden" name="captcha_mode" value="geetest" geetest-id="' . $option['id'] . '">';
+        }
+    }
+}
+```
+
+`js/main.js` 在 `auto_fun()` 中发现 `[machine-verification]` 后加载 `captcha.js`。极验模式下，`captcha.js` 会加载 `https://static.geetest.com/v4/gt4.js`，用 `geetest-id` 初始化：
+
+```js
+initGeetest4(
+  {
+    captchaId: _mode.attr('geetest-id'),
+    product: 'bind',
+  },
+  function (captchaObj) {
+    captchaObj.onSuccess(function () {
+      var getValidate = captchaObj.getValidate();
+      window.captcha.captcha_output = getValidate.captcha_output;
+      window.captcha.gen_time = getValidate.gen_time;
+      window.captcha.lot_number = getValidate.lot_number;
+      window.captcha.ticket = getValidate.pass_token;
+      window.captcha._this.click();
+    });
+  },
+);
+```
+
+提交表单时，前端会把 `window.captcha` 序列化到 `captcha` 字段。服务端统一从 `zib_ajax_man_machine_verification()` 进入校验：
+
+```php
+if ('geetest' === $type) {
+    $option = _pz('geetest_option');
+    if (!empty($option['id']) && !empty($option['key'])) {
+        if (empty($_REQUEST['captcha']['ticket']) || empty($_REQUEST['captcha']['lot_number'])) {
+            echo(json_encode(array('error' => 1, 'msg' => __('人机验证失败，请重试', 'zib_language'))));
+            exit();
+        }
+
+        $verification = zib_geetest_verification($_REQUEST['captcha']);
+        if ($verification['error']) {
+            echo(json_encode(array('error' => 1, 'msg' => !empty($verification['msg']) ? $verification['msg'] : __('环境异常，人机验证失败', 'zib_language'))));
+            exit();
+        }
+    }
+}
+```
+
+最终二次校验在 `zib_geetest_verification()`：它要求 `ticket`、`lot_number`、`gen_time`、`captcha_output` 四个字段齐全，然后用验证 Key 对 `lot_number` 生成 HMAC-SHA256 签名，请求极验四代接口：
+
+```php
+$api_server  = 'http://gcaptcha4.geetest.com/validate?captcha_id=' . $option['id'];
+$sign_token  = hash_hmac('sha256', $lot_number, $option['key']);
+
+$query = array(
+    'lot_number'     => $lot_number,
+    'captcha_output' => $captcha_output,
+    'pass_token'     => $pass_token,
+    'gen_time'       => $gen_time,
+    'sign_token'     => $sign_token,
+);
+```
+
+前端通过验证不等于业务已经可信。登录、注册、找回密码、绑定邮箱、绑定手机、修改密码、投稿、论坛发帖、评论和提交链接等入口都会在自己的 Ajax 中再次调用 `zib_ajax_man_machine_verification()`。
+
+| 入口           | 校验 id                        |
+| -------------- | ------------------------------ |
+| 密码登录       | `img_yz_signin`                |
+| 注册验证码     | `img_yz_signup_captcha`        |
+| 登录验证码     | `img_yz_signin_captcha`        |
+| 找回密码验证码 | `img_yz_resetpassword_captcha` |
+| 绑定邮箱验证码 | `img_yz_bind_email_captcha`    |
+| 绑定手机验证码 | `img_yz_bind_phone_captcha`    |
+| 修改密码       | `img_yz_change_password`       |
+| 投稿提交       | `newposts_submit`              |
+| 论坛发帖       | `bbs_post_submit`              |
+| 提交链接       | `frontend_links_submit`        |
+
+扩展自定义 Ajax 时，如果表单已经输出了 `zib_get_machine_verification_input()`，服务端仍要主动调用人机验证：
+
+```php
+function zib_docs_secure_submit()
+{
+    zib_ajax_verify_nonce();
+    zib_ajax_man_machine_verification('docs_secure_submit');
+
+    // 业务逻辑...
+
+    zib_send_json_success(__('提交成功', 'zib_language'));
+}
+add_action('wp_ajax_docs_secure_submit', 'zib_docs_secure_submit');
+add_action('wp_ajax_nopriv_docs_secure_submit', 'zib_docs_secure_submit');
+```
+
+如果启用极验后登录失败，要先确认前台是否能加载 `gt4.js`，再看 Ajax 请求里是否带上了 `captcha_output`、`gen_time`、`lot_number`、`ticket`，最后确认服务器能访问 `gcaptcha4.geetest.com`。
+
+## 邮箱和手机绑定
+
+绑定表单在 `inc/functions/zib-user.php`：
+
+```php
+zib_get_user_bind_from($type = 'email', $user_id = 0);
+zib_get_user_verify_from($type = 'email');
+zib_get_user_center_bind_tab($tab = 'email', $user_id = '');
+```
+
+Ajax 在 `action/user.php`：
+
+| Ajax action           | 用途               |
+| --------------------- | ------------------ |
+| `bind_email_captcha`  | 发送绑定邮箱验证码 |
+| `user_bind_email`     | 绑定或修改邮箱     |
+| `bind_phone_captcha`  | 发送绑定手机验证码 |
+| `user_bind_phone`     | 绑定或修改手机     |
+| `verify_user_captcha` | 验证当前邮箱或手机 |
+| `verify_user`         | 账号验证           |
+
+绑定成功后会触发：
+
+```php
+do_action('zib_user_bind_email', $cuid, $captcha_val, $email);
+do_action('zib_user_update_bind_phone', $cuid, $captcha_val, $old_phone);
+do_action('zib_user_bind_phone', $cuid, $captcha_val, $old_phone);
+```
+
+需要同步外部系统或写日志时，挂这些 Hook，不要绕过主题 Ajax 直接改 `user_email` 或用户 meta。
+
+换绑已有邮箱或手机时，还要先验证旧账号。前端会通过 `verify_user_captcha` 给当前已绑定邮箱或手机号发送验证码，再用 `verify_user` 校验验证码；校验成功后，主题调用 `zib_set_verify_user($type, $cuid)` 记录本次旧账号已验证。随后提交 `user_bind_email` 或 `user_bind_phone` 时，才允许把账号换到新的邮箱或手机号。
+
+所以排查“新验证码正确但无法换绑”时，不只看新邮箱或新手机号验证码，还要确认旧账号验证是否完成、验证码类型是否对应、当前用户是否保持登录态。
+
+## 缓存排除
+
+登录、注册、验证码、用户中心不能被普通静态缓存固定。缓存和 CDN 至少要排除：
+
+```txt
+/wp-admin/admin-ajax.php
+/wp-login.php
+/user
+/oauth
+```
+
+出现这些 Cookie 时不应命中游客缓存：
+
+```txt
+wordpress_logged_in_
+wordpress_sec_
+wp-settings-
+```
+
+验证码明明正确却失败时，优先检查缓存、CDN、WAF 是否缓存或拦截了验证码 Ajax。
+
+## 故障速查
+
+| 现象                     | 优先检查                                                                                         |
+| ------------------------ | ------------------------------------------------------------------------------------------------ |
+| 验证码邮件收不到         | SMTP 测试邮件、授权码、端口、防火墙                                                              |
+| 手机验证码收不到         | 短信接口、签名、模板、余额、频率限制                                                             |
+| 登录按钮无反应           | 控制台 JS 报错、`admin-ajax.php` 状态码                                                          |
+| 人机验证一直失败         | AppID/Secret、域名白名单、缓存、服务器时间                                                       |
+| 极验弹窗不出现           | `gt4.js` 是否加载、`geetest_option.id`、浏览器拦截、前端是否存在 `[machine-verification]`        |
+| 极验前端通过但提交失败   | Ajax 是否带齐 `captcha_output`、`gen_time`、`lot_number`、`ticket`，服务器是否能访问极验验证接口 |
+| 找回密码失败             | SMTP、`resetpassword_captcha`、`allow_password_reset`                                            |
+| 绑定邮箱失败             | 当前用户登录态、验证码、`user_bind_option`                                                       |
+| 登录提示账号不存在       | 输入类型判断、`user_signin_phone_s`、邮箱/手机号是否真正绑定到该用户                             |
+| 登录提示账号或密码错误   | `user_signin`、`wp_signon()`、是否触发 `signin` 频率限制                                         |
+| 登录提示环境异常         | nonce、页面缓存、`admin-ajax.php` 是否被 WAF 或安全插件拦截                                      |
+| 连续错误后短时间不能登录 | `error_frequency_limit`、PHP session、`zib_check_count_signin`                                   |
+| 排除账号仍要验证         | 输入是否等于 `verification_signin_exclude`，是否使用邮箱/手机号登录                              |
+
+### Network 排查顺序
+
+登录注册类按钮无反应或返回异常时，先看浏览器 Network 中的 `admin-ajax.php` 请求：
+
+| 检查项                   | 正常情况                                          | 异常含义                                                      |
+| ------------------------ | ------------------------------------------------- | ------------------------------------------------------------- |
+| HTTP 状态码              | `200`                                             | `403` 多见 WAF、安全插件、权限或 nonce；`500` 看 PHP 错误日志 |
+| `action`                 | `user_signin`、`user_signup`、`signin_captcha` 等 | action 错会进入错误回调或无处理函数                           |
+| `_wpnonce`               | 与表单 action 对齐                                | 过期、被缓存、被剥离时返回“环境异常”                          |
+| `captcha` 或 `canvas_yz` | 与当前人机验证类型匹配                            | 极验/腾讯/滑块/图片验证码参数不齐会失败                       |
+| 响应类型                 | JSON，含 `error`、`msg`                           | 返回 HTML 往往是安全页、缓存页、PHP 报错或登录页              |
+
+如果点击按钮后根本没有请求，先回到 [前端交互协议](/docs/api/frontend-events) 检查 `.signin-loader`、`.signup-loader`、`.wp-ajax-submit`、`form-action`、`form-data`、`[machine-verification]` 和 `auto_fun()`。账户验证页主要排查服务端登录、验证码和人机验证；按钮触发、弹窗打开和 Ajax 提交协议属于前端事件层。
+
+主题的 nonce 校验失败会走：
+
+```php
+function zib_ajax_wp_verify_nonce($action = null, $name = '_wpnonce')
+{
+    if (!$action) {
+        $action = !empty($_REQUEST['action']) ? $_REQUEST['action'] : -1;
+    }
+
+    if (!isset($_REQUEST[$name]) || !wp_verify_nonce($_REQUEST[$name], $action)) {
+        zib_send_json_error(__('环境异常，请刷新页面后稍候再试', 'zib_language'), 'warning');
+    }
+}
+```
+
+因此“环境异常”不等于密码错，通常优先排查缓存、过期页面、nonce action 不一致、CDN/WAF 修改请求或安全插件拦截。登录注册页、用户中心、`/oauth`、`admin-ajax.php` 都不应被静态缓存。
+
+### 登录失败日志定位
+
+子比主题默认不会为每一次登录失败单独写业务日志。排查时先把浏览器 Network 里的 `admin-ajax.php` 响应保存下来，再决定要看 PHP 错误日志、临时 Hook 日志，还是表单和缓存问题。前端统一由 `zib_ajax()` 提交；如果请求进入 jQuery `error` 回调，控制台会输出 `ajax请求错误，错误信息如下：`，这通常已经不是账号密码分支，而是 HTTP 状态、PHP Fatal、WAF 或返回了非 JSON。
+
+常见响应可以反推到这些分支：
+
+| 现象或响应                               | 源码位置                                             | 说明                                                                                                        |
+| ---------------------------------------- | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| 点击后没有 `admin-ajax.php` 请求         | `js/sign-register.js`、`js/main.js`                  | 检查 `sign-register.js` 是否加载、按钮是否有 `.signsubmit-loader` 或 `.wp-ajax-submit`、表单是否能被序列化  |
+| HTTP `403`、`500` 或返回 HTML            | `zib_ajax()` 的 `error` 回调                         | 先看服务器 PHP 错误日志、WAF/安全插件日志、`admin-ajax.php` 是否被缓存或拦截                                |
+| `请输入登录账号`、`请输入密码`           | `zib_ajax_user_signin()` 入参检查                    | 表单字段名必须是 `username`、`password`，不要只改前端占位文案                                               |
+| `环境异常，请刷新后重新提交`             | `zib_ajax_man_machine_verification('img_yz_signin')` | 滑块或第三方人机验证参数没有随请求提交，常见于缓存旧页面、JS 未初始化、验证码对象被重复使用                 |
+| `未找到此邮箱注册账户`                   | `get_user_by('email', $_POST['username'])`           | 邮箱登录只查 `wp_users.user_email`，不会查普通 user meta                                                    |
+| `未找到此手机号注册账户`                 | `zib_get_user_by('phone', $_POST['username'])`       | 只有开启 `user_signin_phone_s` 且输入符合 `ZibSMS::is_phonenumber()` 时才按手机号查                         |
+| `未找到此用户名注册账户`                 | `get_user_by('login', $_POST['username'])`           | 用户名登录前还会经过 `zib_ajax_username_judgment('username', true)`                                         |
+| `错误次数过多` 或 `错误次数超限`         | `zib_is_error_frequency_limit('signin')`             | 状态在 PHP session 的 `zib_check_count_signin` 和 `zib_check_time_signin`，登录成功后才重置                 |
+| `账号或密码错误`                         | `wp_signon($login_data)`                             | 主题会隐藏 WordPress 的细分错误；继续看 `authenticate`、`wp_authenticate_user`、安全插件和封禁插件是否拦截  |
+| 登录成功返回 `reload=1` 但刷新后仍未登录 | `wp_signon()` 后的登录 Cookie                        | 看响应是否写入 `wordpress_logged_in_` Cookie，域名、HTTPS、SameSite、反代/CDN 是否丢了 `Set-Cookie`         |
+| OAuth 绑定页登录失败                     | `zib_ajax_oauth_bind($user_verify->ID)`              | 检查请求是否带 `oauth_bind`，PHP session 中是否还有 `zib_user_oauth_data`，以及第三方账号是否已绑定其他用户 |
+
+临时加日志时只记录分支、用户名和错误码，不要记录密码、邮箱验证码、短信验证码、第三方 token 或完整 `$_POST`。可以放到临时调试插件或子主题里，问题确认后删除：
+
+```php
+add_filter('authenticate', 'zib_docs_debug_authenticate', 99, 3);
+function zib_docs_debug_authenticate($user, $username, $password)
+{
+    if (is_wp_error($user)) {
+        error_log('[zib-login] authenticate failed user=' . sanitize_user($username) . ' code=' . implode(',', $user->get_error_codes()));
+    }
+
+    return $user;
+}
+
+add_action('wp_login_failed', 'zib_docs_debug_login_failed');
+function zib_docs_debug_login_failed($username)
+{
+    error_log('[zib-login] wp_login_failed user=' . sanitize_user($username));
+}
+```
+
+如果 Network 里已经返回主题 JSON 错误，就优先按上表定位，不要先去翻数据库；如果响应是 `500` 或 HTML，再看 `wp-content/debug.log`、PHP-FPM、Nginx/Apache 和安全插件日志。登录失败排查的证据顺序是：Network 响应 `action/msg` -> HTTP 状态和控制台错误 -> PHP 错误日志 -> 临时 WordPress Hook 日志 -> 数据库用户和 user meta。
+
+## 参考来源
+
+本页吸收了子比官网 [登录/注册/找回密码/手机验证/绑定邮箱/人机验证等用户功能配置教程](https://www.zibll.com/1571.html)、SMTP 邮件、腾讯验证码、极验行为验证等公开教程，并结合主题源码 `inc/functions/zib-email.php`、`inc/functions/zib-user.php`、`action/function.php`、`action/sign_register.php`、`action/user.php`、`js/sign-register.js`、`js/main.js`、`js/captcha.js`、`inc/options/admin-options.php` 整理为内置知识。

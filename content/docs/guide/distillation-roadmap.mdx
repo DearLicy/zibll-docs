@@ -1,0 +1,214 @@
+---
+title: 数据蒸馏路线图
+description: 规划子比官网教程、主题源码、子主题和插件样本的持续蒸馏顺序，约定每批产出的验证标准。
+---
+
+本页用于维护后续数据蒸馏方向。它不替代具体开发文档，而是把“官网教程怎么配置”和“本地源码实际怎么运行”排成一条持续处理队列，避免只整理外链或只摘录源码。
+
+当前可用素材有三类：
+
+| 素材来源                   | 位置                                             | 蒸馏价值                                                                         |
+| -------------------------- | ------------------------------------------------ | -------------------------------------------------------------------------------- |
+| 子比官网主题文档           | [主题文档](https://www.zibll.com/zibll_word)     | 公开教程、站长使用场景、配置顺序和常见问题入口                                   |
+| 新人教程阅读指引           | [教程阅读指引](https://www.zibll.com/48624.html) | 上线、配置、模块、文章、用户、商城、论坛、优化和开发的学习顺序                   |
+| 本地主题、子主题、插件源码 | `主题插件子主题/`                                | 主题真实目录、Hook、Ajax、CSF 字段、Zibpay、用户中心、插件样本和站点级子主题实践 |
+
+## 蒸馏原则
+
+每批蒸馏都按同一套输出结构写进文档：
+
+1. 官网教程说明什么场景、后台怎么配置。
+2. 主题或插件源码入口在哪个文件。
+3. 数据保存到 option、post meta、user meta、term meta、订单 meta 还是自建表。
+4. 前台展示、Ajax、Hook、Filter 和模板加载链路怎么走。
+5. 权限、缓存、登录态、支付回调、验证码和 CDN 排除边界是什么。
+6. 二开时推荐用插件、子主题、Hook、短代码、模板覆盖还是后台配置。
+7. 可复制代码只保留最小骨架，避免把业务插件整段搬进文档。
+
+如果官网文章和源码理解冲突，以当前本地源码和运行链路为准；官网文章用于补齐用户场景和配置路径。
+
+## 本地素材地图
+
+### 主题核心
+
+| 模块         | 重点文件                                                                 | 后续产出                                                             |
+| ------------ | ------------------------------------------------------------------------ | -------------------------------------------------------------------- |
+| 加载与依赖   | `主题插件子主题/zibll/functions.php`、`inc/inc.php`、`inc/dependent.php` | 校准加载顺序、`zib_require_end`、后台/前台/Ajax 语言上下文           |
+| 通用函数     | `inc/functions/`                                                         | 继续补函数速查、模板输出、媒体、搜索、分享、用户、文章列表和页面框架 |
+| 设置系统     | `inc/options/`、`inc/csf-framework/`                                     | 继续补 CSF 字段地图、保存形态、升级迁移和后台性能边界                |
+| 小工具与模块 | `inc/widgets/`                                                           | 继续补视觉模块、侧栏、小工具 Ajax、商品小工具和模块导入导出          |
+| Zibpay       | `zibpay/`                                                                | 继续补订单、支付、余额、积分、VIP、付费下载、分佣提现和退款状态机    |
+| 前端协议     | `action/`、`js/`、`template/`、`pages/`                                  | 继续补 Ajax 动作、前端事件、页面模板和用户中心渲染链路               |
+
+### 子主题样本
+
+| 样本 | 重点文件                                                    | 已提炼方向                                                                                                        |
+| ---- | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Vela | `主题插件子主题/子主题开发/Vela/functions.php`、`style.css` | 子主题先引入父主题 `inc/inc.php`，再引入 `includes/index.php`；`style.css` 声明 `Template: zibll`、版本和运行环境 |
+
+Vela 的价值不是让新项目照抄文件，而是校准子主题加载顺序、父主题继承、`func.php` 兜底入口和站点级代码拆分方式。
+
+### 插件样本
+
+| 队列           | 样本目录                                                                                                     | 蒸馏方向                                                         |
+| -------------- | ------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| 插件骨架与 CSF | `plugin_demo`、`zibll_plugin-main`、`zib-diy`                                                                | 入口文件、独立 option key、CSF 设置页、加载时机和历史写法风险    |
+| 用户与账号     | `NapCat`、`vxras_auth`、`zib-discord-login`、`Afdian_auth`、`zib-invite`、`zib-reguser`                      | OAuth/扫码绑定、用户中心入口、Ajax 保存、账号冲突和登录态边界    |
+| 支付与资产     | `ZibllPAY`、`Bepusdt`、`zib-cardcode`、`zib-pay-posts`、`zib-sponsor`、`zibaut-access`                       | 第三方支付、付费浏览、赞助订单、卡密、余额支付限制和 Zibpay Hook |
+| 用户成长       | `zib-mission`、`zibll_checkin`、`zib-delete`、`zib-user-sidebar`、`zib-avatarbox`、`zib-preset-avatar-cover` | 签到奖励、注销冷静期、用户中心侧栏、头像封面和资料页扩展         |
+| 内容与媒体     | `zib-upimg`、`zib-postcopy`、`zib-search-order`、`zib-mailstyle`                                             | 前台上传、复制提示、搜索排序、邮件样式和后台管理入口             |
+| 视觉与导航     | `zib-nav`、`zib-three-column`、`zib-Snowy`、`DearLicy`、`vxras-music`、`zib-admin`                           | 导航增强、布局样式、动效、音乐播放器和后台 UI 注入边界           |
+| 安全与审核     | `zibll-security-guard`、`zib-untencent`、`zib-roar`、`zib-activity`                                          | 注册评论防护、内容过滤、活动互动、日志清理和用户友好错误         |
+| 多语言         | `zib-language`                                                                                               | 前台按钮、翻译脚本、动态内容监听、术语配置和 JS 国际化边界       |
+
+## 当前优先级
+
+### P0：把本地源码纳入基础地图
+
+先更新这些基础文档，保证 AI 回答能正确定位源码：
+
+1. [源码结构](/docs/source-structure)
+2. [加载顺序](/docs/api/loading)
+3. [主题函数](/docs/api/functions)
+4. [Hook 与过滤器](/docs/api/hooks)
+5. [Ajax 动作](/docs/api/ajax)
+6. [插件制作指南](/docs/guide/plugin-making)
+7. [子主题制作指南](/docs/guide/subtheme-making)
+
+### P1：继续官网后续蒸馏顺序
+
+沿用 [子比官网知识库地图](/docs/guide/official-knowledge-base) 的后续顺序，但每个专题都加本地源码验证。2026-07-07 复查官网新人指引后，继续把官方“上线基础 -> 外观导航 -> 模块首页 -> 文章/媒体 -> 用户 -> 商城付费 -> 论坛 -> 优化扩展”的阅读顺序，压成本站可执行的源码蒸馏队列：
+
+1. 模块布局、小工具、顶部多功能组件和广告位。
+2. 商城商品链路、订单、支付、优惠、发货、售后和后台排查。
+3. 用户资产、积分、余额、转账、卡密、分佣和提现。
+4. 登录注册、验证码、OAuth、账号绑定和账户安全。
+5. 用户成长、签到、徽章、邀请码、禁封和数据维护。
+6. 论坛权限、排序、版块、帖子保存、论坛小工具和内容审核。
+7. 视频资源、媒体上传、图片灯箱和前台特色媒体。
+8. SEO head、百度提交、搜索体系、多语言和内容审核。
+
+### P2：插件样本专题化
+
+插件样本不按目录逐个搬运，而是按能力聚合成专题：
+
+| 专题                | 第一批样本                                                       | 应落文档                                                                                                 |
+| ------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| 插件加载与 CSF 设置 | `plugin_demo`、`zib-diy`、`zib-language`、`zibll-security-guard` | [插件制作指南](/docs/guide/plugin-making)、[Codestar Framework](/docs/codestar-framework)                |
+| 付费浏览与赞助订单  | `zib-pay-posts`、`zib-sponsor`、`ZibllPAY`                       | [Zibpay 扩展](/docs/api/zibpay)、[Zibpay 付费下载与资源权限](/docs/api/zibpay-paid-download)             |
+| 用户中心增强        | `zib-mission`、`zib-delete`、`NapCat`、`zib-user-sidebar`        | [用户系统](/docs/api/user-system)、[作者主页与用户中心](/docs/api/author-user-pages)                     |
+| 前台上传与媒体      | `zib-upimg`、`zib-avatarbox`、`zib-preset-avatar-cover`          | [媒体上传](/docs/api/media-upload)、[用户系统](/docs/api/user-system)                                    |
+| 注册评论防护        | `zibll-security-guard`                                           | [内容审核与发布安全](/docs/api/content-audit-security)、[账户与验证码](/docs/guide/account-verification) |
+
+## 当前批次
+
+本轮已经开始处理第一批本地样本：
+
+- `主题插件子主题/zibll/functions.php`、`inc/inc.php`、`inc/dependent.php`、`inc/functions/functions.php`、`action/function.php`：用于校准主题启动入口、常量、`zib_require()`、`zib_require_end`、前后台语言上下文和实际模块加载列表。
+- `plugin_demo`：用于校准旧插件骨架、CSF 设置页、`after_setup_theme` 历史加载方式和命名风险。
+- `Vela`：用于校准子主题 `functions.php`、`style.css`、父主题加载顺序和 `func.php` 兜底入口。
+- `zib-pay-posts`、`zib-sponsor`、`zib-mission`、`NapCat`、`zibll-security-guard`：已纳入后续专题队列，下一批按支付、用户、账号和安全拆文档。
+
+本批已落地到 [源码结构](/docs/source-structure)、[加载顺序](/docs/api/loading)、[主题函数](/docs/api/functions)、[Hook 与过滤器](/docs/api/hooks) 和 [Ajax 动作](/docs/api/ajax)。
+
+已补齐的本地证据包括：
+
+- `action/ajax.php` 的真实响应结构：错误响应使用 `error => true`、`ys => type`，成功响应使用 `error => false`，字符串兼容为 `msg`。
+- `action/function.php` 的实际 Ajax 加载列表和 nonce、验证码、限频、当前用户、分享、列表查询等工具函数边界。
+- `inc/dependent.php` 的 `_pz()`、`_spz()`、聚合 meta key 清单，以及 `zib_locale_frontend_ajax_prefixes`、`zib_locale_frontend_ajax_actions` 前台 Ajax 语言上下文白名单。
+- 论坛、商城、搜索动态 Hook 的追踪方式，以及 `zibll-security-guard`、`zib-sponsor` 插件样本里的 `plugins_loaded` + `zib_require_end` 分层加载模式。
+- 商城 Ajax 动作按本地源码校准为 `cart_add`、`update_cart`、`shop_submit_order` 等，避免沿用错误的 `shop_add_cart` 命名。
+
+下一批转入 P1 的“商城/Zibpay/用户资产”链路：先处理商城商品字段、购物车结算、订单状态、支付入口、余额积分、VIP 和付费下载，再回到用户账号与论坛专题。每个专题都继续按官网场景、本地入口、数据保存、Hook/Ajax、权限缓存边界和二开建议六步蒸馏。
+
+### P1 第一批进度
+
+已开始处理“商城购物车/确认下单/Zibpay 支付入口”：
+
+- [商城购物车与确认下单](/docs/api/shop-cart-checkout)：补充本地真实链路，从 `cart_add`、`update_cart`、`shop_confirm_modal`、`shop_submit_order` 到前端 `.initiate-pay` 和 Zibpay `initiate_pay`、`check_pay`。
+- [Zibpay 扩展](/docs/api/zibpay)：补充 `submit_order` 与 `shop_submit_order` 的入口差异，明确商城新版下单先返回 `payment_data`，通用 Zibpay 下单则直接进入 `zibpay_ajax_initiate_pay()`。
+- 修正 `payment_order_success` 示例：本地 `order-class.php` 只传一个 `$order` 对象；联合付款单会逐个业务订单触发该 Hook。
+
+已继续处理商城商品字段：
+
+- [商城商品发布字段](/docs/api/shop-product-fields)：补齐官网商品创建场景到本地 `product_config` 的映射，并校准规格 key、自动库存覆盖、前台 Vue 数据、确认单服务端重算和订单 `meta.order_data` 落库边界。
+
+已继续处理商城发货、售后与优惠：
+
+- [商城发货、售后与优惠](/docs/api/shop-shipping-after-sale)：补齐官网商城场景到本地订单状态机的映射，并校准付款成功联动、发货数据、自动确认收货时效、售后处理、退款、买赠兑现、商品优惠和优惠码边界。
+
+已继续处理用户资产、积分与余额：
+
+- [用户资产、积分与余额](/docs/api/user-assets-points-balance)：补齐官网积分、余额充值、转账和卡密兑换场景到本地 Zibpay 入口的映射，并校准资产变动时序、支付成功 Hook、资产更新函数、节流、近期流水和审计边界。
+
+已继续处理 Zibpay VIP 与付费下载：
+
+- [Zibpay VIP 会员](/docs/api/zibpay-vip-membership)：补齐官网“会员属性、会员商品、会员特权”和卡密/积分兑换场景到本地 `order_type = 4`、`payment_order_success`、`zibpay_update_user_vip()`、`vip_level` / `vip_exp_date` 的链路，并标注同请求静态缓存边界。
+- [Zibpay 付费下载与资源权限](/docs/api/zibpay-paid-download)：补齐官网付费资源、免登录购买、订单时效、每日免费次数、远程转本地、限速和下载记录场景到本地 `posts_zibpay`、`zibpay_is_paid()`、游客 Cookie token、`pay-download` 模板和下载日志的链路。
+
+已转入登录注册、验证码、OAuth、账号绑定和账户安全：
+
+- [账户与验证码](/docs/guide/account-verification)：补齐登录失败日志定位，把浏览器 Network 响应、`zib_ajax()` 错误回调、`zib_ajax_user_signin()` 分支、`wp_signon()`、登录 Cookie、`signin` session 限频和 OAuth 绑定页失败串成一张排查表。
+- 本地源码证据来自 `action/sign_register.php`、`action/function.php`、`js/sign-register.js`、`js/main.js`：先按 `admin-ajax.php` 的 `action/msg` 定位分支，再看 PHP 错误日志和临时 WordPress Hook 日志，不记录密码、验证码或第三方 token。
+
+已转入用户成长、签到、徽章、邀请码、禁封和数据维护：
+
+- [用户成长数据维护](/docs/api/user-growth-data-maintenance)：补齐长期审计报表边界，明确 `checkin_detail`、`level_integral_detail`、`points_record`、`free_points_detail` 等字段只适合近期展示，长期月报和活动复盘应另建追加型审计记录。
+- 本地源码证据来自 `user-checkin.php`、`user-level.php`、`user_medal.php`、`user-ban.php`、`invit-code.php` 和插件样本 `zib-mission`：审计事件监听 `user_checkined`、`user_add_medal`、`updata_user_ban`、`zib_use_invit_code` 等入口，修复状态仍回到主题/Zibpay 函数。
+
+已转入论坛权限、排序、版块、帖子保存、论坛小工具和内容审核：
+
+- [论坛模块](/docs/api/bbs)：已补发帖编辑保存链路，校准 `bbs_posts_save`、`bbs_posts_draft`、`zib_pre_insert_post`、`bbs_add_posts`、`bbs_edit_posts`、版块选择权限、发布状态和草稿/待审核/发布返回。
+- [论坛模块](/docs/api/bbs)：继续补齐论坛前台运营与列表性能，把官网首页 Tab、版块页 Tab、独立 `?index=` 链接、移动端滑动、Ajax 分页、推荐指数缓存、版块统计缓存和 CDN 排除边界串成排查矩阵。
+- [内容审核与发布安全](/docs/api/content-audit-security)：补齐论坛帖子待审核排查矩阵，明确 API 审核通过不等于直接发布，状态由 `posts_save_audit_no`、`posts_save_audit_no_manual`、`posts_audit`、`audit_bbs_posts` 和 Ajax 动作共同决定。
+- 本地源码证据来自 `inc/functions/bbs/action/ajax-posts.php`、`inc/functions/bbs/inc/posts.php`、`inc/functions/bbs/inc/home.php`、`inc/functions/bbs/inc/plate.php`、`inc/functions/bbs/inc/class.init.php`、`inc/functions/bbs/inc/functions.php`、`inc/functions/bbs/admin/option.php`：待审核入口、审核按钮、通知消息、邮件开关、版主权限、Tab 查询、分页协议和缓存边界已纳入文档。
+
+已转入视频资源、媒体上传、图片灯箱和前台特色媒体：
+
+- [媒体上传](/docs/api/media-upload)：补齐前台特色媒体保存与显示排查，把文章投稿、论坛发帖、图片封面、视频封面、图集/幻灯片、上传审核、`featured_data`、`cover_image`、`thumbnail_url`、`featured_video`、`featured_slide` 串成端到端链路。
+- [媒体上传](/docs/api/media-upload)：继续补齐分片上传失败排查和附件归属清理边界，明确 `user_split_upload`、`user_split_upload_merge`、`user_split_uploaded_chunk`、`ZIB_TEMP_DIR`、`chunk_loss=true`、`zib_php_upload(..., true)`、`data-edit-file-id`、`data-download-file` 和 `wp_media_attach_action` 的排查顺序。
+- [视频资源与播放器](/docs/api/video-resources-player)：补充到媒体上传排查的交叉引用，明确文章投稿和论坛发帖保存字段不同，避免把 `featured_video`、商品封面视频和付费视频字段混用。
+- [图片灯箱与媒体](/docs/guide/media-lightbox)：补齐 Ajax 后追加图片不进灯箱的源码级排查，明确 `auto_fun()`、`z_auto_fun()`、`a[data-imgbox]`、`.wp-posts-content img`、`.imgbox-container` 和 CDN/JS 延迟边界。
+- [媒体上传](/docs/api/media-upload)：补齐前台特色媒体在分享图、微信分享图、SEO 图和对象存储/CDN 迁移里的读取边界，明确 `cover_image`、`thumbnail_url`、WordPress 特色图、正文首图、商品 `product_config`、论坛缩略图和对象缓存之间不是同一条链。
+- [分享、海报与微信分享](/docs/api/share-posters-wechat)：补充交叉引用，提示 single 分享图通常走 `zib_post_thumbnail()`，不要把顶部 `cover_image` 误认为所有分享入口都会读取的字段。
+- [媒体上传](/docs/api/media-upload)：补充媒体抽查清单，把文章顶部封面、文章列表缩略图、海报、微信分享、SEO 隐藏图、论坛列表、商品图和订单图纳入同一轮验收。
+- 本地源码证据来自 `pages/newposts.php`、`action/new_posts.php`、`action/media.php`、`action/function.php`、`inc/functions/zib-attachment.php`、`inc/functions/zib-theme.php`、`inc/functions/zib-footer.php`、`inc/functions/zib-single.php`、`inc/functions/zib-posts-list.php`、`inc/functions/zib-share.php`、`inc/functions/zib-share-wechat.php`、`inc/functions/zib-header.php`、`inc/functions/shop/inc/product.php`、`inc/functions/shop/inc/functions.php`、`zibpay/functions/zibpay-func.php`、`inc/functions/bbs/inc/edit.php`、`inc/functions/bbs/action/ajax-posts.php`、`inc/functions/bbs/inc/functions.php`、`js/main.js`：按钮显示、上传、保存、顶部封面、列表预览、分享海报、微信分享、SEO 隐藏图、商品图、订单图、论坛帖子封面、分片上传、附件归属和灯箱动态初始化已纳入文档。
+
+已继续处理 SEO head、百度提交、搜索体系、多语言和内容审核收尾：
+
+- [SEO Head 与 robots](/docs/api/seo-head-robots)：补齐动态业务页 SEO 矩阵，把首页、文章/页面、taxonomy、搜索页、作者页、用户中心、消息中心、投稿编辑页、登录注册、购物车、商品、论坛对象和自定义动态页的数据来源拆开，并标注 `zib_seo_image()` 与顶部封面、分享图不是同一条链。
+- [SEO 与百度资源提交](/docs/api/seo-baidu-submission)：补齐提交触发与缓存矩阵，明确主动提交只发生在 `save_post` / `saved_term`，结果写入 `xzh_tui_back`，自动推送 JS 不写结果，快速收录仍受普通收录开关约束。
+- [搜索体系](/docs/api/search-system)：补齐搜索、SEO 与多语言联动，把 SEO title/description、URL 参数、Ajax route、热门词、历史词、翻译、审核和 Meilisearch 放进同一张排查表。
+- [多语言智能翻译与 JS 国际化](/docs/api/multilingual-translation-i18n)：补齐搜索、审核与用户输入边界，明确翻译运行在前台 DOM 层，不写回正文、评论、私信或订单数据，也不能替代保存前审核。
+- [内容审核与发布安全](/docs/api/content-audit-security)：补齐跨入口审核矩阵，覆盖投稿、评论、用户资料、私信、图片上传、论坛帖子、论坛版块、论坛话题/标签/分类和 AI 生成内容，并标注疑似结果、管理员绕过和普通用户测试边界。
+
+本地源码证据来自 `inc/functions/zib-head.php`、`inc/functions/zib-header.php`、`inc/functions/zib-theme.php`、`inc/functions/zib-search.php`、`js/main.js`、`inc/functions/zib-footer.php`、`inc/functions/zib-js-i18n.php`、`js/libs/translate.js`、`inc/class/api-audit-class.php`、`action/new_posts.php`、`action/comment.php`、`action/user.php`、`inc/functions/message/functions/ajax.php`、`inc/functions/zib-attachment.php`、`inc/functions/bbs/action/ajax-posts.php`、`inc/functions/bbs/action/ajax-plate.php` 和 `inc/functions/bbs/action/ajax-term.php`。
+
+随后继续同一条 P1/P2 链路，转入插件样本和后台设置专题，进度如下。
+
+已继续处理插件样本专题化第一段：
+
+- [插件制作指南](/docs/guide/plugin-making)：把 `plugin_demo`、`zibll_plugin-main`、`zib-diy`、`zib-language`、`zib-pay-posts`、`zib-sponsor`、`zibll-security-guard` 聚合成样本审计矩阵，补齐加载点选择、独立 option、CSF 设置页、代码注入输出、安全防护入口覆盖、日志 autoload 和停用清理边界。
+- 本地源码证据来自 `plugin_demo/index.php`、`zibll_plugin-main/index.php`、`zibll_plugin-main/includes/admin-options.php`、`zib-diy/options.php`、`zib-diy/functions.php`、`zib-language/index.php`、`zib-language/functions.php`、`zibll-security-guard/index.php`、`includes/guard-register.php`、`includes/guard-comment.php`、`includes/logs.php`，以及主题 CSF 保存链路 `inc/options/options.php`、`inc/csf-framework/classes/admin-options.class.php`。
+
+已继续处理后台设置与升级迁移脚本：
+
+- [后台设置菜单](/docs/codestar-framework/admin-options)：补齐 `pre_tabs`、`pre_fields`、`pre_sections` 三组预处理结构，明确一级 section、子 section、保存字段集、重置分区、子菜单锚点和 `$no_create` 性能保护之间的关系。
+- [保存流程与备份链路](/docs/codestar-framework/save-flow)：补齐更新通知、主题设置保存和升级迁移任务三条链路的边界，明确 `Zibll_version`、`update_theme_task_action`、`update_theme_tasks_completed`、分批 `continue` 状态和聚合 option 读取方式。
+- 本地源码证据来自 `inc/options/options.php`、`inc/options/upgrade.php`、`inc/csf-framework/classes/admin-options.class.php` 和 `inc/dependent.php`：更新后通知负责备份、刷新缓存和提示保存设置；历史数据迁移由超级管理员触发 Ajax 队列执行；迁移任务必须幂等、分批、可继续。
+
+下一步继续同一条 P1/P2 链路，转入：
+
+1. 后台列表权限清洗：评论、用户、认证、举报、邀请码、订单、论坛后台列表里的能力判断、批量操作和敏感字段显示。
+2. 插件样本专题化第二段：OAuth/账号绑定、用户中心增强、前台上传、支付资产样本和停用清理边界。
+
+## 上下文控制
+
+蒸馏时保持小批量推进：
+
+- 每次只读一个专题的官网文章、主题源码入口和 1 到 3 个插件样本。
+- 单批上下文接近 180k 时先总结当前证据、写入文档，再继续下一批。
+- 不把大段源码粘进文档，只保留路径、关键函数、Hook、数据结构和最小代码骨架。
+- 每批结束后运行格式、类型和构建检查，确保文档站能继续生成 `llms.txt`、MCP 文档和搜索索引。
+
+目标是让 AI 回答不仅能说“后台在哪里点”，还要能继续回答“源码在哪里、数据怎么存、二开怎么挂、出问题从哪里查”。

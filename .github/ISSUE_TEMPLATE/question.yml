@@ -1,0 +1,40 @@
+name: 使用问题
+description: 先查文档后，提交一个可以复现的使用或开发问题
+title: 'question: '
+labels: [question]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: 版本与环境
+      description: 请填写子比主题、WordPress、PHP 和相关插件版本。
+      placeholder: 子比主题 7.x / WordPress 6.x / PHP 8.2
+    validations:
+      required: true
+  - type: input
+    id: page
+    attributes:
+      label: 相关文档或源码路径
+      placeholder: /docs/api/hooks 或 inc/functions/bbs/
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 按顺序写出输入、操作和实际结果。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已删除 API Key、Cookie、密码和个人信息。
+          required: true
+        - label: 我已搜索文档和已有 Issue，确认不是重复问题。
+          required: true

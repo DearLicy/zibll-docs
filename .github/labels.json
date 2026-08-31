@@ -1,0 +1,102 @@
+[
+  {
+    "name": "bug",
+    "color": "d73a4a",
+    "description": "可以复现的错误或行为回归"
+  },
+  {
+    "name": "documentation",
+    "color": "0075ca",
+    "description": "文档内容、链接、翻译或信息架构"
+  },
+  {
+    "name": "enhancement",
+    "color": "a2eeef",
+    "description": "新能力或现有功能改进"
+  },
+  {
+    "name": "question",
+    "color": "d876e3",
+    "description": "需要更多上下文的使用或开发问题"
+  },
+  {
+    "name": "community",
+    "color": "0e8a16",
+    "description": "社区流程、治理和协作入口"
+  },
+  {
+    "name": "source-research",
+    "color": "5319e7",
+    "description": "主题、子主题或插件源码研究"
+  },
+  {
+    "name": "friend-link",
+    "color": "1e7d32",
+    "description": "友情链接申请和审核"
+  },
+  {
+    "name": "automated-pr",
+    "color": "6f42c1",
+    "description": "由仓库自动化创建的 Pull Request"
+  },
+  {
+    "name": "frontend",
+    "color": "fbca04",
+    "description": "Fumadocs 页面、组件、样式或交互"
+  },
+  {
+    "name": "mcp",
+    "color": "1d76db",
+    "description": "zibll-docs-mcp 协议、工具或发布"
+  },
+  {
+    "name": "codex-plugin",
+    "color": "1ebc44",
+    "description": "Codex 插件、Skill 或市场清单"
+  },
+  {
+    "name": "workers",
+    "color": "7057ff",
+    "description": "GitHub App feedback Worker"
+  },
+  {
+    "name": "github-actions",
+    "color": "2088ff",
+    "description": "GitHub Actions 和仓库自动化"
+  },
+  {
+    "name": "dependencies",
+    "color": "0366d6",
+    "description": "依赖版本更新"
+  },
+  {
+    "name": "javascript",
+    "color": "f1e05a",
+    "description": "JavaScript、TypeScript 或 Node.js 依赖"
+  },
+  {
+    "name": "needs-triage",
+    "color": "ededed",
+    "description": "等待维护者确认范围和优先级"
+  },
+  {
+    "name": "blocked",
+    "color": "b60205",
+    "description": "受外部条件或缺失信息阻塞"
+  },
+  {
+    "name": "good first issue",
+    "color": "7057ff",
+    "description": "适合首次参与项目的任务"
+  },
+  {
+    "name": "help wanted",
+    "color": "008672",
+    "description": "欢迎社区协助实现或核对"
+  },
+  {
+    "name": "skip-changelog",
+    "color": "ffffff",
+    "description": "不写入自动生成的发布说明"
+  }
+]

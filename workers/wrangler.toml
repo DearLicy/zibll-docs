@@ -1,0 +1,12 @@
+name = "zibll-docs-feedback"
+main = "feedback-bot.mjs"
+compatibility_date = "2026-08-30"
+workers_dev = true
+
+[vars]
+GITHUB_REPOSITORY_OWNER = "DearLicy"
+GITHUB_REPOSITORY_NAME = "zibll-docs"
+GITHUB_ISSUE_LABELS = "documentation"
+PUBLIC_SITE_URL = "https://dearlicy.github.io/zibll-docs"
+# Origin is scheme + host; the Pages project path is configured above.
+ALLOWED_ORIGINS = "https://dearlicy.github.io"

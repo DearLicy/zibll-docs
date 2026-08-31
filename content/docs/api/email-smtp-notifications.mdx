@@ -1,0 +1,363 @@
+---
+title: 邮件、SMTP 与验证码
+description: 扩展子比主题 SMTP 发信、HTML 邮件模板、验证码发送、业务通知邮件和后台邮件测试流程。
+---
+
+## 模块定位
+
+子比主题的邮件能力不是单独的通知中心，而是 WordPress `wp_mail()` 之上的一层统一包装。SMTP、发件人名称、HTML 邮件模板、验证码邮件、私信邮件、评论审核邮件、投稿审核邮件、友情链接审核邮件，以及论坛、商城、认证、封禁等业务通知，最终都会汇入 WordPress 邮件发送链路。
+
+| 文件                             | 作用                                                             |
+| -------------------------------- | ---------------------------------------------------------------- |
+| `inc/functions/zib-email.php`    | SMTP 配置、发件人名称、统一发送函数、HTML 邮件模板、常见业务通知 |
+| `action/function.php`            | 邮箱/手机验证码生成、发送、校验、Ajax 返回                       |
+| `action/sign_register.php`       | 登录、注册、找回密码验证码入口                                   |
+| `action/user.php`                | 绑定邮箱、绑定手机、用户安全验证验证码入口                       |
+| `inc/options/action.php`         | 后台邮件发送测试 Ajax                                            |
+| `inc/functions/message/*`        | 站内消息、私信和部分邮件通知                                     |
+| `inc/functions/shop/inc/msg.php` | 商城订单、发货、售后等邮件通知                                   |
+| `inc/functions/bbs/*`            | 论坛审核、版主处理、帖子消息等邮件通知                           |
+
+扩展邮件时先判断是“发信通道”“邮件模板”“验证码流程”还是“业务通知”。不要在业务代码里重新配置 SMTP，也不要绕过主题验证码校验。
+
+## SMTP 接管
+
+主题通过 `phpmailer_init` 接管 PHPMailer：
+
+```php
+function zib_mail_smtp($phpmailer)
+{
+    if (_pz('mail_smtps')) {
+        $phpmailer->IsSMTP();
+        $phpmailer->FromName   = _pz('mail_showname');
+        $phpmailer->Host       = _pz('mail_host', 'smtp.qq.com');
+        $phpmailer->Port       = _pz('mail_port', '465');
+        $phpmailer->Username   = _pz('mail_smtp_name') ?: _pz('mail_name');
+        $phpmailer->Sender     = _pz('mail_name', '88888888@qq.com');
+        $phpmailer->Password   = _pz('mail_passwd', '123456789');
+        $phpmailer->From       = _pz('mail_name', '88888888@qq.com');
+        $phpmailer->SMTPAuth   = _pz('mail_smtpauth', true);
+        $phpmailer->SMTPSecure = _pz('mail_smtpsecure', 'ssl');
+    }
+}
+add_action('phpmailer_init', 'zib_mail_smtp');
+```
+
+发件人名称走 `wp_mail_from_name`：
+
+```php
+function zib_mail_from_name($from_name)
+{
+    return _pz('mail_showname', get_bloginfo('name'));
+}
+add_filter('wp_mail_from_name', 'zib_mail_from_name');
+```
+
+新增邮件功能时只调用 `wp_mail()`、`zib_send_email()` 或 `zib_mail_to_admin()`，不要再次挂 `phpmailer_init` 修改 Host、Port、Username、Password。多个 SMTP 接管器同时存在时，最后执行的配置会覆盖前面的配置，问题很难排查。
+
+## 统一发送函数
+
+主题提供两个轻量封装：
+
+```php
+function zib_mail_to_admin($title, $message)
+{
+    $emails = zib_get_admin_user_emails();
+    if ($emails) {
+        foreach ($emails as $e) {
+            @wp_mail($e, $title, $message);
+        }
+    }
+}
+```
+
+```php
+function zib_send_email($to, $title, $message)
+{
+    if (is_array($to)) {
+        $to = array_unique($to);
+        foreach ($to as $e) {
+            zib_send_email($e, $title, $message);
+        }
+    } else {
+        if ($to && is_email($to) && !stristr($to, '@no')) {
+            @wp_mail($to, $title, $message);
+        }
+    }
+}
+```
+
+`zib_send_email()` 会跳过无效邮箱和包含 `@no` 的占位邮箱。扩展用户通知时应保留这个判断，避免把系统占位邮箱、未绑定邮箱或无效邮箱送进 SMTP 队列。
+
+发送给管理员：
+
+```php
+function zib_docs_notice_admin($post_id)
+{
+    $title   = __('有新的内容需要处理', 'zib_language');
+    $message = __('内容ID：', 'zib_language') . (int) $post_id . '<br>';
+    $message .= '<a class="but jb-blue" href="' . esc_url(get_edit_post_link($post_id)) . '">' . __('立即查看', 'zib_language') . '</a>';
+
+    zib_mail_to_admin($title, $message);
+}
+```
+
+发送给一组用户：
+
+```php
+function zib_docs_notice_users($user_ids, $title, $message)
+{
+    $emails = array();
+
+    foreach ((array) $user_ids as $user_id) {
+        $user = get_userdata($user_id);
+        if ($user && is_email($user->user_email)) {
+            $emails[] = $user->user_email;
+        }
+    }
+
+    zib_send_email($emails, $title, $message);
+}
+```
+
+## HTML 邮件模板
+
+所有 `wp_mail` 参数会经过 `wp_mail` Filter：
+
+```php
+add_filter('wp_mail', 'zib_get_mail_content');
+```
+
+`zib_get_mail_content()` 会做几件事：
+
+| 处理      | 说明                                          |
+| --------- | --------------------------------------------- |
+| `nl2br()` | 把纯文本换行转成 HTML 换行                    |
+| Logo      | 使用 `_pz('logo_src')`                        |
+| 站点描述  | 使用 `_pz('mail_description')` 或站点描述     |
+| 更多内容  | 使用 `_pz('mail_more_content')`               |
+| 背景图    | 使用主题内置 `img/mail-bg.png`                |
+| 标题前缀  | 使用 `_pz('mail_title_prefix')`               |
+| 邮件头    | 强制 `Content-Type: text/html; charset=UTF-8` |
+
+因此业务邮件的 `$message` 可以使用少量 HTML，例如 `<br>`、`.muted-box`、`.but jb-blue`。不要输出完整 `<html>`、`<body>` 或重复的全局样式，主题模板会统一包裹。
+
+推荐的消息片段：
+
+```php
+$message = sprintf(__('您好！%s', 'zib_language'), $user->display_name) . '<br>';
+$message .= __('您的申请已处理完成', 'zib_language') . '<br>';
+$message .= '<div class="muted-box">' . esc_html($remark) . '</div>';
+$message .= '<a class="but jb-blue" href="' . esc_url($url) . '">' . __('查看详情', 'zib_language') . '</a>';
+```
+
+用户输入必须转义后再拼进邮件。邮件是 HTML 环境，评论内容、私信内容、申请备注、链接描述和商品信息都可能带入用户输入。
+
+## 验证码发送
+
+验证码核心在 `action/function.php`。生成 6 位数字：
+
+```php
+function zib_get_captcha($counts = 6)
+{
+    $originalcode = '0,1,2,3,4,5,6,7,8,9';
+    $originalcode = explode(',', $originalcode);
+    $countdistrub = 10;
+    $_dscode      = '';
+    for ($j = 0; $j < $counts; $j++) {
+        $dscode = $originalcode[rand(0, $countdistrub - 1)];
+        $_dscode .= $dscode;
+    }
+    return strtolower($_dscode);
+}
+```
+
+`zib_send_captcha($to, $type)` 会把验证码、接收对象和发送时间写入 session：
+
+```php
+$_SESSION['zib_captcha']         = $code;
+$_SESSION['zib_verification_to'] = $to;
+$_SESSION['zib_captcha_time']    = current_time('mysql');
+```
+
+同一会话 60 秒内不能重复发送，验证码 30 分钟内有效。邮箱验证码最终仍然调用 `wp_mail()`，所以会套用主题 HTML 邮件模板和 SMTP 配置。
+
+Ajax 发送验证码统一使用：
+
+```php
+function zib_ajax_send_captcha($captcha_type, $to, $judgment = true)
+{
+    if ($judgment) {
+        $captcha      = zib_ajax_captcha_form_judgment($captcha_type, $to);
+        $captcha_type = $captcha['type'];
+        $to           = $captcha['to'];
+    }
+
+    $send = zib_send_captcha($to, $captcha_type);
+    echo json_encode($send);
+    exit;
+}
+```
+
+扩展新的验证码入口时，不要直接调用 `zib_send_captcha()` 后返回自定义格式。应保留：
+
+- nonce 校验。
+- 人机验证。
+- 邮箱或手机号格式判断。
+- 60 秒发送间隔。
+- session 中的接收对象绑定。
+- 统一 JSON 响应格式。
+
+## 验证码校验
+
+校验入口：
+
+```php
+function zib_is_captcha($to, $code, $msg_prefix = '')
+```
+
+它会检查错误频率限制、验证码是否匹配、接收对象是否一致、是否超过 30 分钟，并在成功后重置错误频率限制。
+
+Ajax 场景使用：
+
+```php
+function zib_ajax_is_captcha($to_name = 'email', $code_name = 'captch')
+```
+
+示例：给自定义安全操作增加邮箱验证码：
+
+```php
+function zib_docs_ajax_sensitive_action()
+{
+    zib_ajax_wp_verify_nonce('docs_sensitive_action');
+
+    if (!is_user_logged_in()) {
+        zib_send_json_error(__('请先登录', 'zib_language'));
+    }
+
+    zib_ajax_is_captcha('email', 'captch');
+
+    $user_id = get_current_user_id();
+
+    // 验证通过后再执行敏感操作。
+    zib_update_user_meta($user_id, 'docs_sensitive_checked', current_time('mysql'));
+
+    zib_send_json_success(array(
+        'msg' => __('操作成功', 'zib_language'),
+    ));
+}
+add_action('wp_ajax_docs_sensitive_action', 'zib_docs_ajax_sensitive_action');
+```
+
+不要只校验验证码文本。`zib_is_captcha()` 同时校验 session 里的接收对象，能防止“给 A 邮箱发验证码，却拿来验证 B 邮箱”的问题。
+
+## 登录注册相关入口
+
+登录注册和账号安全会复用验证码函数：
+
+| Ajax action             | 作用                 |
+| ----------------------- | -------------------- |
+| `signup_captcha`        | 注册验证码           |
+| `signin_captcha`        | 免密登录验证码       |
+| `resetpassword_captcha` | 找回密码验证码       |
+| `bind_email_captcha`    | 绑定邮箱验证码       |
+| `bind_phone_captcha`    | 绑定手机验证码       |
+| `verify_user_captcha`   | 当前用户敏感操作验证 |
+
+这些入口还会结合 `zib_ajax_man_machine_verification()`、`zib_ajax_captcha_form_judgment()`、`zib_ajax_email_judgment()`、`email_exists()`、`zib_get_user_by('phone')` 等检查。新增登录或安全流程时应复用这些入口，不要另开一个缺少人机验证和频率限制的公开 Ajax。
+
+## 业务通知邮件
+
+`inc/functions/zib-email.php` 内置的业务通知包括：
+
+| 场景               | Hook 或条件                              |
+| ------------------ | ---------------------------------------- |
+| 私信通知           | `zib_add_message`，且开启消息与私信      |
+| 评论审核通过       | `comment_unapproved_to_approved`         |
+| 投稿审核通过       | `pending_to_publish`                     |
+| 内容驳回为待审核   | `publish_to_pending`                     |
+| 友情链接提交待审核 | `zib_ajax_frontend_links_submit_success` |
+
+其他业务模块也会发送邮件：
+
+| 模块     | 常见场景                                   |
+| -------- | ------------------------------------------ |
+| 消息模块 | 新消息、系统通知、绑定邮箱联动             |
+| 商城模块 | 下单、付款、发货、售后、分成、订单状态变化 |
+| 论坛模块 | 帖子审核、版主处理、申诉和通知             |
+| 用户模块 | 认证处理、封禁、申诉、资料安全             |
+
+积分和余额转账成功后会触发 `pay_transfer`，消息模块会给接收人写入站内消息；`email_transfer_to_recipient` 开启时，还会给接收人的有效邮箱发送转账通知。邮件里的实际到账金额会按手续费重新计算，余额保留 2 位小数，积分转成整数；完整转账流程见 [用户资产、积分与余额](/docs/api/user-assets-points-balance)。
+
+Zibpay 的订单和提现通知并不是所有支付都会发送。购买成功通知用户、管理员新订单通知、作者分成通知和推荐人佣金通知分别有自己的金额、支付方式和接收方判断；返佣、分成和提现的详细触发条件见 [Zibpay 分佣与提现](/docs/api/zibpay-rebate-withdraw)。
+
+扩展业务通知时要尽量挂在业务已经成功的 Action 后面。不要在表单刚提交时就发“已完成”邮件，也不要在订单、审核、绑定等事务还没落库前发送最终通知。
+
+示例：内容通过审核后追加一封自定义提醒：
+
+```php
+function zib_docs_pending_to_publish_notice($post)
+{
+    if (get_post_meta($post->ID, 'docs_publish_notice_sent', true)) {
+        return;
+    }
+
+    $user = get_userdata($post->post_author);
+    if (!$user || !is_email($user->user_email) || stristr($user->user_email, '@no')) {
+        return;
+    }
+
+    $title   = __('内容已发布', 'zib_language');
+    $message = sprintf(__('您好！%s', 'zib_language'), $user->display_name) . '<br>';
+    $message .= sprintf(__('您的内容[%s]已经发布。', 'zib_language'), get_the_title($post)) . '<br>';
+    $message .= '<a class="but jb-blue" href="' . esc_url(get_permalink($post)) . '">' . __('立即查看', 'zib_language') . '</a>';
+
+    update_post_meta($post->ID, 'docs_publish_notice_sent', true);
+    zib_send_email($user->user_email, $title, $message);
+}
+add_action('pending_to_publish', 'zib_docs_pending_to_publish_notice', 120);
+```
+
+这里先写入 `docs_publish_notice_sent`，避免状态反复切换时重复发送。
+
+## 后台邮件测试
+
+后台测试邮件 Ajax 是 `test_send_mail`：
+
+```php
+add_action('wp_ajax_test_send_mail', 'zib_test_send_mail');
+```
+
+它要求当前用户是超级管理员，校验邮箱格式后调用 `wp_mail()`。由于仍然走 `wp_mail()`，所以测试结果可以同时验证：
+
+- SMTP 主机、端口、账号、密码。
+- 发件人名称。
+- HTML 邮件模板。
+- 邮件标题前缀。
+- 服务器到 SMTP 服务商的连通性。
+
+调试邮件失败时，先用后台测试邮件确认通道，再检查业务 Hook 是否触发。不要直接在业务代码里 `var_dump()` PHPMailer 密码、SMTP 账号或完整错误对象到前台。
+
+## 扩展检查
+
+| 场景               | 应检查                                                   |
+| ------------------ | -------------------------------------------------------- |
+| 新增验证码入口     | nonce、人机验证、60 秒节流、30 分钟有效期、接收对象绑定  |
+| 新增业务邮件       | 业务是否已成功落库、是否会重复发送、用户邮箱是否有效     |
+| 发送给管理员       | 是否使用 `zib_mail_to_admin()`，是否可能泄露用户敏感数据 |
+| 发送给多个用户     | 是否去重、是否跳过无效邮箱、是否避免一次请求发送过多     |
+| 邮件内容含用户输入 | 是否 `esc_html()`、`esc_url()` 或使用主题安全输出函数    |
+| SMTP 配置          | 是否只由主题设置接管，是否存在插件二次覆盖               |
+| 邮件模板           | 是否避免重复完整 HTML，是否保留主题按钮和 muted-box 样式 |
+
+## 常见误区
+
+- 不要在业务模块里重复配置 SMTP。
+- 不要绕过 `zib_ajax_send_captcha()` 自己写公开验证码接口。
+- 不要只验证验证码数字，不验证接收邮箱或手机号。
+- 不要给包含 `@no` 的占位邮箱发通知。
+- 不要在 `wp_mail` 内容里输出完整页面 HTML。
+- 不要把 SMTP 密码、邮件调试错误、用户邮箱列表输出给前台。
+- 不要在状态未确认前发送“成功”类邮件。
+
+本页根据 `inc/functions/zib-email.php`、`action/function.php`、`action/sign_register.php`、`action/user.php`、`inc/options/action.php`、消息模块、论坛模块和商城模块的邮件调用点蒸馏整理。

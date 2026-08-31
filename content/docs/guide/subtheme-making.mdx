@@ -1,0 +1,446 @@
+---
+title: 子主题制作指南
+description: 基于子比主题制作长期可维护的子主题，覆盖父主题加载、目录组织、模板覆盖、CSF 配置、站点级函数与版本结构差异。
+---
+
+子主题适合承载和站点强绑定的样式、模板覆盖、页面结构和主题级配置。它的目标不是把所有功能都写进 `functions.php`，而是给当前站点建立一个不会被父主题更新覆盖的开发层。
+
+如果功能需要独立安装、停用、分发给多个站点复用，优先阅读 [插件制作指南](/docs/guide/plugin-making)。
+
+## 适用场景
+
+| 场景                         | 是否适合子主题 |
+| ---------------------------- | -------------- |
+| 覆盖父主题模板               | 适合           |
+| 调整整站样式和页面结构       | 适合           |
+| 承载当前站点专属配置         | 适合           |
+| 扩展支付、订单、商城页面模板 | 适合           |
+| 多站点复用的通用功能         | 更适合插件     |
+| 可随时停用的业务模块         | 更适合插件     |
+
+子主题的优势是能自然继承父主题能力，并用 WordPress 模板层覆盖父主题文件。风险是它和当前站点绑定更紧，所以需要清晰目录和稳定加载链。
+
+## 最小结构
+
+```text
+zibll-site-child/
+├── functions.php
+├── style.css
+├── func.php
+└── includes/
+    ├── index.php
+    ├── functions/
+    │   └── functions.php
+    └── options/
+        ├── admin-options.php
+        └── options.php
+```
+
+`style.css` 里必须声明父主题模板：
+
+```css
+/*
+Theme Name: Zibll Site Child
+Template: zibll
+Version: 1.0.0
+*/
+```
+
+`Template: zibll` 要和父主题目录名一致。父主题目录如果不是 `zibll`，WordPress 无法正确继承。
+
+## 加载顺序
+
+子主题入口先加载父主题核心，再加载自己的扩展层：
+
+```php
+<?php
+require_once get_theme_file_path('/inc/inc.php');
+require_once get_theme_file_path('/includes/index.php');
+
+if (file_exists(get_theme_file_path('/func.php'))) {
+    require_once get_theme_file_path('/func.php');
+}
+```
+
+`func.php` 只适合少量站点级代码。长期功能应拆到 `includes/functions/`、`includes/options/` 或更明确的模块目录。
+
+`includes/index.php` 负责配置读取和模块加载：
+
+```php
+<?php
+function zibll_child_get_option($key, $default = false, $subkey = '')
+{
+    static $options = null;
+
+    if (null === $options) {
+        $options = get_option('zibll_child_options');
+    }
+
+    if (isset($options[$key])) {
+        if ($subkey) {
+            return isset($options[$key][$subkey]) ? $options[$key][$subkey] : $default;
+        }
+
+        return $options[$key];
+    }
+
+    return $default;
+}
+
+zib_require(array(
+    'includes/options/options',
+    'includes/functions/functions',
+), true);
+```
+
+子比主题已有 `zib_require()`，子主题可以沿用这种加载方式，保持主题风格一致。
+
+## Vela 样本校准
+
+本地 `主题插件子主题/子主题开发/Vela` 是一个可参考的子主题样本。它的 `functions.php` 先引入子主题自己的 metabox 前置文件，再引入父主题核心 `inc/inc.php`，随后加载子主题 `includes/index.php`，最后按需加载 `func.php`。
+
+这个顺序适合说明三个边界：
+
+| 边界         | 样本做法                                                                | 新项目建议                                                             |
+| ------------ | ----------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| 父主题继承   | `style.css` 声明 `Template: zibll`                                      | 父主题目录名变更时必须同步修改，否则 WordPress 不会按子主题继承        |
+| 父主题核心   | `functions.php` 显式 `require_once get_theme_file_path('/inc/inc.php')` | 子主题需要复用子比加载链时，先让父主题核心完成初始化，再加载自己的模块 |
+| 站点临时代码 | 如果存在 `func.php` 就加载                                              | `func.php` 只放少量临时站点代码；长期能力拆进 `includes/` 或独立插件   |
+
+Vela 还把主题名称、版本、最低 WordPress/PHP 要求写在 `style.css` 里。发布子主题时不要只改 PHP 文件，样式头信息同样是 WordPress 识别、更新和排查的重要证据。
+
+## 版本结构差异
+
+公开参考项目里存在两种结构：
+
+| 版本结构 | 入口目录    | 特点                                           |
+| -------- | ----------- | ---------------------------------------------- |
+| 新结构   | `includes/` | 设置、函数、扩展模块统一放在 `includes` 下     |
+| 旧结构   | `core/`     | 入口是 `core/core.php`，设置在 `core/options/` |
+
+两种结构的思想一致：`functions.php` 不写业务，核心入口负责读取配置并加载模块。新项目建议使用 `includes/`，维护时看到旧版 `core/` 结构也可以按同样思路迁移。
+
+## CSF 设置
+
+子主题可以创建自己的设置页，配置保存到独立 option key：
+
+```php
+<?php
+if (is_admin()) {
+    zib_require(array(
+        'admin-options',
+    ), false, 'includes/options/');
+}
+
+add_filter('csf_fa4', '__return_true');
+```
+
+后台设置示例：
+
+```php
+<?php
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+if (class_exists('CSF')) {
+    $prefix = 'zibll_child_options';
+
+    CSF::createOptions($prefix, array(
+        'menu_title'      => '子主题设置',
+        'menu_slug'       => 'zibll_child_options',
+        'framework_title' => '子主题设置 <small>v1.0.0</small>',
+        'theme'           => 'light',
+    ));
+
+    CSF::createSection($prefix, array(
+        'id'     => 'base',
+        'title'  => '基础设置',
+        'icon'   => 'fa fa-cog',
+        'fields' => array(
+            array(
+                'id'      => 'enable_custom_style',
+                'type'    => 'switcher',
+                'title'   => '启用自定义样式',
+                'default' => false,
+            ),
+        ),
+    ));
+}
+```
+
+读取时统一走 `zibll_child_get_option()`，不要在模板文件里直接访问 `get_option()`。
+
+设置页字段较多时，也建议做懒构建：先创建菜单和一级分组，只有打开当前设置页或处理 CSF 自身保存 Ajax 时才创建完整字段。这样能减少后台其它页面的开销，也能避免默认设置在不相关请求中被提前写入。
+
+```php
+function zibll_child_create_options()
+{
+    if (!is_admin() || !class_exists('CSF')) {
+        return;
+    }
+
+    $prefix = 'zibll_child_options';
+    $is_self_page = !empty($_GET['page']) && $prefix === sanitize_key($_GET['page']);
+    $is_csf_ajax  = wp_doing_ajax()
+        && !empty($_POST['action'])
+        && false !== strpos(sanitize_text_field(wp_unslash($_POST['action'])), 'csf_' . $prefix);
+
+    CSF::createOptions($prefix, array(
+        'menu_title'    => '子主题设置',
+        'menu_slug'     => $prefix,
+        'save_defaults' => $is_self_page || $is_csf_ajax,
+        'theme'         => 'light',
+    ));
+
+    CSF::createSection($prefix, array(
+        'id'    => 'basic',
+        'title' => '全局与功能',
+        'icon'  => 'fa fa-bullseye',
+    ));
+
+    if (!$is_self_page && !$is_csf_ajax) {
+        return;
+    }
+
+    CSF::createSection($prefix, array(
+        'parent' => 'basic',
+        'title'  => '功能设置',
+        'fields' => array(
+            array(
+                'id'      => 'enable_feature',
+                'type'    => 'switcher',
+                'title'   => '启用功能',
+                'default' => false,
+            ),
+        ),
+    ));
+}
+zibll_child_create_options();
+```
+
+## 模板覆盖
+
+覆盖模板时，把父主题同路径文件复制到子主题中：
+
+```text
+父主题: wp-content/themes/zibll/header.php
+子主题: wp-content/themes/zibll-site-child/header.php
+```
+
+覆盖前先确认这个模板是否真的适合复制。很多展示能力可以通过 Hook、过滤器、短代码或主题函数完成，能用 Hook 完成的就不要复制整份模板。
+
+模板覆盖建议遵循三条规则：
+
+1. 只覆盖必须改的文件。
+2. 文件顶部保留来源和修改说明。
+3. 父主题更新后对比原模板变化，及时同步安全修复和结构变化。
+
+## 站点级函数
+
+功能函数放在 `includes/functions/functions.php`：
+
+```php
+<?php
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+function zibll_child_body_class($classes)
+{
+    if (zibll_child_get_option('enable_custom_style')) {
+        $classes[] = 'zibll-child-custom-style';
+    }
+
+    return $classes;
+}
+add_filter('body_class', 'zibll_child_body_class');
+```
+
+保持命名函数，不用匿名函数堆业务。这样后续可以通过 `remove_action()`、`remove_filter()` 精确调整。
+
+## 支付和商城页面
+
+子主题适合维护支付、订单、商品、佣金、提现等页面模板扩展。处理这类页面时要先查主题已有文件和函数：
+
+| 能力         | 优先查找                  |
+| ------------ | ------------------------- |
+| 支付单创建   | 主题扩展里的 Zibpay 文档  |
+| 商城商品数据 | 商城模块和购物车下单文档  |
+| 用户中心页面 | 用户中心与 Ajax Page 文档 |
+| 页面模板     | 父主题对应模板路径        |
+
+不要把支付校验只放在前端模板里。金额、库存、权限、地址、邮箱、必填项必须在服务端二次校验。
+
+如果覆盖支付或商城页面，建议把页面拆成主模板和局部模板：
+
+```text
+zibpay/
+└── page/
+    ├── order.php
+    ├── product.php
+    ├── shop.php
+    └── template/
+        ├── header.php
+        ├── footer.php
+        ├── order-item.php
+        └── shipping-address.php
+```
+
+主模板负责页面框架、权限和数据入口；局部模板负责展示片段。这样后续只改订单项、收货地址、发货信息或底部动作时，不需要复制整页。
+
+## 配置备份
+
+子主题承载站点级设置时，应提供配置备份能力。至少在重置、导入、结构升级前创建备份，并限制保留数量：
+
+```php
+function zibll_child_options_backup($type = '自动备份')
+{
+    $prefix  = 'zibll_child_options';
+    $options = get_option($prefix);
+    $backups = get_option($prefix . '_backup');
+
+    if (!$backups || !is_array($backups)) {
+        $backups = array();
+    }
+
+    $time = current_time('Y-m-d H:i:s');
+    $backups[$time] = array(
+        'time' => $time,
+        'type' => $type,
+        'data' => $options,
+    );
+
+    if (count($backups) > 20) {
+        $backups = array_slice($backups, -20, null, true);
+    }
+
+    return update_option($prefix . '_backup', $backups);
+}
+
+function zibll_child_backup_before_reset()
+{
+    zibll_child_options_backup('重置前自动备份');
+}
+add_action('csf_zibll_child_options_reset_before', 'zibll_child_backup_before_reset');
+add_action('csf_zibll_child_options_reset_section_before', 'zibll_child_backup_before_reset');
+```
+
+导入配置前同样先备份当前配置，再校验 JSON：
+
+```php
+function zibll_child_ajax_options_import()
+{
+    if (!current_user_can('manage_options')) {
+        zib_send_json_error('操作权限不足');
+    }
+
+    $data = isset($_REQUEST['import_data']) ? trim(wp_unslash($_REQUEST['import_data'])) : '';
+    if (!$data) {
+        zib_send_json_error('请粘贴需要导入的配置');
+    }
+
+    $import_data = json_decode($data, true);
+    if (!is_array($import_data)) {
+        zib_send_json_error('配置格式错误，无法导入');
+    }
+
+    zibll_child_options_backup('导入前自动备份');
+    update_option('zibll_child_options', $import_data);
+
+    zib_send_json_success(array(
+        'msg'    => '配置已导入，请刷新页面',
+        'reload' => 1,
+    ));
+}
+add_action('wp_ajax_zibll_child_options_import', 'zibll_child_ajax_options_import');
+```
+
+备份、恢复、删除这类后台 Ajax 只开放给管理员，并且不要接受任意 option key。前端展示按钮可以复用主题的 `ajax-get`、`ajax-submit`、`ajax-notice` 交互结构，但服务端仍然要独立校验权限和参数。
+
+## 文章与分类保存扩展
+
+子主题常见需求是在文章或分类保存后同步外部服务，例如搜索引擎推送、缓存刷新、远程索引更新。推荐模式是：检查开关和密钥、只处理已发布内容、成功后写入 post meta 或 term meta，避免每次保存重复提交。
+
+```php
+function zibll_child_submit_resource_url($url)
+{
+    if (!zibll_child_get_option('resource_submit_enabled')) {
+        return array();
+    }
+
+    $token = zibll_child_get_option('resource_submit_token', '');
+    if (!$token || !$url) {
+        return array();
+    }
+
+    $response = wp_remote_post('https://example.com/submit', array(
+        'headers' => array(
+            'Content-Type' => 'application/json',
+        ),
+        'body'    => wp_json_encode(array(
+            'siteUrl' => home_url(),
+            'urlList' => (array) $url,
+        )),
+        'timeout' => 30,
+    ));
+
+    if (is_wp_error($response)) {
+        return array(
+            'success' => false,
+            'message' => $response->get_error_message(),
+        );
+    }
+
+    return array(
+        'success'     => 200 === wp_remote_retrieve_response_code($response),
+        'message'     => wp_remote_retrieve_body($response),
+        'update_time' => current_time('Y-m-d H:i:s'),
+    );
+}
+
+function zibll_child_save_post_submit($post_id)
+{
+    if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) {
+        return;
+    }
+
+    if (!current_user_can('edit_post', $post_id)) {
+        return;
+    }
+
+    $post = get_post($post_id);
+    if (!$post || 'publish' !== $post->post_status) {
+        return;
+    }
+
+    $submitted = zib_get_post_meta($post_id, 'resource_submit_result', true);
+    if (!empty($submitted['success'])) {
+        return;
+    }
+
+    $result = zibll_child_submit_resource_url(get_permalink($post_id));
+    zib_update_post_meta($post_id, 'resource_submit_result', $result);
+}
+add_action('save_post', 'zibll_child_save_post_submit');
+```
+
+分类保存可以用 `saved_term`，并通过 `zib_get_term_meta()` / `zib_update_term_meta()` 记录结果。不要在保存 Hook 里对草稿、自动保存、修订版本或无权限请求发起远程请求。
+
+## 更新与备份
+
+子主题发布前检查：
+
+| 检查项          | 要求                               |
+| --------------- | ---------------------------------- |
+| `style.css`     | `Template` 正确，版本号更新        |
+| `functions.php` | 先加载父主题核心，再加载子主题入口 |
+| 配置            | 使用独立 option key                |
+| 备份            | 重置、导入、结构升级前创建配置备份 |
+| 模板覆盖        | 只覆盖必要文件，并记录来源         |
+| Hook            | 函数命名清晰，优先级明确           |
+| 输出            | 前台输出转义，后台保存校验         |
+| 支付            | 关键校验在服务端                   |
+| 备份            | 涉及配置结构变化时先备份           |
+
+子主题不是临时补丁目录。越早把目录、命名、配置和加载顺序固定下来，后面越容易跟随父主题升级。

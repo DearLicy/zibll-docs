@@ -1,0 +1,888 @@
+---
+title: 主题小工具与侧栏
+description: 扩展子比主题 inc/widgets、小工具注册、页面容器、侧栏位置、CSF 小工具、显示规则和 Ajax 小工具加载。
+---
+
+## 模块入口
+
+子比主题小工具模块位于 `inc/widgets`，入口文件是 `widget-index.php`：
+
+```php
+zib_require(array(
+    'more',
+    'posts',
+    'user',
+    'slider',
+    'produck',
+    'import',
+), false, '/inc/widgets/widget-');
+```
+
+| 文件                 | 作用                                                                 |
+| -------------------- | -------------------------------------------------------------------- |
+| `widget-class.php`   | `Zib_CFSwidget` 兼容层、流式侧栏外层处理                             |
+| `widget-index.php`   | 注册侧栏位置、页面小工具容器、后台资源、通用 Ajax 小工具入口         |
+| `widget-more.php`    | 图标卡片、视频、iframe、图文封面、按钮、标签云、评论、链接等展示模块 |
+| `widget-posts.php`   | 文章列表、文章 Tab、分类卡片、付费内容、热门文章等                   |
+| `widget-user.php`    | 当前用户卡片、作者卡片、用户排行、用户列表                           |
+| `widget-slider.php`  | 轮播、图文轮播、封面类模块                                           |
+| `widget-produck.php` | 价格方案、评价、FAQ、数据统计、亮点卡片、功能介绍等产品化展示模块    |
+| `widget-import.php`  | 小工具导入导出相关能力                                               |
+
+主题同时保留传统 `WP_Widget` 写法和 Codestar Framework 小工具写法。新的扩展优先使用 `Zib_CFSwidget::create()` 或 `CSF::createWidget()`，后台字段更一致，也能复用主题的标题、吸附、显示规则和动画能力。
+
+## 侧栏位置
+
+主题在 `widgets_init` 注册基础侧栏：
+
+```php
+add_action('widgets_init', 'zib_main_register_sidebar');
+add_action('widgets_init', 'zib_main_register_sidebar_2', 99);
+```
+
+主页面类型包括：
+
+| 页面 key | 页面   |
+| -------- | ------ |
+| `home`   | 首页   |
+| `single` | 文章页 |
+| `cat`    | 分类页 |
+| `tag`    | 标签页 |
+| `search` | 搜索页 |
+
+每类页面会生成这些位置：
+
+| 位置 key         | 说明       |
+| ---------------- | ---------- |
+| `top_fluid`      | 顶部全宽度 |
+| `top_content`    | 主内容上面 |
+| `bottom_content` | 主内容下面 |
+| `bottom_fluid`   | 底部全宽度 |
+| `sidebar`        | 侧边栏     |
+
+此外还有全局位置：
+
+| Sidebar id                | 说明               |
+| ------------------------- | ------------------ |
+| `all_top_fluid`           | 多数页面顶部全宽度 |
+| `all_bottom_fluid`        | 多数页面底部全宽度 |
+| `all_sidebar_top`         | 多数页面侧边栏顶部 |
+| `all_sidebar_bottom`      | 多数页面侧边栏底部 |
+| `all_footer`              | 底部脚区内部       |
+| `mobile_nav_fluid`        | 移动端弹出菜单底部 |
+| `newposts_sidebar_top`    | 前台投稿侧边栏顶部 |
+| `newposts_sidebar_bottom` | 前台投稿侧边栏底部 |
+
+作者页、用户中心、消息中心只注册全宽位置：
+
+| 页面 key | 位置                                                      |
+| -------- | --------------------------------------------------------- |
+| `author` | `author_top_fluid`、`author_bottom_fluid`                 |
+| `user`   | `user_top_fluid`、`user_bottom_fluid`、`user_top_content` |
+| `msg`    | `msg_top_fluid`、`msg_bottom_fluid`                       |
+
+## 模板输出位置
+
+模板里通过 `dynamic_sidebar()` 输出侧栏。例如首页：
+
+```php
+dynamic_sidebar('all_top_fluid');
+dynamic_sidebar('home_top_fluid');
+dynamic_sidebar('home_top_content');
+dynamic_sidebar('home_bottom_content');
+dynamic_sidebar('home_bottom_fluid');
+dynamic_sidebar('all_bottom_fluid');
+```
+
+文章页：
+
+```php
+dynamic_sidebar('all_top_fluid');
+dynamic_sidebar('single_top_fluid');
+dynamic_sidebar('single_top_content');
+dynamic_sidebar('single_bottom_content');
+dynamic_sidebar('single_bottom_fluid');
+dynamic_sidebar('all_bottom_fluid');
+```
+
+分类页：
+
+```php
+dynamic_sidebar('all_top_fluid');
+dynamic_sidebar('cat_top_fluid');
+dynamic_sidebar('cat_top_content');
+dynamic_sidebar('cat_bottom_content');
+dynamic_sidebar('cat_bottom_fluid');
+dynamic_sidebar('all_bottom_fluid');
+```
+
+作者页：
+
+```php
+dynamic_sidebar('all_top_fluid');
+dynamic_sidebar('author_top_fluid');
+dynamic_sidebar('author_bottom_fluid');
+dynamic_sidebar('all_bottom_fluid');
+```
+
+扩展时先确认模块应该出现在哪个页面和哪个位置。全宽 `fluid` 位置适合横向模块，`sidebar` 位置适合窄卡片，不要把依赖大宽度的模块放进窄侧栏。
+
+## 流式位置外层
+
+`widget-class.php` 会过滤 `dynamic_sidebar_params`：
+
+```php
+function zib_cfswidget_dynamic_sidebar_params($params)
+{
+    $id = $params[0]['id'];
+
+    if (strstr($id, 'fluid')) {
+        $params[0]['before_widget'] = '<div class="widget-container">' . $params[0]['before_widget'];
+        $params[0]['after_widget']  = $params[0]['after_widget'] . '</div>';
+    }
+
+    return $params;
+}
+add_filter('dynamic_sidebar_params', 'zib_cfswidget_dynamic_sidebar_params');
+```
+
+所以放在 `*_fluid` 位置的小工具会额外包一层 `.widget-container`。自定义小工具不要再重复包相同结构，否则全宽模块容易出现双层边距或布局收窄。
+
+## 注册侧栏
+
+主题封装了 `zib_register_sidebar()`：
+
+```php
+function zib_register_sidebar($sidebars)
+{
+    $is_preview = is_customize_preview();
+
+    foreach ($sidebars as $value) {
+        register_sidebar(array(
+            'name'          => $value['name'],
+            'id'            => $value['id'],
+            'description'   => $value['description'],
+            'before_widget' => ($is_preview ? '<div class="customize-preview-widget-box" id="%1$s"><div class="customize-preview-widget-edit">' . esc_html__('编辑', 'zib_language') . '</div>' : '') . '<div class="zib-widget %2$s">',
+            'after_widget'  => ($is_preview ? '</div>' : '') . '</div>',
+            'before_title'  => '<h3>',
+            'after_title'   => '</h3>',
+        ));
+    }
+}
+```
+
+新增侧栏位置时，优先复用这个封装：
+
+```php
+function zib_docs_register_resource_sidebar()
+{
+    $sidebars = array(
+        array(
+            'name'        => __('资源页-顶部全宽度', 'zib_language'),
+            'id'          => 'resource_top_fluid',
+            'description' => __('显示在资源页内容顶部位置。', 'zib_language'),
+        ),
+        array(
+            'name'        => __('资源页-侧边栏', 'zib_language'),
+            'id'          => 'resource_sidebar',
+            'description' => __('显示在资源页侧边栏位置。', 'zib_language'),
+        ),
+    );
+
+    zib_register_sidebar($sidebars);
+}
+add_action('widgets_init', 'zib_docs_register_resource_sidebar');
+```
+
+模板里再输出：
+
+```php
+if (function_exists('dynamic_sidebar')) {
+    echo '<div class="fluid-widget-wrap">';
+    dynamic_sidebar('resource_top_fluid');
+    echo '</div>';
+}
+```
+
+## 页面专属小工具容器
+
+页面可以通过页面 meta 动态注册专属小工具位置。主题会查询开启 `widgets_register` 且设置了 `widgets_register_container` 的已发布页面：
+
+```php
+function zib_get_widgets_register_pages()
+{
+    $cache = wp_cache_get('widgets_register_pages', 'zib_cache_group', true);
+    if (false !== $cache) {
+        return $cache;
+    }
+
+    // 查询 page + widgets_register + widgets_register_container
+}
+```
+
+保存页面时刷新缓存：
+
+```php
+add_action('save_post_page', 'zib_widgets_register_pages_update_cache');
+```
+
+页面模板根据当前页面 ID 输出：
+
+```php
+dynamic_sidebar('page_top_fluid_' . $page_id);
+dynamic_sidebar('page_top_content_' . $page_id);
+dynamic_sidebar('page_bottom_content_' . $page_id);
+dynamic_sidebar('page_bottom_fluid_' . $page_id);
+```
+
+如果扩展页面级容器，不要直接硬编码一批固定页面 ID。应通过页面 meta 或统一注册函数生成，避免页面复制、导入、迁移后失效。
+
+## 后台资源边界
+
+小工具导入导出、模板导入等后台交互只在 WordPress 小工具页和自定义器里加载：
+
+```php
+function zib_wie_localize_admin_script($hook)
+{
+    if (!in_array($hook, array('widgets.php', 'customize.php'), true)) {
+        return;
+    }
+
+    wp_enqueue_style('zib_widget_set', ZIB_TEMPLATE_DIRECTORY_URI . '/css/widget-set.min.css', array(), THEME_VERSION);
+    wp_enqueue_script('zib_widget_set', ZIB_TEMPLATE_DIRECTORY_URI . '/js/widget-set.min.js', array('jquery'), THEME_VERSION);
+
+    wp_localize_script(
+        'zib_widget_set',
+        'zib_widget_set_var',
+        array(
+            'ajaxUrl' => admin_url('admin-ajax.php'),
+            'nonce'   => wp_create_nonce('zib_wie_io'),
+            'i18n'    => zib_get_widget_js_i18n_strings(),
+        )
+    );
+}
+add_action('admin_enqueue_scripts', 'zib_wie_localize_admin_script', 20);
+```
+
+扩展后台小工具交互时，保持这几个边界：
+
+| 边界      | 说明                                                            |
+| --------- | --------------------------------------------------------------- |
+| 页面限制  | 只在 `widgets.php`、`customize.php` 或确实需要的后台页面加载    |
+| Ajax 地址 | 使用 `admin_url('admin-ajax.php')`，不要硬编码后台路径          |
+| Nonce     | 复用或新增明确的 nonce，服务端必须 `check_ajax_referer()`       |
+| 文案      | 通过 `wp_localize_script()` 传递，方便翻译                      |
+| 权限      | 导入导出类操作必须检查 `current_user_can('edit_theme_options')` |
+
+不要把小工具后台脚本全站加载到前台。前台模块需要懒加载时，走 `ajax_widget_ui` 这类前台 Ajax 协议，而不是复用后台导入导出脚本。
+
+## 小工具注册方式
+
+主题保留了兼容层：
+
+```php
+class Zib_CFSwidget
+{
+    public static function create($id, $args = array())
+    {
+        CSF::createWidget($id, $args);
+    }
+}
+```
+
+常见注册参数：
+
+| 参数             | 说明                 |
+| ---------------- | -------------------- |
+| `title`          | 后台小工具标题       |
+| `description`    | 后台说明             |
+| `callback`       | 前台渲染函数         |
+| `fields`         | Codestar 字段        |
+| `zib_title`      | 是否使用主题标题配置 |
+| `zib_affix`      | 是否支持吸附         |
+| `zib_show`       | 是否支持显示规则     |
+| `is_show_filter` | 渲染前判断是否显示   |
+| `size`           | 后台字段尺寸倾向     |
+
+最小写法：
+
+```php
+function zib_docs_widget_notice($args, $instance)
+{
+    $text = !empty($instance['text']) ? $instance['text'] : '';
+    if (!$text) {
+        return;
+    }
+
+    echo '<div class="zib-widget">';
+    echo '<div class="box-body">';
+    echo esc_html($text);
+    echo '</div>';
+    echo '</div>';
+}
+
+function zib_docs_register_widget_notice()
+{
+    Zib_CFSwidget::create('zib_docs_widget_notice', array(
+        'title'       => __('提示卡片', 'zib_language'),
+        'zib_title'   => true,
+        'zib_affix'   => true,
+        'zib_show'    => true,
+        'callback'    => 'zib_docs_widget_notice',
+        'description' => __('显示一段简短提示。', 'zib_language'),
+        'fields'      => array(
+            array(
+                'title'   => __('提示内容', 'zib_language'),
+                'id'      => 'text',
+                'type'    => 'textarea',
+                'default' => '',
+            ),
+        ),
+    ));
+}
+add_action('after_setup_theme', 'zib_docs_register_widget_notice');
+```
+
+主题自己的 CFS 小工具多挂在 `after_setup_theme`，传统 `WP_Widget` 多挂在 `widgets_init`。新增 CFS 小工具建议跟随 `after_setup_theme`。
+
+## 显示规则
+
+传统小工具会调用：
+
+```php
+zib_widget_is_show($instance);
+```
+
+它读取 `show_type`：
+
+| 值         | 说明              |
+| ---------- | ----------------- |
+| `all` 或空 | PC 与移动端均显示 |
+| `only_pc`  | 仅 PC 显示        |
+| `only_sm`  | 仅移动端显示      |
+
+返回值可能是：
+
+| 返回值             | 含义             |
+| ------------------ | ---------------- |
+| `true`             | 正常显示         |
+| `false`            | 不显示           |
+| `hidden-xs`        | PC 显示 class    |
+| `visible-xs-block` | 移动端显示 class |
+
+CFS 小工具可以通过 `is_show_filter` 做渲染前判断，例如作者卡片需要存在当前文章作者，用户卡片需要登录模块未关闭。
+
+示例：
+
+```php
+function zib_docs_widget_is_show($show_class, $args, $instance)
+{
+    if (empty($instance['items'])) {
+        return false;
+    }
+
+    if (!empty($instance['login_only']) && !is_user_logged_in()) {
+        return false;
+    }
+
+    return $show_class;
+}
+```
+
+注册时：
+
+```php
+'is_show_filter' => 'zib_docs_widget_is_show',
+```
+
+不要只在渲染函数里 `return` 空内容。提前判断可以减少空 `.zib-widget` 外壳和无意义的布局间距。
+
+## 标题输出
+
+主题通过 Filter 统一处理小工具标题：
+
+```php
+add_filter('zib_widget_title', 'zib_widget_filter_title', 11);
+```
+
+支持字段：
+
+| 字段           | 说明             |
+| -------------- | ---------------- |
+| `title`        | 主标题           |
+| `mini_title`   | 副标题           |
+| `more_but`     | 右侧更多按钮文字 |
+| `more_but_url` | 更多按钮链接     |
+
+如果小工具使用 `zib_title`，优先让主题处理标题，不要在渲染函数里重复输出一套标题样式。
+
+## 通用 Ajax 小工具
+
+主题提供通用 Ajax 入口：
+
+```php
+function zib_ajax_widget_ui()
+{
+    $id          = isset($_REQUEST['id']) ? $_REQUEST['id'] : 0;
+    $index       = isset($_REQUEST['index']) ? $_REQUEST['index'] : 0;
+    $all_options = get_option('widget_' . $id);
+
+    if (!function_exists($id . '_ajax') || !isset($all_options[$index])) {
+        return;
+    }
+
+    call_user_func($id . '_ajax', $all_options[$index]);
+    exit;
+}
+add_action('wp_ajax_ajax_widget_ui', 'zib_ajax_widget_ui');
+add_action('wp_ajax_nopriv_ajax_widget_ui', 'zib_ajax_widget_ui');
+```
+
+约定：
+
+| 请求参数 | 说明                    |
+| -------- | ----------------------- |
+| `action` | 固定为 `ajax_widget_ui` |
+| `id`     | 小工具 id base          |
+| `index`  | 当前小工具实例序号      |
+
+对应函数名必须是：
+
+```php
+{id}_ajax
+```
+
+例如文章列表小工具 `zib_widget_ui_main_post` 会实现：
+
+```php
+function zib_widget_ui_main_post_ajax($instance, $no_ajax = false, $ajax_url = null)
+{
+    // 查询文章、拼接列表、输出 ajaxpager
+}
+```
+
+这类 Ajax 入口会读取已保存的小工具实例配置，而不是完全相信前端传入的查询参数。扩展时也应从 `get_option('widget_' . $id)` 取配置，避免前端随意改分类、数量、排序或付费筛选。
+
+## Ajax 列表小工具
+
+文章列表小工具支持 `load_mode=ajax`，会生成 `zib_get_ias_ajaxpager()`：
+
+```php
+$ias_args = array(
+    'type'            => 'ias',
+    'loader'          => $placeholder,
+    'ajaxpager_class' => 'widget-ajaxpager',
+    'query'           => array(
+        'action' => 'ajax_widget_ui',
+        'id'     => $id_base,
+        'index'  => $index,
+    ),
+);
+$main_html = zib_get_ias_ajaxpager($ias_args);
+```
+
+非延迟加载时，渲染函数直接返回：
+
+```php
+return '<div class="widget-ajaxpager">' . $lists . '</div>';
+```
+
+分页使用主题 Ajax 分页协议：
+
+```php
+zib_get_ajax_next_paginate(
+    $posts_query->found_posts,
+    $paged,
+    $paged_size,
+    $ajax_url,
+    'text-center theme-pagination ajax-pag',
+    'next-page ajax-next',
+    '',
+    'paged',
+    'no',
+    '.widget-ajaxpager'
+);
+```
+
+自定义 Ajax 列表小工具应保持 `.widget-ajaxpager`、`.ajax-pag`、`.ajax-next` 结构，这样主题前端脚本可以自动接管加载更多和分页替换。
+
+## Ajax Tab 小工具
+
+文章 Tab 小工具会为非首个 Tab 生成隐藏触发器：
+
+```php
+$con_html .= '<span class="post_ajax_trigger hide"><a ajaxpager-target=".widget-ajaxpager" href="' . add_query_arg('tab', $tabs_key, $ajax_href) . '" class="ajax_load ajax-next ajax-open" no-scroll="true"></a></span>';
+```
+
+Tab 导航使用：
+
+```php
+<a data-ajax data-toggle="tab" href="#tab-id">Tab</a>
+```
+
+这和主题通用 Ajax Tab 协议一致。新增 Tab 小工具时，不需要另写一套前端 Tab 加载逻辑，只要输出 `data-ajax`、`.post_ajax_trigger`、`.ajax-next` 和目标 `.widget-ajaxpager` 即可。
+
+## 商城商品小工具
+
+商城商品小工具注册在 `inc/functions/shop/widgets/widgets-product.php`，属于小工具系统的一组专用实现：
+
+| 小工具                 | Ajax 行为                                                  | 说明                                               |
+| ---------------------- | ---------------------------------------------------------- | -------------------------------------------------- |
+| `[商城]商品列表`       | 首次输出 `zib_get_ias_ajaxpager()`，再走 `ajax_widget_ui`  | 支持分类、优惠活动、标签、排序、分页和商品卡片样式 |
+| `[商城]多栏目商品列表` | 首个 Tab 懒加载，其他 Tab 用 `.post_ajax_trigger` 延迟加载 | 每个 Tab 有独立筛选和排序                          |
+| `[商城]单行商品列表`   | 不走 Ajax，直接输出 Swiper                                 | 适合少量横向推荐                                   |
+
+这组小工具和普通文章列表小工具的协议相同，但内容容器使用 `.product-lists-row`，加载占位用 `zib_shop_get_lists_card_placeholder()`，列表卡片由 `zib_shop_get_product_list_card()` 输出。筛选条件只从已保存的 widget instance 读取，不应从前端随意传入分类、优惠活动、标签或数量。
+
+更多商品排序、筛选、分页和 Tab 细节见 [商城模块](/docs/api/shop) 的“商品列表配置”和“商城小工具”。
+
+## 模块布局组合
+
+子比主题的“页面布局”和“可视化模块”本质上是把页面容器、全宽侧栏、小工具字段、Ajax 分页和动效字段组合起来。开发文档里把它归入小工具体系，是因为源码真正落点在 `inc/widgets`、页面 meta 和模板 `dynamic_sidebar()`。
+
+常见组合方式：
+
+| 场景           | 推荐位置                                                 | 常用模块                                       |
+| -------------- | -------------------------------------------------------- | ---------------------------------------------- |
+| 首页聚合页     | `home_top_fluid`、`home_top_content`                     | 幻灯片、图文封面、文章列表、分类卡片、链接列表 |
+| 单页销售页     | 页面专属 `page_top_fluid_{ID}`、`page_bottom_fluid_{ID}` | 价格方案、评价、FAQ、数据统计、按钮组          |
+| 文章详情页侧栏 | `single_sidebar`、`all_sidebar_top`                      | 文章目录、付费内容、热门文章、标签云           |
+| 商城首页       | 商城页面容器或页面专属容器                               | 商品列表、商品 Tab、图文封面、服务保障卡片     |
+| 论坛首页       | 论坛侧栏与论坛小工具                                     | 用户卡片、帖子列表、版块列表、话题列表         |
+| 移动菜单扩展   | `mobile_nav_fluid`                                       | 简短按钮、链接、图标入口                       |
+
+模块组合时先定“容器”，再定“小工具”。不要为了一个页面效果新建模板文件，如果页面专属容器和现有小工具能完成，就优先使用页面 meta + 小工具组合，这样后续可以导入导出、复制和在自定义器里预览。
+
+### 幻灯片与图文视频封面
+
+视觉模块优先使用新版 CFS 小工具。`widget-slider.php` 里仍然保留了老版 `widget_ui_slider`，后台标题已经标注“老版即将删除”，新功能不要再把它作为基底；推荐使用 `zib_widget_ui_slider` 和 `zib_widget_ui_slider_graphic_cover`。
+
+新版幻灯片小工具的数据分成两层：
+
+| 字段     | 来源                       | 用途                                                                                    |
+| -------- | -------------------------- | --------------------------------------------------------------------------------------- |
+| `slides` | `CFS_Module::add_slider()` | 每一张幻灯片的数据，包含背景图、背景视频、文字、按钮、链接和图层类配置                  |
+| `option` | `CFS_Module::slide()`      | 控制轮播方向、按钮、指示器、切换效果、自动高度、PC/移动端高度、间距、速度和自动播放间隔 |
+
+渲染时主题会把 `option.class` 固定补成 `slide-widget mb20`，再把 `slides` 写入 `option.slides`，最后交给 `zib_new_slider($header_slider_option)` 输出。扩展时不要绕过这个入口直接拼 Swiper HTML，否则按钮、分页、视频背景、懒加载和主题统一脚本都要重新维护。
+
+图文视频封面小工具落在 `zib_widget_ui_graphic_cover`。它的显示判断很严格：首个 `covers` 里 `image` 和 `video` 同时为空时不会输出。常用字段如下：
+
+| 字段                                 | 作用                                                 |
+| ------------------------------------ | ---------------------------------------------------- |
+| `pc_row` / `m_row`                   | PC 与移动端每行卡片数量，渲染时会转成 Bootstrap 栅格 |
+| `font_size_pc` / `font_size_m`       | 卡片标题在 PC 与移动端的字号                         |
+| `font_bold` / `font_color`           | 标题粗细与颜色，最终写入 CSS 变量                    |
+| `height_scale`                       | 卡片高度比例，传给 `zib_graphic_card()`              |
+| `mask_opacity`                       | 封面遮罩透明度                                       |
+| `obs_animation` / `animation_repeat` | 入场动画与是否重复播放                               |
+| `covers[]`                           | 每张封面卡片的数据组                                 |
+
+`covers[]` 单项支持这些字段：
+
+| 字段    | 作用                                                 |
+| ------- | ---------------------------------------------------- |
+| `image` | 图片兜底，也是移动端最稳定的封面来源                 |
+| `video` | 视频封面，传给 `zib_graphic_card()` 输出             |
+| `title` | 卡片居中文案，会进入 `more` 字段                     |
+| `link`  | 卡片跳转地址                                         |
+| `hide`  | 按 PC 或移动端隐藏，渲染时通过 `wp_is_mobile()` 判断 |
+
+视频封面不要只填 `video`。移动端浏览器对自动播放、静音、节能策略限制更多，主题的图文封面也会优先依赖图片兜底；只配置视频时，移动端可能出现空封面或首帧不可控。
+
+`zib_widget_ui_slider_graphic_cover` 是“左侧幻灯片 + 右侧图文视频卡片”的组合模块，适合首页、频道页、商城入口和专题页的首屏区域。核心字段如下：
+
+| 字段                                 | 作用                                                |
+| ------------------------------------ | --------------------------------------------------- |
+| `layout_ratio`                       | 幻灯片宽度占比，右侧卡片宽度由剩余空间计算          |
+| `slide_scale`                        | 幻灯片长宽比，组合模块会强制 `scale_height = true`  |
+| `pc_row` / `pc_col`                  | 右侧封面卡片的列数与行数                            |
+| `m_layout_type`                      | 移动端布局：保持 PC、上下布局、隐藏幻灯片、隐藏卡片 |
+| `m_row` / `m_cover_ratio`            | 移动端卡片列数与比例                                |
+| `slides` / `option`                  | 左侧幻灯片数据与轮播选项                            |
+| `covers` / `mask_opacity`            | 右侧图文视频卡片与遮罩                              |
+| `obs_animation` / `animation_repeat` | 整体入场动画                                        |
+
+组合模块会根据 `layout_ratio`、`slide_scale`、`pc_row` 和 `pc_col` 自动计算右侧卡片比例，并写入 `--layout-ratio`、`--cover-ratio`、`--m-cover-ratio`。前端还会在 `wp_footer` 只输出一次校准脚本，根据真实 `.zib-slider` 高度和 `.cover-col` 宽度重新修正 `--cover-ratio`，所以不要在扩展里把内部结构改成不含 `.slider-col`、`.cover-col` 或 `.zib-slider` 的 DOM。
+
+如果只想复用图文视频卡片 HTML，而不是直接 echo，可调用主题提供的返回版函数：
+
+```php
+function zib_docs_render_feature_covers($covers)
+{
+    if (empty($covers) || !function_exists('zib_widget_slider_graphic_cover_html')) {
+        return '';
+    }
+
+    $instance = array(
+        'pc_row'        => 3,
+        'm_row'         => 1,
+        'height_scale'  => 60,
+        'mask_opacity'  => 30,
+        'font_size_pc'  => 16,
+        'font_size_m'   => 14,
+        'font_bold'     => true,
+        'font_color'    => '#ffffff',
+        'covers'        => $covers,
+    );
+
+    return zib_widget_slider_graphic_cover_html($instance);
+}
+```
+
+这类模块更适合放在 `*_fluid` 或页面专属全宽容器里。窄侧栏可以使用单列图文封面、按钮组或链接列表，不建议放组合模块，否则比例计算虽能工作，视觉上也容易挤压。
+
+### 全宽模块
+
+全宽模块适合承载视觉模块、横向卡片、幻灯片和专题介绍。源码会给 `fluid` 位置自动加 `.widget-container`，所以小工具渲染函数只输出模块本体即可：
+
+```php
+function zib_docs_widget_banner($args, $instance)
+{
+    $title = !empty($instance['title']) ? $instance['title'] : '';
+    $image = !empty($instance['image']) ? $instance['image'] : '';
+
+    if (!$title && !$image) {
+        return;
+    }
+
+    echo '<div class="zib-widget zib-docs-banner">';
+    if ($image) {
+        echo '<div class="banner-cover">';
+        echo '<img src="' . esc_url($image) . '" alt="' . esc_attr($title) . '">';
+        echo '</div>';
+    }
+    if ($title) {
+        echo '<div class="banner-title">' . esc_html($title) . '</div>';
+    }
+    echo '</div>';
+}
+```
+
+如果模块放在窄侧栏，宽图、横向 Swiper、四列卡片都要降级。可以通过字段控制列数，或在 `is_show_filter` 中只允许全宽位置显示。
+
+### 页面专属模块
+
+页面专属容器适合“普通页面改成专题页”。后台页面开启 `widgets_register` 后，主题会按 `widgets_register_container` 动态注册：
+
+```php
+page_top_fluid_{ID}
+page_top_content_{ID}
+page_bottom_content_{ID}
+page_bottom_fluid_{ID}
+page_sidebar_{ID}
+```
+
+这类容器不要写死在扩展插件里。正确做法是读取当前页面 ID，再按约定输出：
+
+```php
+function zib_docs_page_widgets($page_id)
+{
+    if (!$page_id) {
+        return;
+    }
+
+    dynamic_sidebar('page_top_fluid_' . $page_id);
+    dynamic_sidebar('page_top_content_' . $page_id);
+}
+```
+
+页面被复制或迁移后，ID 可能变化。需要可迁移能力时，用导入模板重新装配页面模块，不要依赖旧站点的固定 ID。
+
+## 导入导出数据
+
+`widget-import.php` 提供单个侧栏导出和导入能力。导出结构不是普通文章数据，而是 WordPress 小工具实例与侧栏占位符的组合：
+
+```php
+array(
+    'export_version'      => 1,
+    'exported_at'         => gmdate('c'),
+    'source_sidebar_id'   => $sidebar_id,
+    'source_sidebar_name' => $sidebar_name,
+    'theme_name'          => $theme->get('Name'),
+    'theme_version'       => $theme->get('Version'),
+    'widgets'             => $widget_list,
+    'widget_options'      => $widget_options,
+);
+```
+
+| 字段                | 作用                                                           |
+| ------------------- | -------------------------------------------------------------- |
+| `widgets`           | 当前侧栏里的小工具占位符列表，例如 `zib_widget_ui_main_post-3` |
+| `widget_options`    | 按 `id_base` 分组的小工具实例配置                              |
+| `_multiwidget`      | WordPress 多实例小工具标记，导入时需要保留                     |
+| `source_sidebar_id` | 原始侧栏 ID，只用于记录来源，不代表导入目标                    |
+
+导入时不要把旧占位符直接写入目标侧栏。主题会解析 `id_base-number`，为当前站点重新分配实例序号：
+
+```php
+function zib_wie_parse_widget_id($widget_id)
+{
+    if (!is_string($widget_id) || $widget_id === '') {
+        return null;
+    }
+    if (!preg_match('/^(.+)-(\d+)$/', $widget_id, $m)) {
+        return null;
+    }
+
+    return array(
+        'id_base' => $m[1],
+        'number'  => (int) $m[2],
+    );
+}
+```
+
+`zib_wie_run_import()` 支持两种模式：
+
+| 模式      | 行为                             |
+| --------- | -------------------------------- |
+| `replace` | 清空目标侧栏，只保留导入的小工具 |
+| `append`  | 在目标侧栏现有小工具后追加导入项 |
+
+导入流程会检查当前站点是否已注册对应 `id_base`。如果目标站点缺少某个小工具，返回值里的 `missing_bases` 可以用于提示用户先启用对应模块或插件。
+
+## 侧栏模板注册
+
+主题内置模板走 `widget_import_templates` 过滤器。模板可以是紧凑格式，按顺序列出小工具 `id_base` 和默认实例：
+
+```php
+function zib_docs_register_widget_templates($templates)
+{
+    $templates['docs_landing_01'] = array(
+        'title'   => __('文档首页模块组合', 'zib_language'),
+        'desc'    => __('适合放在页面顶部全宽度位置。', 'zib_language'),
+        'remind'  => __('导入前建议先备份当前侧栏。', 'zib_language'),
+        'widgets' => array(
+            array(
+                'id'       => 'zib_widget_ui_graphic_cover',
+                'instance' => array(
+                    'title'        => __('核心能力', 'zib_language'),
+                    'show_type'    => 'all',
+                    'animation_in' => 'slideup',
+                    'pc_row'       => '3',
+                    'm_row'        => '1',
+                    'covers'       => array(),
+                ),
+            ),
+            array(
+                'id'       => 'zib_widget_ui_main_post',
+                'instance' => array(
+                    'title'     => __('最新内容', 'zib_language'),
+                    'load_mode' => 'ajax',
+                    'orderby'   => 'modified',
+                    'order'     => 'desc',
+                    'style'     => 'card',
+                    'count'     => '12',
+                    'paginate'  => 'ajax',
+                ),
+            ),
+        ),
+    );
+
+    return $templates;
+}
+add_filter('widget_import_templates', 'zib_docs_register_widget_templates');
+```
+
+模板导入前会把紧凑格式转换成完整导入数据：
+
+```php
+function zib_wie_compact_template_to_import_data($def)
+{
+    // widgets: array(
+    //     array('id' => 'id_base', 'instance' => array()),
+    // )
+}
+```
+
+写模板时注意：
+
+| 项目       | 建议                                                               |
+| ---------- | ------------------------------------------------------------------ |
+| `id`       | 必须是已注册小工具的 `id_base`                                     |
+| `instance` | 优先使用数组；字符串 JSON 只适合复制已有配置                       |
+| 动画字段   | 使用主题字段，例如 `animation_in`、`animation_repeat`              |
+| 标题字段   | 保持 `title`、`subtitle`、`title_link` 等主题字段                  |
+| 布局字段   | 保留 `layout_pin_pc`、`layout_pin_m`、`layout_bg` 这类模块布局字段 |
+| 目标位置   | 在 `desc` 或 `remind` 里明确建议导入到哪个侧栏                     |
+
+不要在模板里写死生产站图片、用户头像、订单、邀请码、私有接口地址或一次性文件 URL。模板应该表达布局结构，不应该携带站点隐私数据。
+
+## 导入导出 Ajax
+
+后台导入导出入口都在 `admin-ajax.php`：
+
+| Action                    | 函数                             | 作用                     |
+| ------------------------- | -------------------------------- | ------------------------ |
+| `zib_wie_list_templates`  | `zib_wie_ajax_list_templates()`  | 列出可导入模板和模块预览 |
+| `zib_wie_import_template` | `zib_wie_ajax_import_template()` | 将已注册模板导入指定侧栏 |
+| `zib_wie_export_sidebar`  | `zib_wie_ajax_export()`          | 导出指定侧栏 JSON        |
+| `zib_wie_import_sidebar`  | `zib_wie_ajax_import()`          | 从 JSON 文本导入指定侧栏 |
+
+每个入口都要做两件事：
+
+```php
+check_ajax_referer('zib_wie_io', 'nonce');
+
+if (!current_user_can('edit_theme_options')) {
+    wp_send_json_error(array('message' => __('权限不足', 'zib_language')), 403);
+}
+```
+
+新增自己的模板管理入口时，响应格式保持主题习惯：
+
+```php
+wp_send_json_success(array(
+    'imported'    => (int) $result['imported'],
+    'sidebar_id'  => $target,
+    'import_mode' => $import_mode,
+    'warnings'    => $warnings,
+    'message'     => $message,
+));
+```
+
+这类接口只给后台管理员使用，不要注册 `nopriv` 版本，也不要把原始 JSON 解析错误、服务器路径、完整 PHP 异常栈直接返回前端。
+
+## 小工具分类
+
+主题现有小工具大致分为：
+
+| 类型     | 代表                                               |
+| -------- | -------------------------------------------------- |
+| 内容列表 | 主文章列表、文章 Tab、单行文章、热门文章、付费商品 |
+| 分类展示 | 分类卡片、分类列表卡片、标签云                     |
+| 用户展示 | 登录用户卡片、作者卡片、用户排行、用户列表         |
+| 媒体展示 | 轮播、图文封面、视频、iframe                       |
+| 营销展示 | 价格方案、评价、FAQ、数据统计、亮点卡片、功能介绍  |
+| 导航辅助 | 图标卡片、按钮组、链接列表、文章目录、搜索         |
+
+开发新小工具前先判断是否能通过现有小工具字段组合实现。只有现有模块无法表达业务结构时，再新增小工具。
+
+## 扩展建议
+
+| 需求                | 推荐入口                                             |
+| ------------------- | ---------------------------------------------------- |
+| 新增展示模块        | `Zib_CFSwidget::create()`                            |
+| 新增页面侧栏位置    | `zib_register_sidebar()` + 模板 `dynamic_sidebar()`  |
+| 按页面注册专属容器  | 页面 meta + `zib_page_register_sidebar()` 思路       |
+| 控制模块是否显示    | `is_show_filter` 或 `zib_widget_is_show()`           |
+| 小工具延迟加载      | `ajax_widget_ui` + `{id}_ajax`                       |
+| 小工具列表分页      | `.widget-ajaxpager` + `zib_get_ajax_next_paginate()` |
+| 小工具 Tab 异步加载 | `data-ajax` + `.post_ajax_trigger`                   |
+| 统一标题            | `zib_widget_title`                                   |
+| 模块布局模板        | `widget_import_templates`                            |
+| 侧栏迁移            | `zib_wie_build_export()` + `zib_wie_run_import()`    |
+
+## 风险清单
+
+- 不要把大宽度模块放进窄侧栏。
+- 不要在 `*_fluid` 位置重复包 `.widget-container`。
+- 不要让前端 Ajax 参数直接决定查询范围，应读取已保存的小工具配置。
+- 不要输出空 `.zib-widget`，先用 `is_show_filter` 判断。
+- 不要在小工具里直接 echo 未转义的后台字段。
+- 不要把查询类小工具整页缓存成静态 HTML，分类、分页、登录态和付费状态都可能变化。
+- 不要在每个小工具里重复加载脚本，尽量通过统一 enqueue 或只在需要时挂 `wp_footer`。
+- 不要直接编辑 `sidebars_widgets` 里的旧小工具占位符，导入时必须重新分配实例号。
+- 不要把导入导出接口开放给未登录用户或普通订阅者。
+- 不要在生产代码里保留打印 `$wp_widget_factory->widgets`、导出 JSON、服务器路径等调试日志。
+- 不要把模块模板当成数据备份系统，订单、用户、媒体授权、支付配置都不属于小工具模板。

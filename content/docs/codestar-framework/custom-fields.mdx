@@ -1,0 +1,496 @@
+---
+title: 子比自定义字段
+description: 解析 inc/csf-framework 中子比主题新增和覆盖的 CSF 字段类型、保存形态、真实使用位置与读取方式。
+---
+
+## 字段目录
+
+子比主题保留原版 Codestar 字段，同时在 `inc/csf-framework/fields` 中覆盖或新增了一批字段。阅读顺序建议是：
+
+```txt
+inc/csf-framework/fields/
+inc/codestar-framework/fields/
+inc/options/options-module.php
+inc/options/admin-options.php
+inc/options/metabox-options.php
+inc/widgets/
+```
+
+`inc/csf-framework` 里的同名字段优先按子比改写后的行为理解。
+
+## 常用增强字段
+
+| 字段             | 典型用途                     | 保存形态                     |
+| ---------------- | ---------------------------- | ---------------------------- |
+| `palette`        | 主题色板、徽章颜色、按钮颜色 | 字符串 class                 |
+| `between_number` | 最小值/最大值限制            | 数组                         |
+| `accordion`      | 折叠组织多组字段             | 关联数组                     |
+| `group`          | 可排序多项复杂配置           | 数组列表                     |
+| `repeater`       | 可重复简单配置               | 数组列表                     |
+| `upload`         | 图片、视频、文件             | URL、ID 或数组，取决于配置   |
+| `gallery`        | 多图选择                     | 逗号字符串或数组，取决于字段 |
+| `background`     | 背景图、颜色、尺寸           | 背景属性数组                 |
+| `link`           | URL、文字、打开方式          | 数组                         |
+| `icon`           | 图标选择                     | 图标 class 或自定义图标数据  |
+| `code_editor`    | CSS、JS、HTML、JSON          | 字符串                       |
+
+## 源码级差异
+
+子比的 `inc/csf-framework/fields` 不是简单复制原版字段。它覆盖同名字段后，字段行为要以子比目录为准：
+
+| 字段                | 子比源码重点                                   | 读取时要记住                                             |
+| ------------------- | ---------------------------------------------- | -------------------------------------------------------- |
+| `palette`           | 输出一组 radio，每个选项显示色块预览           | 保存选中的 key，例如 `jb-blue`                           |
+| `between_number`    | 两个 number 输入，name 分别是 `[min]`、`[max]` | 保存 `array('min' => '', 'max' => '')`                   |
+| `upload`            | 用文本框保存媒体 URL，按钮只负责调用媒体库     | 默认保存 URL 字符串，不是附件数组                        |
+| `background`        | 内部复用 `color`、`upload`、`select` 字段      | 读取时按 `background-color`、`background-image` 等键取值 |
+| `group`、`repeater` | 改写样式和交互，保存结构仍是数组               | 旧数据、空项、缺字段都要兼容                             |
+
+字段是否“像原版 Codestar”不能只看字段名。比如 `upload` 在子比覆盖版本里核心输入是：
+
+```php
+echo '<input type="text" name="' . esc_attr($this->field_name()) . '" value="' . esc_attr($this->value) . '"' . $this->field_attributes() . '/>';
+```
+
+所以它的默认值就是 URL 字符串。只有业务代码额外保存 `*_id` 时，才会有附件 ID 可读。
+
+`palette` 也同理，它渲染的是 radio：
+
+```php
+echo '<input type="radio" name="' . esc_attr($this->field_name()) . '" value="' . esc_attr($key) . '"' . $this->field_attributes() . esc_attr($checked) . '/>';
+```
+
+因此前台应该把它当 class key 使用：
+
+```php
+$class = zib_menu_pz($item->ID, 'badge_class', 'jb-red');
+echo '<span class="' . esc_attr($class) . '">' . esc_html($badge) . '</span>';
+```
+
+不要把它当作 `#ff0000` 这种颜色值拼进 `style`。
+
+## palette
+
+`palette` 保存的是主题色 class，例如 `jb-red`、`jb-blue`，不是颜色值。
+
+真实使用位置：
+
+```txt
+inc/options/metabox-options.php      菜单徽章色
+inc/functions/shop/admin/options/term-option.php  商品标签颜色
+inc/widgets/widget-*.php             小工具按钮和模块颜色
+```
+
+字段示例：
+
+```php
+array(
+    'id'      => 'badge_class',
+    'type'    => 'palette',
+    'title'   => __('徽章背景色', 'zib_language'),
+    'class'   => 'compact skin-color',
+    'default' => 'jb-red',
+    'options' => CFS_Module::zib_palette(),
+)
+```
+
+读取：
+
+```php
+$class = zib_menu_pz($item->ID, 'badge_class', 'jb-red');
+echo '<span class="' . esc_attr($class) . '">' . esc_html($badge) . '</span>';
+```
+
+扩展调色板时使用 `CFS_Module::zib_palette()`，不要手写一套和主题 class 不一致的颜色。
+
+## between_number
+
+`between_number` 用于“最小/最大”一组数字，例如标题长度、价格限制、上传限制等。
+
+对应字段类是 `CSF_Field_between_number`，源码位于 `inc/csf-framework/fields/between_number/between_number.php`。
+
+字段类默认参数是：
+
+```php
+$args = wp_parse_args($this->field, array(
+    'min_icon'        => __('最小', 'zib_language'),
+    'max_icon'        => __('最大', 'zib_language'),
+    'min_placeholder' => '',
+    'max_placeholder' => '',
+    'min'             => true,
+    'max'             => true,
+    'unit'            => '',
+));
+```
+
+如果只需要一个上限，可以把 `min` 设为 `false`；如果只需要一个下限，可以把 `max` 设为 `false`。`unit` 只影响后台显示，不会自动帮你做数值换算。
+
+读取时先规范化：
+
+```php
+$limit = _pz('post_article_title_strlen_limit');
+$limit = is_array($limit) ? $limit : array();
+
+$min = isset($limit['min']) ? (int) $limit['min'] : 0;
+$max = isset($limit['max']) ? (int) $limit['max'] : 0;
+```
+
+使用时同时判断上下界：
+
+```php
+$length = mb_strlen($title);
+if ($min && $length < $min) {
+    return false;
+}
+if ($max && $length > $max) {
+    return false;
+}
+```
+
+## accordion
+
+`accordion` 用于把一组复杂配置折叠起来。子比小工具背景就是典型例子：
+
+```php
+array(
+    'id'         => 'layout_bg',
+    'type'       => 'accordion',
+    'title'      => __('区块背景', 'zib_language'),
+    'accordions' => array(
+        array(
+            'title'  => __('日间模式背景', 'zib_language'),
+            'fields' => array(
+                array(
+                    'id'   => 'img_white',
+                    'type' => 'background',
+                ),
+            ),
+        ),
+        array(
+            'title'  => __('夜间模式背景', 'zib_language'),
+            'fields' => array(
+                array(
+                    'id'   => 'img_dark',
+                    'type' => 'background',
+                ),
+            ),
+        ),
+    ),
+)
+```
+
+读取：
+
+```php
+$layout_bg = !empty($instance['layout_bg']) && is_array($instance['layout_bg']) ? $instance['layout_bg'] : array();
+$white     = !empty($layout_bg['img_white']) && is_array($layout_bg['img_white']) ? $layout_bg['img_white'] : array();
+$dark      = !empty($layout_bg['img_dark']) && is_array($layout_bg['img_dark']) ? $layout_bg['img_dark'] : array();
+```
+
+小工具场景优先交给：
+
+```php
+CSF_Widget::wrap_attributes($instance)
+```
+
+## group
+
+`group` 是子比最常见的复杂字段。高级子菜单的图文卡片就是 group：
+
+```php
+array(
+    'id'                     => 'items',
+    'type'                   => 'group',
+    'accordion_title_number' => '1',
+    'sanitize'               => false,
+    'button_title'           => __('添加图文卡片', 'zib_language'),
+    'fields'                 => array(
+        array(
+            'id'          => 'title',
+            'type'        => 'text',
+            'placeholder' => __('请输入标题', 'zib_language'),
+        ),
+        array(
+            'id'      => 'img',
+            'type'    => 'upload',
+            'library' => 'image',
+            'preview' => true,
+        ),
+        array(
+            'id'   => 'link',
+            'type' => 'link',
+        ),
+    ),
+)
+```
+
+读取：
+
+```php
+$opts  = zib_menu_pz($item->ID, 'graphic_card_opts', array());
+$items = !empty($opts['items']) && is_array($opts['items']) ? $opts['items'] : array();
+
+foreach ($items as $card) {
+    $title = !empty($card['title']) ? $card['title'] : '';
+    $img   = !empty($card['img']) ? $card['img'] : '';
+    $link  = !empty($card['link']) && is_array($card['link']) ? $card['link'] : array();
+}
+```
+
+`group` 字段务必处理空数组、旧数据和缺字段。不要直接访问 `$items[0]['title']`。
+
+## repeater
+
+`repeater` 适合较简单的重复项。商城商品参数、封面视频、优惠赠品等都能看到类似结构：
+
+```php
+array(
+    'id'           => 'params',
+    'type'         => 'repeater',
+    'button_title' => __('添加商品参数', 'zib_language'),
+    'fields'       => array(
+        array(
+            'id'    => 'name',
+            'type'  => 'text',
+            'title' => __('参数名称', 'zib_language'),
+        ),
+        array(
+            'id'    => 'value',
+            'type'  => 'text',
+            'title' => __('参数值', 'zib_language'),
+        ),
+    ),
+)
+```
+
+读取 `product_config`：
+
+```php
+$config = get_post_meta($product_id, 'product_config', true);
+$config = is_array($config) ? $config : array();
+
+$params = !empty($config['params']) && is_array($config['params']) ? $config['params'] : array();
+foreach ($params as $param) {
+    $name  = !empty($param['name']) ? $param['name'] : '';
+    $value = !empty($param['value']) ? $param['value'] : '';
+}
+```
+
+## upload
+
+上传字段会根据配置返回不同形态。常见形态：
+
+| 场景        | 字段                            | 读取                                                    |
+| ----------- | ------------------------------- | ------------------------------------------------------- |
+| 文章封面    | `cover_image`                   | `zib_get_post_meta($post_id, 'cover_image', true)`      |
+| 用户头像    | `custom_avatar`                 | `zib_get_user_meta($user_id, 'custom_avatar', true)`    |
+| 用户头像 ID | `custom_avatar_id`              | `zib_get_user_meta($user_id, 'custom_avatar_id', true)` |
+| 商品主图    | `main_image`                    | `get_post_meta($id, 'product_config', true)` 后取子键   |
+| 菜单卡片图  | `graphic_card_opts.items.*.img` | `zib_menu_pz()` 后取数组                                |
+
+子比覆盖的 `upload` 字段支持几个常见参数：
+
+```php
+array(
+    'id'           => 'cover_image',
+    'type'         => 'upload',
+    'library'      => 'image',
+    'preview'      => true,
+    'button_title' => __('上传', 'zib_language'),
+    'remove_title' => __('移除', 'zib_language'),
+)
+```
+
+`library` 会被转成媒体库按钮上的 `data-library`，常见值是 `image`。`preview` 为 false 时只显示输入框和按钮，不显示图片预览。
+
+输出：
+
+```php
+if ($image) {
+    echo '<img src="' . esc_url($image) . '" alt="">';
+}
+```
+
+如果拿到附件 ID：
+
+```php
+echo wp_get_attachment_image((int) $image_id, 'medium');
+```
+
+## gallery
+
+商城商品封面图使用 `gallery`：
+
+```php
+array(
+    'id'          => 'cover_images',
+    'type'        => 'gallery',
+    'title'       => __('封面图片', 'zib_language'),
+    'add_title'   => __('添加图像', 'zib_language'),
+    'edit_title'  => __('编辑图像', 'zib_language'),
+    'clear_title' => __('清空图像', 'zib_language'),
+)
+```
+
+读取时看保存值形态。如果是逗号字符串：
+
+```php
+$ids = !empty($config['cover_images']) ? explode(',', $config['cover_images']) : array();
+$ids = array_filter(array_map('intval', $ids));
+```
+
+如果已经是数组：
+
+```php
+$ids = is_array($config['cover_images']) ? array_map('intval', $config['cover_images']) : array();
+```
+
+## background
+
+背景字段保存多个 CSS 属性：
+
+```php
+array(
+    'id'                    => 'img_white',
+    'type'                  => 'background',
+    'background_color'      => true,
+    'background_image'      => true,
+    'background-position'   => true,
+    'background_repeat'     => true,
+    'background_attachment' => true,
+    'background_size'       => true,
+    'background_origin'     => true,
+    'background_clip'       => false,
+    'background_blend_mode' => false,
+    'background_gradient'   => false,
+)
+```
+
+读取：
+
+```php
+$bg    = !empty($layout_bg['img_white']) && is_array($layout_bg['img_white']) ? $layout_bg['img_white'] : array();
+$color = !empty($bg['background-color']) ? $bg['background-color'] : '';
+$image = !empty($bg['background-image']) ? $bg['background-image'] : '';
+```
+
+拼接 style 时必须逐项转义。小工具优先使用 `CSF_Widget::wrap_attributes()`。
+
+子比小工具背景不是直接输出 CSS，而是交给 `CSF_Widget::wrap_attributes()` 转成 CSS 变量：
+
+```php
+if (!empty($args['layout_bg']['img_white']['background-color'])) {
+    $styles[] = '--bg-color-white: ' . $args['layout_bg']['img_white']['background-color'] . ';';
+}
+
+if (!empty($args['layout_bg']['img_white']['background-image'])) {
+    $styles[] = '--bg-img-white: url("' . $args['layout_bg']['img_white']['background-image'] . '");';
+}
+```
+
+这也是为什么自定义小工具时应该沿用 `layout_bg`、`img_white`、`img_dark` 这些结构，不要重新发明一套背景字段。主题 CSS 已经围绕这些变量做了日夜间背景处理。
+
+如果你在其它场景使用 `background` 字段，建议自己明确输出白名单：
+
+```php
+$allow_size = array('cover', 'contain', 'auto', '100%');
+$size       = !empty($bg['background-size']) && in_array($bg['background-size'], $allow_size, true) ? $bg['background-size'] : 'cover';
+
+if (!empty($bg['background-image'])) {
+    $style[] = 'background-image:url(' . esc_url($bg['background-image']) . ')';
+}
+if (!empty($bg['background-position'])) {
+    $style[] = 'background-position:' . esc_attr($bg['background-position']);
+}
+$style[] = 'background-size:' . esc_attr($size);
+```
+
+## select
+
+`select` 可以使用动态数据源：
+
+```php
+array(
+    'id'         => 'plate_id',
+    'type'       => 'select',
+    'title'      => $zib_bbs->plate_name,
+    'options'    => 'post',
+    'query_args' => array(
+        'post_type'      => 'plate',
+        'posts_per_page' => -1,
+    ),
+    'settings'   => array(
+        'min_length' => 2,
+    ),
+)
+```
+
+读取：
+
+```php
+$forum_extend = get_post_meta($post_id, 'forum_extend', true);
+$plate_id = !empty($forum_extend['plate_id']) ? (int) $forum_extend['plate_id'] : 0;
+```
+
+多选字段要用数组规范化：
+
+```php
+$ids = !empty($value) && is_array($value) ? array_map('intval', $value) : array();
+```
+
+## code_editor
+
+自定义代码字段常见于主题设置：
+
+```php
+array(
+    'id'       => 'custom_css',
+    'type'     => 'code_editor',
+    'title'    => __('自定义 CSS', 'zib_language'),
+    'settings' => array(
+        'mode' => 'css',
+    ),
+)
+```
+
+输出 CSS 时不要直接信任任意用户输入：
+
+```php
+$css = _pz('custom_css');
+if ($css) {
+    echo '<style>' . wp_strip_all_tags($css) . '</style>';
+}
+```
+
+HTML 输出用：
+
+```php
+echo wp_kses_post($html);
+```
+
+## 字段选择建议
+
+- 只影响显示 class 的颜色，用 `palette`。
+- 需要任意颜色值，才用 `color`。
+- 一组固定选项，用 `radio`、`button_set` 或 `select`。
+- 可重复复杂卡片，用 `group`。
+- 可重复键值对，用 `repeater`。
+- 多层复杂配置，用 `fieldset` 包 `group`，或用 `accordion` 分块。
+- 前台直接输出的 HTML 字段要少用，并明确输出白名单。
+- 涉及订单、余额、会员、库存、优惠的字段不要只改配置，还要走业务流程。
+
+## 排错
+
+字段显示异常：
+
+1. 字段类型是否存在于 `inc/csf-framework/fields` 或 `inc/codestar-framework/fields`。
+2. `fields` 数组是否使用 `array()` 结构并闭合正确。
+3. `dependency` 依赖字段是否在同一上下文。
+4. `group` 内是否有重复 id。
+
+读取异常：
+
+1. 字段保存到主题设置、post meta、term meta、user meta、菜单项还是 widget instance。
+2. 是否需要先读 prefix 数组，例如 `page_config`、`product_config`、`forum_extend`。
+3. 是否是聚合字段，需要 `zib_get_*_meta()`。
+4. 返回值是否需要 `is_array()`。

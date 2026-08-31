@@ -1,0 +1,33 @@
+{
+  "title": "Codestar Framework",
+  "description": "子比主题 CSF 后台菜单、Meta 配置、字段系统、数据读取与扩展实践",
+  "icon": "Settings2",
+  "root": true,
+  "pages": [
+    "index",
+    "quick-start",
+    "loading",
+    "lifecycle",
+    "data-storage",
+    "option-map",
+    "save-flow",
+    "---后台设置---",
+    "admin-options",
+    "menu-options",
+    "---Meta 配置---",
+    "post-page-meta",
+    "forum-meta",
+    "taxonomy-meta",
+    "user-meta",
+    "---字段系统---",
+    "field-reference",
+    "value-shapes",
+    "custom-fields",
+    "dependencies",
+    "zcsf-form",
+    "---模块与高级能力---",
+    "widget-options",
+    "advanced",
+    "troubleshooting"
+  ]
+}

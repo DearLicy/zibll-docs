@@ -1,0 +1,561 @@
+---
+title: 古腾堡块与正文模块
+description: 梳理子比主题古腾堡扩展入口、区块清单、短代码桥接、前台渲染依赖，以及新增正文块的推荐写法。
+---
+
+## 模块边界
+
+子比主题的古腾堡能力不是独立页面系统，而是“编辑器 UI + 正文保存结构 + 主题前台渲染”的组合。开发时要先判断需求属于哪一层：
+
+| 层级       | 位置                                                                  | 负责内容                                              |
+| ---------- | --------------------------------------------------------------------- | ----------------------------------------------------- |
+| 后台注册   | `inc/functions/admin/admin-main.php`                                  | 注册区块脚本、编辑器样式、区块分类和开关              |
+| 编辑器逻辑 | `js/gutenberg-extend.js` / `js/gutenberg-extend.min.js`               | 区块编辑面板、属性、保存结构、区块转换                |
+| 多语言文案 | `inc/functions/zib-js-i18n.php`                                       | 通过 `zibll_block_var.i18n` 提供编辑器中文文案        |
+| 前台解析   | `inc/functions/zib-theme.php`、`inc/functions/shop/shop.php`、前台 JS | 短代码渲染、隐藏内容、代码高亮、视频、轮播、Tab、弹窗 |
+| 样式资源   | `css/editor-style.min.css`、`css/tinymce.css`、主题前台 CSS           | 编辑器预览和前台样式                                  |
+
+如果只是给正文增加一个可复用展示模块，优先做古腾堡块或短代码桥接。如果模块需要写入订单、支付、用户资产、上传文件或修改业务状态，应把写入逻辑放在服务端 Ajax、Hook 或业务类里，古腾堡块只负责保存内容配置。
+
+## 开关与资源注册
+
+古腾堡入口由后台初始化注册：
+
+```php
+if (function_exists('register_block_type') && !_pz('close_gutenberg')) {
+    add_action('admin_init', 'zibll_block');
+}
+```
+
+`zibll_block()` 注册三类资源：
+
+| 资源                 | 文件                         | 用途                       |
+| -------------------- | ---------------------------- | -------------------------- |
+| `zibll_block` script | `js/gutenberg-extend.min.js` | 编辑器区块逻辑             |
+| `zibll_block` style  | `css/editor-style.min.css`   | 编辑器预览样式             |
+| `font_awesome` style | `css/font-awesome.min.css`   | 编辑器内 Font Awesome 图标 |
+
+注册时使用：
+
+```php
+register_block_type('zibll/block', array(
+    'editor_script' => 'zibll_block',
+    'editor_style'  => 'zibll_block',
+));
+```
+
+编辑器文案通过 `wp_localize_script()` 注入：
+
+```php
+wp_localize_script('zibll_block', 'zibll_block_var', array(
+    'i18n' => zib_get_gutenberg_i18n_strings(),
+));
+```
+
+扩展时要尊重主题开关：
+
+| 开关                                     | 影响                                    |
+| ---------------------------------------- | --------------------------------------- |
+| `_pz('close_gutenberg')`                 | 关闭主题古腾堡扩展时不要强行注册区块    |
+| `_pz('disabled_autoembed', true)`        | 开启后主题会在编辑器里注销 `core/embed` |
+| `_pz('highlight_kg')`、`highlight_zt` 等 | 影响代码高亮前台资源和主题              |
+
+## 区块分类
+
+主题会把区块放到自定义分类：
+
+| 字段  | 值                |
+| ----- | ----------------- |
+| slug  | `zibll_block_cat` |
+| title | `Zibll主题模块`   |
+
+WordPress 5.8 及以上使用 `block_categories_all`，旧版本使用 `block_categories`。新增主题风格区块时应放入这个分类，避免散落在 WordPress 默认分类里。
+
+```js
+registerBlockType('zibllblock/example', {
+  title: 'Zibll:示例模块',
+  category: 'zibll_block_cat',
+});
+```
+
+## 区块清单
+
+| 区块或格式 | slug                                 | 保存结构                                    | 主要用途                         |
+| ---------- | ------------------------------------ | ------------------------------------------- | -------------------------------- |
+| 文件下载   | `zibllblock/download`                | 静态 `.file-download-box` HTML              | 正文附件下载、文件属性展示       |
+| Tab 栏目   | `zibllblock/tabs` / `zibllblock/tab` | Bootstrap Tab 结构                          | 多栏目正文内容                   |
+| 视频剧集   | `zibllblock/dplayerfeatured`         | `.new-dplayer` + `.switch-video`            | 多集视频切换                     |
+| 超级嵌入   | `zibllblock/iframe`                  | `iframe` 包裹结构                           | 嵌入外部视频、音乐或页面         |
+| 剧集嵌入   | `zibllblock/iframeseries`            | `iframe` + `.switch-iframe`                 | 多个嵌入地址切换                 |
+| 视频       | `zibllblock/dplayer`                 | `.new-dplayer.post-dplayer`                 | 单视频播放                       |
+| 亮点       | `zibllblock/feature`                 | `.feature` 静态 HTML                        | 图标、标题、简介                 |
+| 设定颜色   | `zibllblock/set-color`               | RichText format `<qc>`                      | 行内文字颜色和背景色             |
+| 弹窗       | `zibllblock/modal`                   | Bootstrap modal 结构                        | 正文内隐藏弹窗内容               |
+| 折叠框     | `zibllblock/collapse`                | `.panel` + `.collapse`                      | 手风琴内容                       |
+| 高亮代码   | `zibllblock/enlighter`               | `<pre><code data-enlighter-*></code></pre>` | 代码高亮、行号、代码组           |
+| 标题       | `zibllblock/biaoti`                  | `h1` 至 `h5`，`.title-theme`                | 主题样式标题                     |
+| 隐藏内容   | `zibllblock/hide-content`            | `[hidecontent]...[/hidecontent]`            | 评论、登录、密码、会员、付费可见 |
+| 文章列表   | `zibllblock/postslists`              | `[postslists ...]`                          | 正文插入文章列表                 |
+| 文章/帖子  | `zibllblock/postsbox`                | `[postsbox post_id="..."]`                  | 正文插入单篇文章或帖子卡片       |
+| 引言       | `zibllblock/quote`                   | `.quote_q` 静态 HTML                        | 主题引言样式                     |
+| 提醒框     | `zibllblock/alert`                   | `.alert` 静态 HTML                          | 可关闭提示框                     |
+| 按钮组     | `zibllblock/buttons`                 | 多个 `.but` 按钮                            | 正文按钮组合                     |
+| 幻灯片     | `zibllblock/carousel`                | `.wp-block-carousel` + `.carousel`          | 图片轮播                         |
+| 无缝图     | `zibllblock/seamlessimg`             | `.seamless-img` + gallery                   | 商品详情长图等                   |
+| 商品       | `zibllblock/productbox`              | `[productbox id="..."]`                     | 正文插入商城商品卡片             |
+
+## 静态块与短代码桥接
+
+主题古腾堡块有两种保存方式。
+
+静态 HTML 块会直接把前台需要的结构保存到正文，例如文件下载、Tab、视频、嵌入、弹窗、折叠、标题、引言、提醒框、按钮组、轮播和无缝图。它们依赖主题前台 CSS 和 JS 初始化，开发时要保持 class、`data-*` 和 Bootstrap 属性一致。
+
+短代码桥接块只提供编辑器 UI，最终保存为主题短代码：
+
+```text
+[postslists cat="1,2" topics="" orderby="date" style="text" count="12" paginate="ajax"]
+[postsbox post_id="123"]
+[productbox id="456"]
+[hidecontent type="logged"]登录后可见内容[/hidecontent]
+```
+
+这类块的前台输出由 PHP 短代码回调决定。扩展时不要只改编辑器保存字符串，还要检查短代码回调是否支持对应参数、是否有权限判断、是否需要缓存清理。
+
+## 文件下载块
+
+`zibllblock/download` 支持两种文件来源：
+
+| 来源       | 保存字段             | 说明                                       |
+| ---------- | -------------------- | ------------------------------------------ |
+| 媒体库文件 | `data-download-file` | 通过附件 ID 下载，前台可继续走主题下载逻辑 |
+| 外部地址   | `href`               | 直接写入下载链接                           |
+
+保存结构保留这些关键节点：
+
+```html
+<div class="muted-box file-download-box mb20">
+  <div class="file-download-icon"></div>
+  <div class="file-download-name">文件名</div>
+  <a class="but c-blue file-download-btn" data-download-file="123">下载</a>
+  <div class="file-download-desc">
+    <div class="desc-left">ZIP文件</div>
+    <div class="desc-right">1.2M</div>
+  </div>
+</div>
+```
+
+### 保存结构与普通附件下载
+
+古腾堡的 `zibllblock/download` 和经典编辑器里的 `zib_file` 按钮最终都会生成 `.file-download-box`。媒体库文件会把附件 ID 写到 `data-download-file`，外部地址只写普通 `href`。这意味着主题只会托管站内附件的下载链路，外部地址仍然由目标站点自己处理。
+
+经典编辑器按钮只在允许文件上传时显示。主题在 `inc/functions/zib-theme.php` 里通过 `apply_filters('tinymce_upload_file', false)` 判断是否加入 `zib_file`，论坛发帖编辑器会在当前用户具备 `posts_upload_file` 能力时挂上 `__return_true`：
+
+```php
+if (zib_bbs_current_user_can('posts_upload_file')) {
+    add_filter('tinymce_upload_file', '__return_true');
+}
+```
+
+后台论坛权限项对应 `bbs_posts_upload_file`，它控制“发帖允许在编辑器上传文件及插入附件下载模块”。扩展投稿或论坛编辑器时，不要只把按钮塞进 TinyMCE，还要先确认用户是否具备上传文件的业务权限。
+
+### 前台 nonce 注入
+
+保存到正文里的 `data-download-file` 不是最终下载地址。文章输出时，主题会在 `the_content` 过滤器里扫描下载按钮，并给每个附件 ID 注入一次性校验值：
+
+```php
+function zib_the_content_download_link_replace($content)
+{
+    $pattern = '/<a(.*?)data-download-file="(.*?)"(.*?)>/';
+    preg_match_all($pattern, $content, $matches);
+
+    if ($matches) {
+        foreach ($matches[2] as $val) {
+            $nonce   = wp_create_nonce('download_file_' . $val);
+            $content = str_replace(" data-download-file=\"$val\"", " download-nonce=\"$nonce\" data-download-file=\"$val\"", $content);
+        }
+    }
+
+    return $content;
+}
+add_filter('the_content', 'zib_the_content_download_link_replace');
+```
+
+前端脚本点击 `.file-download-btn` 时会读取 `data-download-file` 和 `download-nonce`，把按钮地址改成 `admin-ajax.php?action=download_file&file={id}&nonce={nonce}`，并用新窗口打开。这里的 nonce 是防止正文里被随意拼接附件 ID，不是付费或会员权限判断。
+
+### 下载 Ajax
+
+普通附件下载由 `action/media.php` 注册：
+
+```php
+add_action('wp_ajax_download_file', 'zib_ajax_download_file');
+add_action('wp_ajax_nopriv_download_file', 'zib_ajax_download_file');
+```
+
+`zib_ajax_download_file()` 的核心流程是读取 `file` 参数、校验 `wp_verify_nonce($_REQUEST['nonce'], 'download_file_' . $file_id)`、确认附件存在、累加 `download_amount`，最后 `header('location:' . $attachment_url)` 跳转到真实附件地址。它适合公开附件的下载统计和基础防伪，不适合承载订单校验、会员权益、次数限制或隐藏资源。
+
+如果只是想给普通附件追加提示，可以在正文层补充说明：
+
+```php
+add_filter('the_content', 'zib_docs_download_box_notice', 20);
+
+function zib_docs_download_box_notice($content)
+{
+    if (false === strpos($content, 'data-download-file=')) {
+        return $content;
+    }
+
+    return $content . '<div class="muted-2-color px12 mt10">' . esc_html__('附件下载链接会定期刷新，请勿复制缓存后的下载地址。', 'zib_language') . '</div>';
+}
+```
+
+普通 `download_file` Ajax 没有下载前 Hook。需要下载审计、风控、限速或订单上下文时，应扩展 Ajax 处理函数，或直接使用 Zibpay 下载链路提供的 Hook。
+
+### 附件归属
+
+主题保存文章或论坛帖子后，会扫描正文里的媒体标记，把附件挂到对应内容下：
+
+```php
+preg_match_all('/(data-edit-file-id|data-download-file)="(\d+)"/', $post_content, $matches);
+
+if (!empty($matches[2])) {
+    zib_media_attach_action($matches[2], $post->ID);
+}
+```
+
+这段逻辑挂在 `new_edit_posts`、`new_add_posts`、`bbs_edit_posts`、`bbs_add_posts`。因此扩展下载块时要保留 `data-download-file="{attachment_id}"`，不要把附件 ID 改成只存在于自定义 JSON 或隐藏字段里，否则媒体归属、清理和后台统计都可能对不上。
+
+### 与 Zibpay 付费下载的边界
+
+付费资源、会员免费资源、订单下载、下载限速和下载日志都不要走 `download_file`。它们应该进入 [Zibpay 付费下载与资源权限](/docs/api/zibpay-paid-download) 的 `pay-download` 路由，由主题在下载模板里再次校验文章 ID、资源序号、nonce、购买状态、免费次数和资源地址。
+
+Zibpay 下载模板会提供下载前 Action 和文件本地化 Filter：
+
+```php
+do_action('zibpay_download_before', $post_id, $down_id, $paid, $file_url, $file_local);
+$file_local = apply_filters('zibpay_download_file_local', $file_local, $file_url, $post_id, $down_id, $paid);
+```
+
+判断边界可以按这张表执行：
+
+| 场景                           | 推荐链路                                              |
+| ------------------------------ | ----------------------------------------------------- |
+| 正文公开附件                   | `zibllblock/download` 或 `zib_file` + `download_file` |
+| 外部公开下载地址               | 下载块保存普通 `href`                                 |
+| 需要登录后才能访问             | 服务端先判断登录和内容权限，再输出下载块              |
+| 付费资源、会员资源、免费次数   | Zibpay `pay-download` 路由                            |
+| 下载审计、限速、远程资源转本地 | Zibpay 下载 Hook 和 Filter                            |
+
+扩展附件下载时建议复用这个结构。若要增加权限、次数、积分或付费下载，服务端应接入已有下载权限和 Zibpay 流程，不要只在前端隐藏按钮。
+
+## 视频与嵌入
+
+视频相关块分四类：
+
+| 块                | 场景                 | 前台关键结构                        |
+| ----------------- | -------------------- | ----------------------------------- |
+| `dplayer`         | 单个本地或流媒体视频 | `.new-dplayer.post-dplayer`         |
+| `dplayerfeatured` | 多集视频             | `.new-dplayer` + `.switch-video`    |
+| `iframe`          | 单个外部嵌入         | `.wp-block-embed iframe`            |
+| `iframeseries`    | 多个外部嵌入         | `.iframe-series` + `.switch-iframe` |
+
+视频块保存的数据包括 `video-url`、`video-pic`、`data-loop`、`data-autoplay`、`data-volume`、`data-scale-height` 等。前台播放器初始化读取这些属性，因此新增视频相关能力时应新增属性而不是改已有属性含义。更完整的视频封面、DPlayer 初始化、剧集切换、iframe 嵌入和付费视频链路见 [视频资源与播放器](/docs/api/video-resources-player)。
+
+嵌入块支持从 iframe 代码里提取 `src`，同时保存长宽比例。扩展时要对外部地址做白名单或输出转义，避免让编辑器内容变成不受控脚本入口。
+
+## 高亮代码块
+
+`zibllblock/enlighter` 是主题对 EnlighterJS 的编辑器封装。它不把代码块渲染成一套新的组件，而是保存为普通 `pre > code.gl`，再由前台脚本统一初始化高亮、行号、主题、代码组和工具栏。
+
+后台常用功能里的代码高亮配置来自 `inc/options/admin-options.php`：
+
+| 配置                  | 默认值      | 作用                                                                       |
+| --------------------- | ----------- | -------------------------------------------------------------------------- |
+| `highlight_kg`        | `true`      | 全局代码高亮开关；关闭后仍会处理主题明确标记的 `code.gl` 和 `code.special` |
+| `highlight_hh`        | `false`     | 前台初始化 EnlighterJS 时是否显示行号                                      |
+| `highlight_btn`       | `true`      | 控制高亮工具栏是否显示；关闭后前台动态 CSS 会隐藏 `.enlighter-toolbar`     |
+| `highlight_zt`        | `enlighter` | 亮色模式默认高亮主题                                                       |
+| `highlight_dark_zt`   | `dracula`   | 深色模式默认高亮主题                                                       |
+| `highlight_maxheight` | `400`       | 前台代码块最大高度，设置为 `0` 表示不限制                                  |
+
+前台会在 `zib_win_var()` 输出 `_win.highlight_*` 配置。`js/main.js` 在 `auto_fun()` 初始化时按下面的规则选择代码块：
+
+| 场景                | 选择器                                                                        |
+| ------------------- | ----------------------------------------------------------------------------- |
+| `highlight_kg` 开启 | `pre code:not(.enlighter-origin)`                                             |
+| `highlight_kg` 关闭 | `pre code.gl:not(.enlighter-origin), pre code.special:not(.enlighter-origin)` |
+
+因此，全局开关更像“是否自动接管所有普通代码块”。古腾堡高亮块和经典编辑器高亮块都会保存 `class="gl"`，即使站点关闭普通代码块自动高亮，也能继续被主题识别。
+
+初始化时主题会按需加载 `js/enlighter/enlighterjs.min.css`，并用 `_win.highlight_zt` 作为默认主题。明暗模式切换时，`toggle-theme` 会把 `.enlighter-default` 上的 `enlighter-t-{亮色主题}` 和 `enlighter-t-{暗色主题}` 互相替换，所以扩展代码高亮时不要手动固定死高亮主题 class。
+
+`inc/functions/zib-head.php` 还会输出两段动态 CSS：
+
+```php
+if (_pz('highlight_kg') && _pz('highlight_maxheight')) {
+    $styles .= '.enlighter-default .enlighter,.wp-block-zibllblock-enlighter:not(:has(.enlighter)),.enlighter-pre:not(:has(.enlighter)){max-height:' . _pz('highlight_maxheight') . 'px;overflow-y:auto !important;}';
+}
+
+if (_pz('highlight_kg') && !_pz('highlight_btn')) {
+    $styles .= '.enlighter-toolbar{display:none !important;}';
+}
+```
+
+这说明最大高度和工具栏显示不是编辑器独有能力，而是前台输出层统一控制。若要新增代码展示能力，应优先让保存结构进入这套选择器和动态 CSS，而不是另写一套滚动容器。
+
+古腾堡块保存结构如下：
+
+```html
+<pre>
+  <code
+    class="gl"
+    data-enlighter-language="php"
+    data-enlighter-theme=""
+    data-enlighter-highlight="1,3-5"
+    data-enlighter-linenumbers="true"
+    data-enlighter-lineoffset="1"
+    data-enlighter-title="示例"
+    data-enlighter-group="demo"
+  >...</code>
+</pre>
+```
+
+这些属性在 `inc/functions/zib-theme.php` 中被加入文章内容允许属性，避免 WordPress 过滤掉高亮配置：
+
+| 属性                         | 用途                                         |
+| ---------------------------- | -------------------------------------------- |
+| `data-enlighter-language`    | 语言类型，`generic` 表示自动识别             |
+| `data-enlighter-theme`       | 单个代码块指定主题，留空表示跟随全局主题     |
+| `data-enlighter-highlight`   | 高亮行，例如 `1,3-5`                         |
+| `data-enlighter-linenumbers` | 单个代码块是否显示行号，空值表示跟随全局设置 |
+| `data-enlighter-lineoffset`  | 起始行号偏移                                 |
+| `data-enlighter-title`       | 代码组内展示标题                             |
+| `data-enlighter-group`       | 代码组 ID，相同 ID 会合并为同一组            |
+
+`js/gutenberg-extend.js` 的块属性与保存结构一一对应：
+
+| 块属性        | 保存位置                     | 编辑器入口                   |
+| ------------- | ---------------------------- | ---------------------------- |
+| `content`     | `code.gl` 文本内容           | `PlainText` 代码输入区       |
+| `c_language`  | `data-enlighter-language`    | 工具栏语言菜单和侧栏语言选择 |
+| `theme`       | `data-enlighter-theme`       | 侧栏主题选择，空值为跟随主题 |
+| `highlight`   | `data-enlighter-highlight`   | 侧栏高亮行输入               |
+| `linenumbers` | `data-enlighter-linenumbers` | 侧栏行号显示单选             |
+| `lineoffset`  | `data-enlighter-lineoffset`  | 侧栏起始行号                 |
+| `title`       | `data-enlighter-title`       | 代码组标题                   |
+| `group`       | `data-enlighter-group`       | 自定义代码组 ID              |
+
+块支持从 `core/code`、`core/preformatted`、`core/paragraph` 转换进来，也支持转回 `core/code` 和 `core/preformatted`。粘贴普通 `<pre><code>` 时，主题会把文本内容带入高亮块；粘贴旧 Enlighter 结构时，也会读取已有的 `data-enlighter-*` 属性。
+
+经典编辑器里的 `precode` 按钮使用同一套结构：
+
+```html
+<pre contenteditable="false" class="enlighter-pre">
+  <code
+    class="gl"
+    data-enlighter-language="php"
+    data-enlighter-theme="dracula"
+  >...</code>
+</pre>
+```
+
+经典编辑器只提供语言和主题两个字段；古腾堡块额外提供高亮行、行号、起始行号、代码组标题和组 ID。两者前台都进入同一套 EnlighterJS 初始化流程。
+
+扩展时建议遵守这些边界：
+
+| 需求               | 推荐做法                                                                       |
+| ------------------ | ------------------------------------------------------------------------------ |
+| 插入一段可高亮代码 | 保存 `pre > code.gl`，配置写入 `data-enlighter-*`                              |
+| 增加更多语言快捷项 | 改编辑器语言列表，同时保持 `data-enlighter-language` 的值可被 EnlighterJS 识别 |
+| 做代码组 Tab       | 使用相同 `data-enlighter-group`，标题写入 `data-enlighter-title`               |
+| 控制单块主题       | 写 `data-enlighter-theme`；需要跟随全局主题时留空                              |
+| 控制全站滚动高度   | 走 `highlight_maxheight`，不要在正文里写死高度                                 |
+| 控制复制或扩展按钮 | 走 `highlight_btn` 和 Enlighter 工具栏，不要单独在代码块内塞按钮               |
+
+最小插入示例：
+
+```php
+function zib_docs_get_code_block($code, $language)
+{
+    $language = $language ? $language : 'generic';
+
+    return '<pre><code class="gl" data-enlighter-language="' . esc_attr($language) . '">' . esc_html($code) . '</code></pre>';
+}
+```
+
+如果代码内容来自用户输入，必须在服务端转义代码文本和属性值。不要为了保留尖括号而直接输出未过滤 HTML；主题允许的是高亮所需的 `data-enlighter-*` 属性，不代表代码内容可以跳过 `esc_html()`。
+
+编辑器内预览样式由 `css/editor-style.min.css` 和 `css/tinymce.css` 提供。`tinymce.css` 会给 `.enlighter-pre` 设置编辑器内最大高度、滚动条和 `code.gl::before` 标识；这些只是编辑器提示，不等同于前台最终渲染。前台效果以 EnlighterJS 初始化后的 `.enlighter-default` 结构为准。
+
+## 隐藏内容块
+
+`zibllblock/hide-content` 本质是 `[hidecontent]` 短代码的编辑器包装。支持的可见模式：
+
+| type       | 可见条件       |
+| ---------- | -------------- |
+| `reply`    | 评论后可见     |
+| `logged`   | 登录后可见     |
+| `password` | 输入密码后可见 |
+| `payshow`  | 付费阅读可见   |
+| `vip1`     | 全部会员可见   |
+| `vip2`     | 二级会员可见   |
+
+密码模式会额外保存 `password`、`img_id`、`img_url`、`desc`。这些字段是引导和校验逻辑的一部分，不能只在编辑器层删除或改名。
+
+隐藏内容不能嵌套使用。扩展时要以服务端短代码回调为准，前端样式只负责展示隐藏状态。
+
+## 文章、帖子与商品桥接
+
+文章列表块保存：
+
+```text
+[postslists cat="1,2" topics="-3" orderby="views" style="minicard" count="12" paginate="ajax"]
+```
+
+参数含义：
+
+| 参数       | 说明                                                                                                                                     |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `cat`      | 分类 ID，支持英文逗号和负数排除                                                                                                          |
+| `topics`   | 专题 ID，支持英文逗号和负数排除                                                                                                          |
+| `orderby`  | `title`、`modified`、`date`、`comment_count`、`like`、`views`、`favorite`、`zibpay_price`、`zibpay_points_price`、`sales_volume`、`rand` |
+| `style`    | `text` 或 `minicard`                                                                                                                     |
+| `count`    | 显示数量，分页开启时表示每页数量                                                                                                         |
+| `paginate` | 空、`ajax` 或 `number`                                                                                                                   |
+
+文章/帖子卡片和商品卡片会调用 WordPress REST 搜索辅助选择 ID：
+
+| 块        | 搜索类型             | 保存短代码                 |
+| --------- | -------------------- | -------------------------- |
+| 文章/帖子 | `post`、`forum_post` | `[postsbox post_id="123"]` |
+| 商品      | `shop_product`       | `[productbox id="456"]`    |
+
+如果站点关闭论坛或商城，前台短代码可能没有对应内容。扩展时应做 `post_type_exists()`、函数存在性和模块开关检查。
+
+## Tab、弹窗与折叠
+
+这些块复用主题和 Bootstrap 风格结构：
+
+| 块       | 触发方式                                         | 关键点                                    |
+| -------- | ------------------------------------------------ | ----------------------------------------- |
+| Tab 栏目 | `.post-tab-toggle` + `tab-id`                    | 父块 `tabs` 管理标题，子块 `tab` 保存内容 |
+| 弹窗     | `data-toggle="modal"` / `href="#modal_id"`       | 模态框默认不显示，需要按钮或链接触发      |
+| 折叠框   | `data-toggle="collapse"` + `href="#collapse_id"` | `isshow` 控制默认展开                     |
+
+新增类似交互块时，优先复用主题已有 class 和前台事件；如果生成了新的 `id`，要确保同一篇文章内唯一，避免多个弹窗或折叠互相串台。
+
+## 幻灯片与无缝图
+
+幻灯片块内只允许 `core/gallery`，保存结构：
+
+```html
+<div class="wp-block-carousel">
+  <div
+    class="carousel slide"
+    data-effect="fade"
+    data-interval="4000"
+    proportion="0.6"
+  >
+    <!-- gallery -->
+    <div class="swiper-button-next"></div>
+    <div class="swiper-button-prev"></div>
+    <div class="swiper-pagination"></div>
+  </div>
+</div>
+```
+
+无缝图同样基于 `core/gallery`，但保存为 `.seamless-img`。它更适合商品详情长图、连续图片说明等场景。开启 `full-container` 后宽度会填满容器，商城内容全屏布局下会有更强的视觉效果。
+
+## 新增区块的推荐做法
+
+新增块应尽量放在独立插件或子主题资源里，后台只在编辑器页面加载脚本：
+
+```php
+function zib_docs_register_editor_block_assets()
+{
+    if (!function_exists('register_block_type') || _pz('close_gutenberg')) {
+        return;
+    }
+
+    wp_register_script(
+        'zib_docs_editor_blocks',
+        get_stylesheet_directory_uri() . '/assets/editor-blocks.js',
+        array('wp-blocks', 'wp-element', 'wp-components', 'wp-block-editor'),
+        '1.0.0',
+        true
+    );
+
+    register_block_type('zibll-docs/example', array(
+        'editor_script' => 'zib_docs_editor_blocks',
+    ));
+}
+add_action('admin_init', 'zib_docs_register_editor_block_assets');
+```
+
+编辑器脚本示例：
+
+```js
+(function (wp) {
+  var el = wp.element.createElement;
+  var RichText = wp.blockEditor.RichText;
+
+  wp.blocks.registerBlockType('zibll-docs/example', {
+    title: 'Zibll:说明框',
+    icon: 'info',
+    category: 'zibll_block_cat',
+    attributes: {
+      content: {
+        type: 'array',
+        source: 'children',
+        selector: '.zib-docs-note',
+      },
+    },
+    edit: function (props) {
+      return el(RichText, {
+        tagName: 'div',
+        className: 'zib-docs-note',
+        value: props.attributes.content,
+        placeholder: '请输入内容...',
+        onChange: function (content) {
+          props.setAttributes({ content: content });
+        },
+      });
+    },
+    save: function (props) {
+      return el(
+        'div',
+        { className: 'zib-docs-note' },
+        props.attributes.content,
+      );
+    },
+  });
+})(window.wp);
+```
+
+如果块最终依赖服务端渲染，优先保存短代码或最小配置，然后在 PHP 里做权限、查询和缓存：
+
+```php
+function zib_docs_shortcode_notice($atts)
+{
+    $atts = shortcode_atts(array(
+        'type' => 'info',
+        'text' => '',
+    ), $atts);
+
+    $class = in_array($atts['type'], array('info', 'success', 'warning'), true) ? $atts['type'] : 'info';
+
+    return '<div class="alert jb-' . esc_attr($class) . '">' . esc_html($atts['text']) . '</div>';
+}
+add_shortcode('zib_notice', 'zib_docs_shortcode_notice');
+```
+
+## 扩展检查清单
+
+- 后台注册是否尊重 `close_gutenberg`。
+- 区块是否放入 `zibll_block_cat`。
+- 编辑器文案是否可以走本地化，而不是写死在多个脚本里。
+- 保存结构是否复用主题前台已有 class、`data-*` 和短代码。
+- 服务端是否再次校验权限、登录态、nonce、订单状态和可见条件。
+- 搜索文章、帖子、商品时是否兼容模块未启用的情况。
+- 轮播、视频、弹窗、Tab 是否需要前台 JS 初始化。
+- 动态内容是否避免被页面缓存固定成某个用户的状态。
+- 修改或新增短代码参数后，是否同步编辑器 UI、前台回调和文档。

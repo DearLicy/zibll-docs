@@ -1,0 +1,346 @@
+---
+title: SEO Head 与 robots
+description: 梳理子比主题 wp_head 清理、SEO title、keywords、description、canonical、特殊页面 noindex 和扩展边界。
+---
+
+子比主题的 SEO head 由 `inc/functions/zib-head.php` 统一输出。它和百度资源提交不是同一条链路：本页关注 `<head>` 里的标题、关键词、描述、canonical、robots 和 WordPress 默认 head 清理；百度自动推送、普通收录、快速收录见 [SEO 与百度资源提交](/docs/api/seo-baidu-submission)。
+
+二次开发时不要在模板里随手 `echo <title>` 或重复输出 `<meta name="description">`。主题已经在 `wp_head` 优先级、页面类型、文章 meta、分类 meta 和特殊页面 robots 上做了分工。
+
+## 源码入口
+
+| 文件                                        | 作用                                                                     |
+| ------------------------------------------- | ------------------------------------------------------------------------ |
+| `inc/functions/zib-head.php`                | 清理 WordPress 默认 head、输出 SEO、favicon、动态 CSS 和自定义 head code |
+| `inc/options/admin-options.php`             | 注册 SEO 优化开关、站点 keywords、description、AI SEO 配置               |
+| `inc/options/metabox-options.php`           | 注册文章、页面、论坛帖子、商品的独立 SEO metabox                         |
+| `inc/functions/admin/admin-main.php`        | 分类 SEO 字段和后台 AI SEO 入口                                          |
+| `pages/newposts.php`                        | 前台投稿页添加 noindex                                                   |
+| `pages/user-sign.php`                       | 登录注册页输出 SEO title，并手动 noindex                                 |
+| `inc/functions/user/page/user-center.php`   | 用户中心 noindex                                                         |
+| `inc/functions/message/page/msg-center.php` | 消息中心 noindex                                                         |
+| `inc/functions/shop/page/cart.php`          | 购物车页面只打开 SEO title，并移除部分导航组件                           |
+
+## Head 清理
+
+系统工具里的 `remove_more_wp_head` 默认开启。开启后，主题在 `after_setup_theme` 清理 WordPress 默认 head：
+
+```php
+if (_pz('remove_more_wp_head', true)) {
+    function remove_more_wp_head()
+    {
+        remove_action('wp_head', 'feed_links_extra', 3);
+        remove_action('wp_head', 'feed_links', 2);
+        remove_action('wp_head', 'rsd_link');
+        remove_action('wp_head', 'wlwmanifest_link');
+        remove_action('wp_head', 'index_rel_link');
+        remove_action('wp_head', 'parent_post_rel_link', 10, 0);
+        remove_action('wp_head', 'start_post_rel_link', 10, 0);
+        remove_action('wp_head', 'adjacent_posts_rel_link', 10, 0);
+        remove_action('wp_head', 'wp_generator');
+        remove_action('wp_head', 'adjacent_posts_rel_link_wp_head', 10, 0);
+        remove_action('wp_head', 'wp_shortlink_wp_head', 10, 0);
+        remove_action('wp_head', 'rest_output_link_wp_head', 10, 0);
+        remove_action('wp_head', 'wp_oembed_add_discovery_links', 10, 1);
+        remove_action('wp_head', 'rel_canonical', 10, 0);
+    }
+    add_action('after_setup_theme', 'remove_more_wp_head');
+}
+```
+
+这会影响 feed、oEmbed、REST discovery、WordPress 版本、默认 canonical 等输出。如果插件依赖这些默认标签，要么关闭这个开关，要么在更晚的 Hook 中按需加回。
+
+## 主题 head 输出顺序
+
+主题注册两组 head 入口：
+
+```php
+add_action('wp_head', 'zib_head');
+add_action('admin_head', 'zib_head_favicon');
+add_action('wp_head', 'zib_seo', 1);
+```
+
+`zib_seo()` 优先级是 `1`，会比大多数 head 内容更早输出 title、keywords、description 和 canonical。`zib_head()` 负责 favicon、动态 CSS、自定义 head code 和其它 meta：
+
+```php
+function zib_head()
+{
+    zib_head_favicon();
+    zib_head_css();
+    zib_head_code();
+    zib_head_other();
+}
+```
+
+`zib_head_other()` 会输出：
+
+| 输出                         | 来源                                  |
+| ---------------------------- | ------------------------------------- |
+| `apple-mobile-web-app-title` | `get_bloginfo('name')`                |
+| `theme-color`                | `zib_get_theme_mode()` 判断日夜间颜色 |
+| IE HTML5 兼容脚本            | `js/libs/html5.min.js`                |
+| 全局加载动画 CSS             | `qj_dh_css()`                         |
+
+## SEO 开关
+
+后台 SEO 优化主开关是 `post_keywords_description_s`：
+
+```php
+if (_pz('post_keywords_description_s')) {
+    zib_title();
+    zib_keywords();
+    zib_description();
+}
+```
+
+开启后，主题会给全站输出 SEO title、keywords、description 和 canonical。关闭后，主题默认不输出这些内容，除非当前页面显式打开 `echo_seo_title`：
+
+```php
+} elseif (apply_filters('echo_seo_title', false)) {
+    zib_title();
+}
+```
+
+这就是登录页、购物车页、消息相关页面等特殊页面能在关闭核心 SEO 时仍然输出 `<title>` 的原因。
+
+如果站点使用专业 SEO 插件，常见做法是关闭 `post_keywords_description_s`，让插件接管 SEO meta；但仍要检查特殊页面是否需要 `echo_seo_title` 保留基础 `<title>`。
+
+## 标题生成
+
+`zib_title($echo = true)` 的来源顺序：
+
+| 场景                                           | 规则                                 |
+| ---------------------------------------------- | ------------------------------------ |
+| `$new_title` 全局变量存在                      | 直接使用 `$new_title`                |
+| 普通页面                                       | `wp_title()` + 分隔符 + 站点名       |
+| 文章或页面有副标题                             | 标题后追加 `get_the_subtitle(false)` |
+| 首页配置了 `hometitle`                         | 使用 `hometitle`                     |
+| 首页未配置 `hometitle`                         | 站点名 + 站点描述                    |
+| 分类、标签、taxonomy 配置了 `term_seo.title`   | 使用分类 SEO 标题                    |
+| 文章、页面、版块、帖子、商品配置了独立 `title` | 使用独立 SEO 标题                    |
+| 分页页码大于 1                                 | 追加“第 X 页”                        |
+
+独立 SEO 标题读取：
+
+```php
+$seo_title = trim(zib_get_post_meta($post_ID, 'title', true));
+if ($seo_title) {
+    $html = $seo_title;
+}
+```
+
+扩展时如果只是想拿主题算好的标题做图片 alt、分享标题或结构化数据，调用：
+
+```php
+$title = zib_title(false);
+```
+
+不要再拼一遍 `wp_title()`，否则副标题、独立 SEO、分类 SEO 和分页后缀会丢失。
+
+## keywords 生成
+
+`zib_keywords($echo = true)` 的来源顺序：
+
+| 场景                         | 规则                                                  |
+| ---------------------------- | ----------------------------------------------------- |
+| `$new_keywords` 全局变量存在 | 直接使用                                              |
+| singular 独立 `keywords`     | 使用 `zib_get_post_meta($post->ID, 'keywords', true)` |
+| 文章                         | 汇总 `post_tag`、`category`、`topic`                  |
+| 论坛帖子                     | 汇总 `forum_tag`、`forum_topic`                       |
+| 版块                         | 汇总 `plate_cat`，并追加标题                          |
+| 商品                         | 汇总 `shop_cat`、`shop_tag`                           |
+| 首页                         | 使用 `_pz('keywords')`                                |
+| 搜索页                       | 使用搜索词                                            |
+| taxonomy                     | 优先 `term_seo.keywords`，否则分类名                  |
+| 其它页面                     | 使用 `wp_title()`                                     |
+
+函数最后会把中文逗号替换为英文逗号，并清理尾部逗号：
+
+```php
+$keywords = str_replace('，', ',', $keywords);
+$keywords = rtrim(trim($keywords), ',');
+```
+
+如果扩展了新的内容类型，建议在内容保存时写入独立 SEO `keywords`，或者在页面模板里通过全局 `$new_keywords` 提供结果；不要在 `zib_keywords()` 里硬编码新分支。
+
+## description 生成
+
+`zib_description($echo = true)` 的来源顺序：
+
+| 场景                            | 规则                                                                        |
+| ------------------------------- | --------------------------------------------------------------------------- |
+| `$new_description` 全局变量存在 | 直接使用                                                                    |
+| singular 独立 `description`     | 使用 `zib_get_post_meta($post->ID, 'description', true)`                    |
+| singular 没有独立描述           | 使用 `zib_get_excerpt(210, '...', $post)` 后截到 200 字                     |
+| singular 仍为空                 | 站点名 + 当前标题                                                           |
+| 首页                            | 使用 `_pz('description')`                                                   |
+| taxonomy                        | 优先 `term_seo.description`，再用 `term_description()`，最后分类名 + 站点名 |
+| 归档页                          | 站点名 + 当前归档标题                                                       |
+| 搜索页                          | `站点名: '关键词' 的搜索结果`                                               |
+| 其它页面                        | 站点名 + 当前标题                                                           |
+
+输出前会 `esc_attr()`。如果内容里需要生成一段 SEO 描述，优先写入独立 `description` meta，让主题和后台预览都能读到。
+
+## canonical
+
+核心 SEO 开启时，`zib_seo()` 会输出 canonical：
+
+```php
+if (!is_singular()) {
+    echo '<link rel="canonical" href="' . esc_url(zib_get_current_url()) . '" />';
+} else {
+    rel_canonical();
+}
+```
+
+注意主题在 head 清理阶段移除了 WordPress 默认 `rel_canonical`，然后在自己的 SEO 流程里重新按页面类型输出。扩展 canonical 时不要同时让插件、主题和自定义代码三处输出，否则会出现多个 canonical。
+
+如果要给特殊页面自定义 canonical，建议先判断是否关闭主题 SEO 或移除主题输出，再单独输出一份。
+
+## 独立 SEO metabox
+
+当 `post_keywords_description_s` 开启时，主题给这些 post type 注册“独立 SEO”：
+
+```php
+$seo_meta_boxe_type = array('post', 'page', 'plate', 'forum_post', 'shop_product');
+add_meta_box('posts_seo', __('独立SEO', 'zib_language'), 'zib_meta_box_seo_meta', $seo_meta_boxe_type, 'advanced', 'high');
+```
+
+保存字段是：
+
+| 字段          | 读取函数                                           |
+| ------------- | -------------------------------------------------- |
+| `title`       | `zib_get_post_meta($post_id, 'title', true)`       |
+| `keywords`    | `zib_get_post_meta($post_id, 'keywords', true)`    |
+| `description` | `zib_get_post_meta($post_id, 'description', true)` |
+
+这些字段属于主题常用 post meta，可能进入聚合存储。读取时用 `zib_get_post_meta()`，不要直接假设一定在独立 `wp_postmeta` 行里。
+
+分类 SEO 字段保存到 `term_seo`，读取时由 `_get_tax_meta()` 间接取值。扩展 taxonomy SEO 时，不要另建 `seo_title`、`seo_keywords` 之类平行 key，优先沿用 `term_seo`。
+
+## 特殊页面 robots
+
+主题提供统一的 noindex 函数：
+
+```php
+function zib_robots_no_robots()
+{
+    return array(
+        'noindex'  => true,
+        'nofollow' => true,
+    );
+}
+```
+
+常见使用位置：
+
+| 页面                            | 处理                                                        |
+| ------------------------------- | ----------------------------------------------------------- |
+| 前台投稿页 `pages/newposts.php` | `add_filter('wp_robots', 'zib_robots_no_robots')`           |
+| 用户中心                        | `add_filter('wp_robots', 'zib_robots_no_robots')`           |
+| 消息中心                        | `add_filter('wp_robots', 'zib_robots_no_robots')`           |
+| 论坛帖子编辑页                  | `add_filter('wp_robots', 'zib_robots_no_robots')`           |
+| 登录注册页                      | 手动输出 `<meta name="robots" content="noindex, nofollow">` |
+| 外链中转页、附件下载跳转页      | 手动输出 `noindex,nofollow`                                 |
+
+这些页面通常包含个人数据、编辑表单、跳转中转或临时状态，不应该被搜索引擎收录。自定义用户后台、订单页、绑定页、OAuth 中转页时，也应加 noindex。
+
+## 特殊页面 title
+
+有些页面不是普通文章/页面模板，但仍需要基础 `<title>`。主题用 `echo_seo_title` Filter 处理：
+
+```php
+add_filter('echo_seo_title', '__return_true');
+```
+
+使用场景包括：
+
+| 页面           | 说明                           |
+| -------------- | ------------------------------ |
+| 登录注册页     | 输出 title，同时手动 noindex   |
+| 购物车页       | 输出 title，隐藏部分导航和侧栏 |
+| 商城页面初始化 | 让商城自定义页面有 title       |
+| 用户相关动态页 | 保留基础 title                 |
+| 消息相关动态页 | 保留基础 title                 |
+
+如果新建一个动态页面，不走 WordPress 普通 page，也不想打开完整 SEO meta，可以加：
+
+```php
+function zib_docs_dynamic_page_seo()
+{
+    add_filter('echo_seo_title', '__return_true');
+    add_filter('wp_robots', 'zib_robots_no_robots');
+}
+add_action('template_redirect', 'zib_docs_dynamic_page_seo');
+```
+
+如果这个页面需要完整 SEO，应该写清楚 title、keywords、description 数据来源，而不是只靠 `echo_seo_title`。
+
+## 自定义 SEO 数据
+
+主题保留了三个全局变量优先入口：
+
+```php
+global $new_title, $new_keywords, $new_description;
+```
+
+在模板足够早的位置设置它们，`zib_title()`、`zib_keywords()`、`zib_description()` 会优先使用：
+
+```php
+function zib_docs_resource_page_seo()
+{
+    if (!is_page('resources')) {
+        return;
+    }
+
+    global $new_title, $new_keywords, $new_description;
+    $new_title       = __('资源中心', 'zib_language') . zib_get_delimiter_blog_name();
+    $new_keywords    = '资源,下载,教程';
+    $new_description = __('整理站内可下载资源和使用教程。', 'zib_language');
+}
+add_action('template_redirect', 'zib_docs_resource_page_seo', 1);
+```
+
+这个方式适合少量动态页面。大量内容、可编辑页面或 taxonomy，仍应把 SEO 字段保存到 post meta 或 `term_seo`。
+
+## 动态业务页 SEO 矩阵
+
+排查 SEO 时不要只看后台 `post_keywords_description_s`。主题还有全局变量、post meta、term meta、页面类型、`echo_seo_title` 和 `wp_robots` 几条并行链路：
+
+| 页面或对象                             | title 来源                                                 | keywords / description 来源                                       | robots / canonical 边界                                         |
+| -------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------- | --------------------------------------------------------------- |
+| 首页                                   | `hometitle`，否则站点名和描述                              | `_pz('keywords')`、`_pz('description')`                           | 非 singular 时 canonical 用当前 URL                             |
+| 文章 / 页面                            | `wp_title()`、副标题、独立 SEO `title`                     | 独立 SEO meta，缺省时标签、分类、摘要或正文截取                   | singular 用 `rel_canonical()`                                   |
+| 分类 / 标签 / taxonomy                 | `term_seo.title` 优先                                      | `term_seo.keywords`、`term_seo.description`，再回落到分类名或描述 | taxonomy 图像另见 `zib_seo_image()`                             |
+| 搜索页                                 | 搜索词和站点名                                             | 搜索词拼成 keywords / description                                 | 搜索 URL 受 `s`、`type`、`trem`、`orderby` 影响，不适合静态缓存 |
+| 作者页                                 | WordPress 标题链路                                         | 常规页面回退                                                      | SEO 图可读取用户 `custom_avatar`                                |
+| 用户中心、消息中心、投稿页、帖子编辑页 | 多数只需要基础 title 或直接 noindex                        | 不应依赖完整 SEO meta                                             | 通过 `wp_robots` 或手动 meta `noindex,nofollow` 防收录          |
+| 登录注册、购物车、商城/论坛动态页      | 常见做法是 `add_filter('echo_seo_title', '__return_true')` | 只输出 title，不等于完整 SEO                                      | 购物车、登录、编辑类页面通常不应收录                            |
+| 商品                                   | 独立 SEO meta 或标题回退                                   | 商品分类、标签、独立 SEO meta                                     | SEO 图读取 `product_config.main_image`，再回落 `cover_images`   |
+| 论坛版块 / 帖子                        | 独立 SEO meta 或标题回退                                   | 论坛话题、标签、版块分类                                          | 帖子编辑页 noindex；论坛图像字段和普通文章不同                  |
+| 自定义动态页                           | 可提前设置 `$new_title`                                    | 可设置 `$new_keywords`、`$new_description`                        | 需要完整 SEO 时写清数据来源；只需要 title 时用 `echo_seo_title` |
+
+SEO 图像不等于顶部封面图。`zib_seo_image()` 先看 taxonomy 图、商品配置、论坛 `thumbnail_url` / 正文图、文章 `zib_post_thumbnail()`、作者头像，最后才回落到 `seo_list_img`。如果迁移对象存储或改特色媒体字段，必须同时抽查列表缩略图、详情顶部封面、分享图和 SEO 隐藏图。
+
+## 排查清单
+
+| 问题                                | 检查点                                                                |
+| ----------------------------------- | --------------------------------------------------------------------- |
+| 页面没有 title                      | `post_keywords_description_s` 是否关闭，页面是否需要 `echo_seo_title` |
+| title 重复输出                      | SEO 插件、主题 SEO、自定义模板是否同时输出                            |
+| description 不符合预期              | 独立 `description`、摘要、正文截取、分类 `term_seo.description`       |
+| taxonomy SEO 不生效                 | 是否写入 `term_seo`，是否通过 `_get_tax_meta()` 读取                  |
+| canonical 重复                      | 主题 `zib_seo()`、SEO 插件、自定义代码是否同时输出                    |
+| 用户中心被收录                      | 是否挂了 `wp_robots`，缓存是否保留旧 HTML                             |
+| feed、REST discovery 或 oEmbed 缺失 | `remove_more_wp_head` 是否开启                                        |
+| 登录页仍被索引                      | 页面 HTML 是否有 `noindex,nofollow`，缓存/CDN 是否缓存旧页面          |
+
+## 开发边界
+
+- SEO meta 和百度资源提交是两条链路，不要用百度提交结果决定 `<title>` 或 canonical。
+- 使用 SEO 插件时，要明确由谁输出 title、keywords、description 和 canonical，避免重复。
+- 特殊用户页、编辑页、支付跳转、中转页默认应该 noindex。
+- 动态页面只需要 title 时，用 `echo_seo_title`；需要完整 SEO 时，提供完整数据来源。
+- 读取主题 SEO 字段时用 `zib_get_post_meta()` 和分类 SEO 封装，不要绕过聚合存储。
+
+本页根据 `inc/functions/zib-head.php`、`inc/options/admin-options.php`、`inc/options/metabox-options.php`、`inc/functions/admin/admin-main.php`、`pages/newposts.php`、`pages/user-sign.php`、`inc/functions/user/page/user-center.php`、`inc/functions/message/page/msg-center.php`、`inc/functions/shop/page/cart.php`、`go.php`、`action/media.php` 蒸馏整理。

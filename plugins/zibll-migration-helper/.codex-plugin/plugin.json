@@ -1,0 +1,29 @@
+{
+  "name": "zibll-migration-helper",
+  "version": "0.1.0",
+  "description": "Specialized Codex guidance for WordPress/Zibll migration, paid download data, media paths and content cleanup.",
+  "author": {
+    "name": "子比主题开发文档"
+  },
+  "homepage": "https://dearlicy.github.io/zibll-docs/docs/ai/codex-plugin",
+  "keywords": ["zibll", "migration", "wordpress", "zibpay", "media"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "子比迁移整理助手",
+    "shortDescription": "专注旧站迁移、Zibpay、下载资源、媒体路径、域名替换和内容整理。",
+    "longDescription": "面向 WordPress / 子比主题迁移整理的专业 Codex 插件。它会引导 Codex 读取本站迁移、域名、对象存储、Zibpay 付费下载、媒体上传和内容结构文档，帮助用户梳理文章字段、下载资源、附件路径、时间戳、旧短代码和数据库更新边界。",
+    "developerName": "Zibll Docs",
+    "category": "Productivity",
+    "capabilities": ["Documentation", "MCP", "Migration"],
+    "websiteURL": "https://dearlicy.github.io/zibll-docs",
+    "defaultPrompt": [
+      "帮我整理旧站下载资源迁移方案",
+      "检查文章内容迁移会不会改时间戳",
+      "按文档规划域名和媒体路径替换"
+    ],
+    "brandColor": "#1EBC44",
+    "composerIcon": "./assets/favicon.svg",
+    "logo": "./assets/favicon.svg"
+  },
+  "mcpServers": "./.mcp.json"
+}

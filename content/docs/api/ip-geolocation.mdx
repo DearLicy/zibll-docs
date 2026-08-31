@@ -1,0 +1,329 @@
+---
+title: IP 归属地与位置展示
+description: 梳理子比主题 IP 获取、腾讯/高德/太平洋归属地查询、评论与用户位置展示、注册防刷和后台测试链路。
+---
+
+子比主题的 IP 归属地功能不是一个只负责前端展示的小组件。它同时服务评论地址、用户主页地址、注册防刷、后台评论列表和后台接口测试。二次开发时要先判断自己需要的是“记录 IP”、“查询归属地”还是“展示归属地徽章”，不要在页面渲染时反复请求第三方接口。
+
+## 源码入口
+
+| 文件                                  | 作用                                                                 |
+| ------------------------------------- | -------------------------------------------------------------------- |
+| `inc/functions/zib-tool.php`          | 获取访客 IP、请求腾讯位置服务、高德位置服务和太平洋公共接口          |
+| `inc/functions/functions.php`         | 按后台配置调度 IP 归属地 SDK，并生成前端徽章 HTML                    |
+| `inc/functions/zib-comments-list.php` | 评论保存时写入 `comment_addr`，评论列表展示地址                      |
+| `inc/functions/admin/admin-main.php`  | 后台评论列表展示评论 IP 归属地                                       |
+| `inc/functions/user/user.php`         | 用户登录时更新 `user_addr`，注册时记录 `register_ip`，用户页展示地址 |
+| `inc/functions/zib-theme.php`         | 注册防刷按 `register_ip` 统计频率                                    |
+| `inc/options/admin-options.php`       | IP 归属地接口配置和测试表单                                          |
+| `inc/options/action.php`              | `test_ip_addr_sdk` 后台 Ajax 测试接口                                |
+| `inc/dependent.php`                   | 声明 `user_addr`、`comment_addr` 等主题聚合 meta key                 |
+
+## IP 获取
+
+主题统一用 `zib_get_remote_ip_addr()` 获取访客 IP：
+
+```php
+function zib_get_remote_ip_addr()
+{
+    if (getenv('HTTP_CLIENT_IP') && strcasecmp(getenv('HTTP_CLIENT_IP'), 'unknown')) {
+        $ip = getenv('HTTP_CLIENT_IP');
+    } elseif (getenv('HTTP_X_FORWARDED_FOR') && strcasecmp(getenv('HTTP_X_FORWARDED_FOR'), 'unknown')) {
+        $ip = getenv('HTTP_X_FORWARDED_FOR');
+    } elseif (getenv('REMOTE_ADDR') && strcasecmp(getenv('REMOTE_ADDR'), 'unknown')) {
+        $ip = getenv('REMOTE_ADDR');
+    } elseif (isset($_SERVER['REMOTE_ADDR']) && $_SERVER['REMOTE_ADDR'] && strcasecmp($_SERVER['REMOTE_ADDR'], 'unknown')) {
+        $ip = $_SERVER['REMOTE_ADDR'];
+    }
+    return preg_match('/[\d\.]{7,15}/', $ip, $matches) ? $matches[0] : '';
+}
+```
+
+这个函数会从 `HTTP_CLIENT_IP`、`HTTP_X_FORWARDED_FOR`、`REMOTE_ADDR` 中取值，并用正则截取第一个 IPv4 片段。站点接入 CDN、反向代理或负载均衡后，如果上游没有正确传递真实 IP，主题拿到的可能是代理节点 IP。
+
+评论提交时，主题还把 WordPress 的评论 IP 获取改为这个函数：
+
+```php
+function zib_pre_comment_user_ip()
+{
+    return zib_get_remote_ip_addr();
+}
+add_filter('pre_comment_user_ip', 'zib_pre_comment_user_ip');
+```
+
+因此评论归属地、注册防刷和用户登录地址都会受同一个 IP 来源影响。排查地址不准时，先查服务器和 CDN 的真实 IP 头配置，再查 SDK。
+
+## 查询结果结构
+
+三种接口最后都会整理成同一类数组：
+
+```php
+$data = array(
+    'ip'       => $ip,
+    'nation'   => '',
+    'province' => '',
+    'city'     => '',
+    'district' => '',
+    'sdk'      => 'qq',
+);
+```
+
+`sdk` 用来标记来源，常见值是 `qq`、`amap`、`pconline`。扩展业务如果需要保存地址，建议原样保存这个结构，不要只保存一段文本。后续展示粒度、排查接口来源、迁移数据都会更方便。
+
+## 腾讯位置服务
+
+腾讯接口入口是 `zib_get_geographical_position_by_qq($ip, $key, $Secret_key, $debug = false)`。请求地址：
+
+```php
+$api_url = 'http://apis.map.qq.com/ws/location/v1/ip?ip=' . $ip . '&key=' . $key;
+```
+
+如果后台填写了 `Secret Key`，主题会追加签名：
+
+```php
+$api_url .= '&sig=' . md5('/ws/location/v1/ip?ip=' . $ip . '&key=' . $key . $Secret_key);
+```
+
+成功时读取 `result.ad_info`，失败时普通模式返回 `false`。后台测试会以 debug 模式调用，遇到腾讯返回“签名验证失败”时，主题会改成更适合后台提示的“签名校验Secret key填写错误”。
+
+后台配置字段是 `_pz('ip_addr_sdk_qq')`，内部包含：
+
+| 字段        | 说明                            |
+| ----------- | ------------------------------- |
+| `appkey`    | 腾讯位置服务 WebServiceAPI Key  |
+| `secretkey` | 启用签名校验后填写的 Secret Key |
+
+## 高德位置服务
+
+高德接口入口是 `zib_get_geographical_position_by_amap($ip, $key, $Secret_key, $debug = false)`。请求地址：
+
+```php
+$api_url = 'http://restapi.amap.com/v3/ip?ip=' . $ip . '&key=' . $key;
+```
+
+如果后台填写了数据签名秘钥，主题会追加：
+
+```php
+$api_url .= '&sig=' . md5('ip=' . $ip . '&key=' . $key . $Secret_key);
+```
+
+高德返回 `status != 1` 时视为失败。后台 debug 模式会把 `INVALID_USER_SIGNATURE` 转为“数据签名秘钥填写错误”。
+
+后台配置字段是 `_pz('ip_addr_sdk_amap')`，内部包含：
+
+| 字段        | 说明                 |
+| ----------- | -------------------- |
+| `appkey`    | 高德 Web 服务 Key    |
+| `secretkey` | 开启数字签名后的秘钥 |
+
+## 太平洋公共接口
+
+太平洋公共接口入口是 `zib_get_geographical_position_by_pconline($ip, $debug = false)`，不需要后台配置：
+
+```php
+$api_url = 'http://whois.pconline.com.cn/ipJson.jsp?json=true&ip=' . $ip;
+```
+
+主题用 `body('GB2312')` 读取响应，再用正则取 `pro`、`city`、`region`、`addr`。它适合做默认兜底，但后台说明里也明确提示这个公共接口的可靠性较低。对准确性有要求的站点，建议配置腾讯或高德，并优先使用轮流查询。
+
+## SDK 调度
+
+总调度函数是 `zib_get_geographical_position_by_ip($ip)`。它先排除空 IP、`0.0.0.`、`192.168.`、`127.0.`，再读取 `_pz('ip_addr_sdk')`：
+
+| 配置值    | 行为                                                                             |
+| --------- | -------------------------------------------------------------------------------- |
+| `qq`      | 有腾讯 `appkey` 时只查腾讯                                                       |
+| `amap`    | 有高德 `appkey` 时只查高德                                                       |
+| `polling` | 依次查腾讯、高德、太平洋，有 `province` 立即返回；都没有省份时再按 `nation` 兜底 |
+| 其它值    | 直接使用太平洋公共接口                                                           |
+
+轮流查询的核心逻辑是先追求 `province`，再退到 `nation`。因此展示层不能假设每次都有省市，海外 IP 或接口异常时可能只有国家，也可能返回 `false`。
+
+## 展示徽章
+
+展示函数是 `zib_get_ip_geographical_position_badge($data, $type = 'province', $class = '')`。它接收上面的结构化数组，返回一个 `<span>`：
+
+```php
+return '<span class="' . $class . '">' . $text . '</span>';
+```
+
+显示规则：
+
+| `$type`    | 结果                                            |
+| ---------- | ----------------------------------------------- |
+| `province` | 优先显示省份，省份为空时显示城市或国家          |
+| `city`     | 省市相同或省份为空时只显示城市，否则显示省 + 市 |
+
+输出前会去掉 `省`、`市`、`特别行政区`。如果最终没有可显示文本，函数直接返回空。扩展列表或卡片时可以复用它，但传入的数据应该来自已保存的 meta。
+
+## 评论地址
+
+评论地址由 `wp_insert_comment` 写入：
+
+```php
+function zib_insert_comment_action($id, $comment)
+{
+    add_comment_meta($id, 'comment_like', 0);
+
+    if (_pz('comment_city_s')) {
+        zib_update_comment_meta($id, 'comment_addr', zib_get_geographical_position_by_ip($comment->comment_author_IP));
+    }
+}
+add_action('wp_insert_comment', 'zib_insert_comment_action', 10, 2);
+```
+
+前台评论底部展示时读取：
+
+```php
+$addr_data = zib_get_comment_meta($comment->comment_ID, 'comment_addr', true);
+$addr_html = zib_get_ip_geographical_position_badge($addr_data, _pz('comment_city_type'), 'badg badg-sm');
+```
+
+后台评论列表也会读取 `comment_addr`，并用 `city` 粒度展示。这里的设计要点是：查询发生在评论创建时，列表渲染只读保存结果。不要在评论循环里实时请求 IP 接口，否则评论页会被网络耗时拖慢，第三方接口也容易触发限频。
+
+## 用户地址
+
+用户登录时，主题会按开关更新当前位置：
+
+```php
+function zib_updata_user_addr_meta($user_login, $user)
+{
+    if (!_pz('user_city_s', true)) {
+        return;
+    }
+    $user_addr = zib_get_geographical_position_by_ip(zib_get_remote_ip_addr());
+    if (!empty($user_addr['province']) || !empty($user_addr['nation'])) {
+        zib_update_user_meta($user->ID, 'user_addr', $user_addr);
+    }
+}
+add_action('wp_login', 'zib_updata_user_addr_meta', 10, 2);
+```
+
+用户注册时只记录原始 IP：
+
+```php
+function zib_add_user_ip_addr_meta($user_id)
+{
+    $register_ip = zib_get_remote_ip_addr();
+    if ($register_ip) {
+        update_user_meta($user_id, 'register_ip', $register_ip);
+    }
+}
+add_action('user_register', 'zib_add_user_ip_addr_meta');
+```
+
+用户主页展示时读取 `user_addr`，并把徽章追加到作者头部描述：
+
+```php
+$addr_data = zib_get_user_meta($user_id, 'user_addr', true);
+return $desc . zib_get_ip_geographical_position_badge($addr_data, _pz('user_city_type'), 'badg');
+```
+
+`user_addr` 和 `comment_addr` 都在主题依赖文件的 meta key 列表里声明。读取时使用 `zib_get_user_meta()`、`zib_get_comment_meta()`，写入时使用 `zib_update_user_meta()`、`zib_update_comment_meta()`，不要绕过主题的聚合 meta 封装。
+
+## 注册防刷
+
+注册防刷使用 `register_ip`，不是 `user_addr`：
+
+```php
+$ip_addr = zib_get_remote_ip_addr();
+if (!$ip_addr || preg_match('/^(?:127|172\.16|192\.168)\./', $ip_addr)) {
+    return $errors;
+}
+```
+
+主题随后查询 `usermeta` 中相同 `register_ip` 的用户数量，并按 `_pz('brush_limit_register')` 的 `minutes_10`、`day_1` 判断是否拦截注册。它只依赖原始 IP，不依赖第三方归属地接口，所以即使腾讯、高德或太平洋接口不可用，注册防刷仍然可以工作。
+
+如果站点在 CDN 后面，真实 IP 配置错误会让大量用户共享同一个代理 IP，导致误拦截。遇到“很多用户提示操作过于频繁”时，先检查 `register_ip` 是否都变成了同一个地址。
+
+## 后台设置和测试
+
+后台的“IP归属地”设置页提供：
+
+| 配置               | 说明                                                 |
+| ------------------ | ---------------------------------------------------- |
+| `ip_addr_sdk`      | 轮流查询、腾讯位置服务、高德位置服务、太平洋公共接口 |
+| `ip_addr_sdk_qq`   | 腾讯 App Key 和 Secret Key                           |
+| `ip_addr_sdk_amap` | 高德 Key 和数据签名秘钥                              |
+| `test_ip_addr_sdk` | 保存配置后测试某个 IP 或当前 IP                      |
+
+测试 Ajax 是 `wp_ajax_test_ip_addr_sdk`，只允许超级管理员调用：
+
+```php
+if (!is_super_admin()) {
+    echo(json_encode(array('error' => 1, 'ys' => 'danger', 'msg' => __('操作权限不足', 'zib_language'))));
+    exit();
+}
+```
+
+它会拒绝空 IP、`0.0.0.`、`192.168.`、`127.0.`，并按 `sdk` 参数测试腾讯、高德或太平洋。扩展后台诊断功能时，可以参考这个返回格式：`error` 表示成败，`msg` 放可读结果，必要时用 `JSON_UNESCAPED_UNICODE` 输出接口结果。
+
+## 扩展示例：给自定义行为记录位置
+
+如果自定义业务需要保存一次操作位置，可以在行为发生时查询并保存，不要在展示时查询：
+
+```php
+function zib_docs_save_action_addr($user_id, $action_id)
+{
+    if (!$user_id || !$action_id) {
+        return;
+    }
+
+    $ip        = zib_get_remote_ip_addr();
+    $addr_data = zib_get_geographical_position_by_ip($ip);
+
+    if (empty($addr_data['province']) && empty($addr_data['nation'])) {
+        return;
+    }
+
+    zib_update_user_meta($user_id, 'docs_last_action_addr', array(
+        'action_id' => $action_id,
+        'ip'        => $ip,
+        'addr'      => $addr_data,
+        'time'      => current_time('mysql'),
+    ));
+}
+add_action('zib_docs_user_action_done', 'zib_docs_save_action_addr', 10, 2);
+```
+
+展示时再读取已保存的数据：
+
+```php
+function zib_docs_get_action_addr_badge($user_id)
+{
+    $data = zib_get_user_meta($user_id, 'docs_last_action_addr', true);
+
+    if (empty($data['addr'])) {
+        return '';
+    }
+
+    return zib_get_ip_geographical_position_badge($data['addr'], 'city', 'badg badg-sm');
+}
+```
+
+如果保存的是评论相关数据，换成 `zib_update_comment_meta()` 和 `zib_get_comment_meta()`；如果保存的是文章相关数据，优先用 `zib_update_post_meta()` 和 `zib_get_post_meta()`。核心原则是让查询发生在写入节点，让展示只读缓存结果。
+
+## 排查清单
+
+| 现象                 | 优先检查                                                         |
+| -------------------- | ---------------------------------------------------------------- |
+| 归属地显示为空       | `comment_city_s`、`user_city_s` 是否开启，meta 是否已写入        |
+| 评论地址不更新       | 评论是否是在开启地址显示前创建，`comment_addr` 是否存在          |
+| 用户地址一直是旧地址 | 用户是否重新登录，`user_city_s` 是否开启                         |
+| 所有用户地址相同     | CDN 或反向代理是否传错真实 IP                                    |
+| 腾讯测试失败         | `appkey`、`secretkey`、WebServiceAPI、签名校验设置               |
+| 高德测试失败         | `appkey`、数字签名秘钥、服务平台是否为 Web 服务                  |
+| 太平洋接口不稳定     | 公共接口网络或响应格式变化，建议配置腾讯或高德                   |
+| 注册频繁误拦截       | `register_ip` 是否集中为同一个代理 IP                            |
+| 页面加载变慢         | 是否在循环渲染时实时调用 `zib_get_geographical_position_by_ip()` |
+
+## 开发边界
+
+- IP 归属地只能用于展示和低风险风控提示，不要当作权限判断依据。
+- 第三方接口可能失败，调用处要允许 `false`，不要让失败中断评论、登录或注册流程。
+- 评论、用户和自定义业务位置都应该在写入节点保存，展示节点只读 meta。
+- 代理、CDN、局域网部署会影响 IP 来源，归属地不准时先排查 `zib_get_remote_ip_addr()` 的结果。
+- `register_ip` 是注册防刷数据，`user_addr` 是用户展示数据，两者不要混用。
+- 后台测试接口只给管理员使用，不要把第三方 key、签名、原始错误暴露给普通用户。
+
+本页根据 `inc/functions/zib-tool.php`、`inc/functions/functions.php`、`inc/functions/zib-comments-list.php`、`inc/functions/admin/admin-main.php`、`inc/functions/user/user.php`、`inc/functions/zib-theme.php`、`inc/options/admin-options.php`、`inc/options/action.php`、`inc/dependent.php` 蒸馏整理。

@@ -1,0 +1,6 @@
+{
+  "title": "MCP 服务器",
+  "description": "通过 MCP 资源和工具读取子比主题开发文档",
+  "icon": "ServerCog",
+  "pages": ["index"]
+}

@@ -1,0 +1,110 @@
+---
+title: REST 与权限
+description: 说明 Ability 的 REST 暴露、HTTP 方法、readonly/destructive 标注和权限边界。
+---
+
+## REST 能做什么
+
+只有 `meta.show_in_rest=true` 的 Ability 才会出现在 REST 列表和执行接口里。
+
+| 操作         | 请求                                                                    |
+| ------------ | ----------------------------------------------------------------------- |
+| 列出能力     | `GET /wp-json/wp-abilities/v1/abilities`                                |
+| 按分类筛选   | `GET /wp-json/wp-abilities/v1/abilities?category=zibll-ai-ext`          |
+| 查看单个能力 | `GET /wp-json/wp-abilities/v1/abilities/zibll-ai-ext/read-post-context` |
+| 执行能力     | `/wp-json/wp-abilities/v1/abilities/zibll-ai-ext/read-post-context/run` |
+
+REST 适合调试、后台异步按钮、外部系统调用。不是所有 Ability 都应该暴露 REST。
+
+## HTTP 方法规则
+
+Ability 的注解会影响 REST 执行方法：
+
+| Ability 类型    | 推荐方法           | 说明                               |
+| --------------- | ------------------ | ---------------------------------- |
+| `readonly=true` | `GET`              | 只读取数据，不改数据库             |
+| 非只读能力      | `POST`             | 生成、保存、更新等操作             |
+| 删除能力        | `DELETE` 或 `POST` | 必须谨慎，通常不建议让 AI 自动执行 |
+
+只读 GET 示例：
+
+```bash
+curl \
+  "https://example.com/wp-json/wp-abilities/v1/abilities/zibll-ai-ext/read-post-context/run?input%5Bpost_id%5D=123"
+```
+
+保存类 POST 示例：
+
+```bash
+curl -X POST \
+  "https://example.com/wp-json/wp-abilities/v1/abilities/zibll-ai-ext/save-seo-description/run" \
+  -H "Content-Type: application/json" \
+  -d '{"input":{"post_id":123,"description":"这是一段 SEO 描述"}}'
+```
+
+如果只读能力用 POST，或更新能力用 GET，可能得到 405。
+
+## 权限回调
+
+权限回调永远不要写成“模型说可以就可以”。它必须用 WordPress 自己的能力系统判断。
+
+常见写法：
+
+```php
+'permission_callback' => function ( array $input ) {
+    return current_user_can( 'edit_post', absint( $input['post_id'] ) );
+},
+```
+
+按场景选择 capability：
+
+| 场景                   | 推荐能力              |
+| ---------------------- | --------------------- |
+| 读取当前用户可编辑文章 | `edit_post`           |
+| 上传或处理附件         | `upload_files`        |
+| 修改站点设置           | `manage_options`      |
+| 编辑分类或标签         | `manage_categories`   |
+| 读取公开站点信息       | `read` 或公开权限回调 |
+
+如果能力只返回完全公开的信息，可以放宽权限；只要涉及文章草稿、用户信息、订单、积分、会员、下载权限，就必须严格判断。
+
+## nonce 和人工确认
+
+Ability 自己负责 capability，但后台按钮还应该有 nonce。
+
+推荐流程：
+
+1. 用户在后台点“生成建议”。
+2. Ajax 校验 nonce。
+3. 执行只读或生成类 Ability。
+4. 页面展示 AI 结果。
+5. 用户点击“保存”。
+6. Ajax 再次校验 nonce。
+7. 执行保存类 Ability。
+
+这样即使生成结果有偏差，也不会直接覆盖数据库。
+
+## show_in_rest 怎么选
+
+| 能力                 | 是否建议打开 REST            |
+| -------------------- | ---------------------------- |
+| 读取文章上下文       | 可以打开，方便调试和后台调用 |
+| 生成摘要或 SEO 描述  | 可以打开，但要有权限         |
+| 保存 SEO 描述        | 默认关闭，后台 Ajax 调用即可 |
+| 删除内容             | 不建议打开                   |
+| 修改余额、积分、订单 | 不建议打开                   |
+| 发送通知             | 默认关闭，必须人工确认       |
+
+REST 不是安全边界。真正的安全边界是权限、nonce、输入校验、输出校验和人工确认。
+
+## 设计注解
+
+常见注解：
+
+| 注解          | 含义                                 |
+| ------------- | ------------------------------------ |
+| `readonly`    | 只读，不写数据库、不发通知、不改状态 |
+| `destructive` | 可能破坏数据，例如删除、覆盖、扣费   |
+| `idempotent`  | 同样输入重复执行，结果是否稳定       |
+
+生成类 Ability 经常是 `readonly=true` 但 `idempotent=false`，因为它不改数据库，但同样输入多次生成的文本可能不完全一样。

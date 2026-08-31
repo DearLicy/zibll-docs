@@ -1,0 +1,39 @@
+name: Deploy feedback GitHub App Worker
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: feedback-worker
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy feedback Worker
+    runs-on: ubuntu-latest
+    environment: feedback-worker
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check Worker syntax
+        run: node --check workers/feedback-bot.mjs
+
+      - name: Deploy with repository secrets
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: workers
+          command: deploy
+          secrets: |
+            GITHUB_APP_ID
+            GITHUB_APP_PRIVATE_KEY
+            GITHUB_APP_INSTALLATION_ID
+        env:
+          GITHUB_APP_ID: ${{ secrets.GITHUB_APP_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.GITHUB_APP_PRIVATE_KEY }}
+          GITHUB_APP_INSTALLATION_ID: ${{ secrets.GITHUB_APP_INSTALLATION_ID }}

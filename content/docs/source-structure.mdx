@@ -1,0 +1,314 @@
+---
+title: 源码结构
+description: 子比主题源码目录、入口文件、功能模块与配置菜单目录说明。
+---
+
+## 结构总览
+
+子比主题源码位于 WordPress 的 `wp-content/themes/zibll` 主题目录。主题采用 WordPress 标准模板文件作为前台入口，实际功能通过 `functions.php` 引入 `inc/inc.php`，再由 `zib_require()` 分批加载主题依赖、配置菜单、组件、用户系统、支付系统、社交登录、Ajax 动作与 WordPress REST 搜索扩展。
+
+核心加载链：
+
+```txt
+functions.php
+└─ inc/inc.php
+   ├─ inc/dependent.php
+   ├─ inc/code/*
+   ├─ vendor/autoload.php
+   ├─ inc/class/*
+   ├─ inc/options/*
+   ├─ inc/codestar-framework/*
+   ├─ inc/widgets/*
+   ├─ inc/functions/*
+   ├─ oauth/*
+   ├─ zibpay/*
+   ├─ action/*
+   ├─ inc/functions/rest-api/*
+   ├─ inc/csf-framework/classes/zib-csf.class.php
+   └─ do_action('zib_require_end')
+```
+
+当前本地源码快照还保留了根目录 `func.php` 的可选加载：`functions.php` 会先加载 `inc/inc.php`，再判断当前主题目录是否存在 `func.php`。这对站点临时自定义很方便，但长期可维护的能力仍应沉淀到子主题模块或独立插件里。
+
+## 注释版目录树
+
+```txt
+zibll/                              # 子比主题根目录，WordPress 主题安装目录
+├─ functions.php                    # 主题启动入口，只负责加载 inc/inc.php 与可选 func.php
+├─ inc/                             # 主题功能目录，承载初始化、配置菜单、函数、类、组件和后台能力
+│  ├─ inc.php                       # 主题初始化入口，定义常量、PHP 版本检查、封装 zib_require()
+│  ├─ dependent.php                 # 主题运行依赖、兼容检查或基础依赖函数
+│  ├─ options/                      # 配置菜单目录，定义主题设置、文章/用户 Meta、配置迁移和后台动作
+│  ├─ functions/                    # 前后台业务函数目录，主题页面渲染、用户、论坛、商城、消息、AI 等功能
+│  ├─ class/                        # 通用类目录，数据库、文件、短信、二维码、搜索、物流等类封装
+│  ├─ widgets/                      # 小工具目录，侧栏/首页/文章/商品/用户等 Widget 定义
+│  ├─ code/                         # 授权、更新、工具与主题底层代码目录
+│  ├─ codestar-framework/           # Codestar Framework 原始框架目录，提供后台配置框架能力
+│  └─ csf-framework/                # 主题自定义 CSF 覆盖目录，扩展字段、样式和后台交互
+├─ action/                          # Ajax 与前端请求动作目录，处理登录注册、评论、媒体、验证码等请求
+├─ oauth/                           # 第三方登录目录，QQ、微信、微博、GitHub、Google、Apple 等登录回调与 SDK
+├─ zibpay/                          # 支付与变现系统目录，付费阅读、订单、余额、VIP、提现、优惠券、商品支付
+├─ template/                        # 模板片段目录，文章摘要、评论、404、专题/文档分类等局部模板
+├─ pages/                           # WordPress 页面模板目录，归档、下载页、论坛页、链接页、登录认证页等
+├─ css/                             # 主题前后台样式资源目录
+├─ js/                              # 主题前后台脚本资源目录，包含第三方脚本库和代码高亮相关资源
+├─ img/                             # 图片资源目录，默认图、验证码图、表情、徽章等静态图片
+├─ fonts/                           # 字体资源目录
+├─ languages/                       # 语言包目录，主题翻译文件
+├─ vendor/                          # Composer 依赖目录，Guzzle、腾讯云、支付 SDK 相关依赖
+├─ yiyan/                           # 一言/短句相关资源或功能目录
+├─ 404.php                          # WordPress 404 模板
+├─ archive.php                      # 归档页模板
+├─ author.php                       # 作者页模板
+├─ category.php                     # 分类页模板
+├─ custom.php                       # 自定义页面或主题自定义逻辑入口
+├─ footer.php                       # 全站底部模板
+├─ go.php                           # 外链跳转/重定向页面
+├─ header.php                       # 全站头部模板
+├─ image.php                        # 附件图片页模板
+├─ index.php                        # WordPress 兜底模板
+├─ page.php                         # 独立页面模板
+├─ search.php                       # 搜索结果页模板
+├─ sidebar.php                      # 侧栏模板
+├─ single.php                       # 文章详情页模板
+├─ tag.php                          # 标签页模板
+├─ style.css                        # WordPress 主题声明文件和主样式入口
+└─ update_log.md                    # 主题更新日志
+```
+
+## `inc` 主题功能目录
+
+`inc` 是主题功能的核心目录。大部分二次开发时需要理解的配置、函数、类和后台能力都在这里。
+
+```txt
+inc/
+├─ inc.php                          # 初始化入口，定义 ZIB_ROOT_PATH、THEME_VERSION、zib_require()
+├─ dependent.php                    # 基础依赖与兼容能力
+├─ options/                         # 主题后台配置菜单和 Meta 配置
+├─ functions/                       # 主题业务函数与页面输出
+├─ class/                           # 可复用类封装
+├─ widgets/                         # 小工具注册与渲染
+├─ code/                            # 底层工具、授权、更新等代码
+├─ codestar-framework/              # CSF 原始框架
+└─ csf-framework/                   # 子比主题自定义 CSF 扩展
+```
+
+### `inc/options` 配置菜单目录
+
+这个目录负责主题后台配置、文章 Meta、用户资料字段、配置升级迁移等，是理解后台设置项的首要入口。
+
+```txt
+inc/options/
+├─ options.php                      # 配置系统入口，加载 options-module 与 upgrade，后台再加载菜单配置
+├─ admin-options.php                # 主题后台主设置页，通常对应“子比主题设置”
+├─ metabox-options.php              # 文章、页面、分类等对象的 Meta Box 配置
+├─ profile-options.php              # 用户资料页扩展字段配置
+├─ options-module.php               # 可复用配置模块，供多个菜单或字段组复用
+├─ action.php                       # 配置保存、后台 Ajax 或设置页相关动作
+├─ upgrade.php                      # 配置升级、迁移、兼容旧版本数据
+├─ zib-code.php                     # 主题授权、校验或激活相关代码
+└─ zib-update.php                   # 主题更新检查、版本升级相关代码
+```
+
+常见查找方式：
+
+- 想知道后台某个主题设置在哪里定义，优先看 `admin-options.php`。
+- 想知道文章编辑页的扩展字段在哪里定义，优先看 `metabox-options.php`。
+- 想知道用户资料字段在哪里定义，优先看 `profile-options.php`。
+- 想复用某个字段组或模块，优先看 `options-module.php`。
+
+### `inc/functions` 主题业务函数目录
+
+这个目录负责主题主要业务逻辑和前台输出。`inc/functions/functions.php` 会继续加载大量 `zib-*` 文件和子模块。
+
+```txt
+inc/functions/
+├─ functions.php                    # 业务函数加载入口
+├─ zib-tool.php                     # 通用工具函数
+├─ zib-js-i18n.php                  # 前后台语言与 JS 文案相关能力
+├─ zib-theme.php                    # 主题全局能力与主题级函数
+├─ zib-head.php                     # head 区域、SEO、资源输出相关函数
+├─ zib-header.php                   # 顶部导航、头部模块相关函数
+├─ zib-footer.php                   # 底部区域相关函数
+├─ zib-content.php                  # 内容区域通用输出
+├─ zib-index.php                    # 首页/列表页输出逻辑
+├─ zib-post.php                     # 文章对象与文章卡片相关能力
+├─ zib-posts-list.php               # 文章列表组件
+├─ zib-single.php                   # 文章详情页输出逻辑
+├─ zib-page.php                     # 独立页面相关函数
+├─ zib-category.php                 # 分类页相关函数
+├─ zib-author.php                   # 作者页相关函数
+├─ zib-search.php                   # 搜索相关函数
+├─ zib-comments-list.php            # 评论列表渲染与评论相关输出
+├─ zib-user.php                     # 用户展示、用户中心入口等主题级用户函数
+├─ zib-share.php                    # 分享功能
+├─ zib-share-wechat.php             # 微信分享相关能力
+├─ zib-svg-icon.php                 # SVG 图标输出
+├─ zib-baidu.php                    # 百度推送、收录或相关 SEO 能力
+├─ zib-email.php                    # 邮件通知与邮件模板
+├─ zib-frontend-set.php             # 前台个性化设置或交互配置
+├─ admin/                           # 后台管理增强功能
+├─ user/                            # 登录注册、用户中心、认证、等级、签到、封禁、邀请、徽章
+├─ message/                         # 站内消息、私信、通知和微信模板消息
+├─ bbs/                             # 论坛模块，板块、帖子、评论、版主、论坛页面和小工具
+├─ shop/                            # 商城模块，商品、购物车、订单、物流、售后、分类和小工具
+├─ ai/                              # AI 能力模块，SEO 标题/关键词/描述生成与相关 Ajax
+└─ rest-api/                        # WordPress REST 搜索扩展
+```
+
+### `inc/class` 类封装目录
+
+这里放可复用的类，不直接对应某个页面模板，而是给业务模块调用。
+
+```txt
+inc/class/
+├─ class.php                        # 类加载入口
+├─ db-class.php                     # 数据库封装
+├─ file-class.php                   # 文件处理、下载或上传相关封装
+├─ qrcode.class.php                 # 二维码生成
+├─ sms-class.php                    # 短信服务封装
+├─ express-class.php                # 物流/快递查询封装
+├─ meilisearch-class.php            # MeiliSearch 搜索服务封装
+├─ api-audit-class.php              # API 审核或接口校验相关封装
+├─ ms-class.php                     # 消息/服务类封装
+└─ tx-sdk-send.php                  # 腾讯云 SDK 发送相关封装
+```
+
+### `inc/widgets` 小工具目录
+
+这里负责 WordPress 小工具注册和输出，常用于侧栏、首页模块、文章列表、商品和用户卡片。
+
+```txt
+inc/widgets/
+├─ widget-class.php                 # 小工具基础类或加载入口
+├─ widget-index.php                 # 小工具注册入口
+├─ widget-posts.php                 # 文章类小工具
+├─ widget-slider.php                # 幻灯片/轮播小工具
+├─ widget-user.php                  # 用户相关小工具
+├─ widget-produck.php               # 商品相关小工具
+├─ widget-more.php                  # 更多扩展小工具集合
+└─ widget-import.php                # 小工具导入或预设相关能力
+```
+
+## 前台模板目录
+
+主题根目录的 `*.php` 文件是 WordPress 模板层入口，`template` 和 `pages` 则提供局部模板与可选择的页面模板。
+
+```txt
+template/
+├─ comments.php                     # 评论模板片段
+├─ excerpt.php                      # 文章摘要/列表项模板片段
+├─ content-404.php                  # 404 内容片段
+├─ category-dosc.php                # 文档类分类页片段
+├─ category-topics.php              # 专题类分类页片段
+└─ single-dosc.php                  # 文档类文章详情片段
+
+pages/
+├─ archives.php                     # 归档页面模板
+├─ documentnav.php                  # 文档导航页面模板
+├─ download.php                     # 下载页面模板
+├─ forums.php                       # 论坛页面模板
+├─ links.php                        # 友情链接页面模板
+├─ newposts.php                     # 最新文章页面模板
+├─ postsnavs.php                    # 文章导航页面模板
+├─ user-auth.php                    # 用户认证页面模板
+└─ user-sign.php                    # 登录注册页面模板
+```
+
+## `action` 请求动作目录
+
+`action` 目录集中处理前端 Ajax、评论、媒体、用户、验证码、投稿/列表等请求。`inc/inc.php` 会加载 `action/function.php`，再由其中逻辑继续组织各动作文件。
+
+```txt
+action/
+├─ function.php                     # action 模块入口
+├─ ajax.php                         # 通用 Ajax 处理
+├─ action.php                       # 通用动作注册与分发
+├─ user.php                         # 用户相关请求
+├─ sign_register.php                # 登录注册请求
+├─ comment.php                      # 评论相关请求
+├─ captcha.php                      # 验证码请求
+├─ media.php                        # 媒体上传/处理请求
+├─ author.php                       # 作者相关请求
+├─ documentnav.php                  # 文档导航请求
+├─ new_posts.php                    # 最新文章请求
+└─ post_navs.php                    # 文章导航请求
+```
+
+## `oauth` 第三方登录目录
+
+`oauth` 负责社交账号登录、绑定和回调处理。`oauth/oauth.php` 提供通用 OAuth 用户绑定、登录、资料同步能力，具体平台目录处理对应平台回调。
+
+```txt
+oauth/
+├─ oauth.php                        # 社交登录通用入口，处理配置、绑定、登录、用户资料同步
+├─ qq/                              # QQ 登录回调
+├─ weixin/                          # 微信登录回调
+├─ weixingzh/                       # 微信公众号相关登录/绑定
+├─ weibo/                           # 微博登录回调
+├─ github/                          # GitHub 登录回调
+├─ gitee/                           # Gitee 登录回调
+├─ google/                          # Google 登录回调
+├─ apple/                           # Apple 登录回调
+├─ microsoft/                       # Microsoft 登录回调
+├─ facebook/                        # Facebook 登录回调
+├─ twitter/                         # Twitter 登录回调
+├─ *agent/                          # 各平台代理登录目录
+└─ sdk/                             # 第三方 OAuth SDK
+```
+
+## `zibpay` 支付与变现目录
+
+`zibpay` 是主题内置支付和变现系统，负责付费阅读、订单、VIP、余额、提现、返佣、优惠券、商品支付、支付回调等能力。
+
+```txt
+zibpay/
+├─ functions.php                    # 支付模块入口，加载 class、functions、后台配置并注册短代码/路由
+├─ download.php                     # 付费附件下载入口模板
+├─ class/                           # 订单、卡密、用户卡、支付 Ajax 等类
+├─ functions/                       # 订单、余额、VIP、提现、返佣、积分、优惠券、付费文章等函数
+├─ functions/admin/                 # 支付后台页面、后台配置、后台 Ajax
+├─ page/                            # 支付中心、订单、收入、提现、优惠券、商品等页面
+├─ page/template/                   # 支付后台/前台页面片段模板
+├─ assets/                          # 支付模块 CSS、JS、支付 Logo 和后台图表资源
+├─ sdk/                             # 支付平台 SDK，支付宝、微信、PayPal、Stripe、PayJS 等
+└─ shop/                            # 支付回调与同步通知目录，各支付平台 notify/return 入口
+```
+
+## 静态资源与依赖目录
+
+```txt
+css/                                # 主题样式文件
+js/                                 # 主题脚本文件，包含 js/libs 与代码高亮资源
+img/                                # 图片资源，含 captcha、medal、smilies 等子目录
+fonts/                              # 字体资源
+languages/                          # 翻译语言包
+vendor/                             # Composer 依赖，包含 Guzzle、腾讯云、支付相关第三方库
+yiyan/                              # 一言/短句资源或相关功能
+```
+
+## 二次开发定位建议
+
+如果要找某类代码，可以按这个顺序定位：
+
+| 需求                            | 优先查看                                                             |
+| ------------------------------- | -------------------------------------------------------------------- |
+| 主题初始化、常量、加载顺序      | `functions.php`、`inc/inc.php`                                       |
+| 主题后台设置项                  | `inc/options/admin-options.php`                                      |
+| 文章/页面/分类 Meta 字段        | `inc/options/metabox-options.php`                                    |
+| 用户资料字段                    | `inc/options/profile-options.php`                                    |
+| 前台文章卡片、列表、详情页输出  | `inc/functions/zib-post.php`、`zib-posts-list.php`、`zib-single.php` |
+| 用户中心、登录注册、等级、签到  | `inc/functions/user/`、`inc/functions/zib-user.php`                  |
+| 论坛功能                        | `inc/functions/bbs/`                                                 |
+| 商城功能                        | `inc/functions/shop/`                                                |
+| 站内消息和私信                  | `inc/functions/message/`                                             |
+| WordPress REST 搜索扩展         | `inc/functions/rest-api/function.php`                                |
+| 前端 Ajax 请求                  | `action/`                                                            |
+| 社交登录                        | `oauth/`                                                             |
+| 付费阅读、订单、VIP、余额、提现 | `zibpay/`                                                            |
+| 小工具                          | `inc/widgets/`                                                       |
+| 页面模板                        | 根目录模板、`template/`、`pages/`                                    |
+
+## 修改边界
+
+二次开发时优先通过 Hook、子主题模板覆盖、插件扩展和主题提供的封装函数完成需求。不要直接修改 `vendor/`、`inc/codestar-framework/` 这类第三方或框架目录；不要把业务逻辑堆进根目录模板文件。需要改后台配置时，先确认对应配置项来自 `inc/options`，再决定是新增字段、读取现有字段，还是在插件中通过 Hook 扩展。

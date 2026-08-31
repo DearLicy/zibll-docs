@@ -1,0 +1,444 @@
+---
+title: 主题内置 AI 扩展
+description: 解读子比主题 inc/functions/ai、AI SEO、WordPress Abilities API、WP AI Client、后台资源加载和 Ajax 生成流程。
+---
+
+## 模块定位
+
+子比主题的 AI 模块位于 `inc/functions/ai`。这篇属于“主题扩展”文档，只记录子比主题源码里的内置后台能力。底层 WordPress AI Client、Abilities API、Provider 和 AI 插件的通用二开方式，已经独立放到 [WordPress AI 开发](/docs/wp-ai)。当前主题 AI 模块基于 WordPress Abilities API 和 WP AI Client，目前主要用于 SEO 字段生成。
+
+| 文件                                                           | 作用                                                     |
+| -------------------------------------------------------------- | -------------------------------------------------------- |
+| `inc/functions/ai/ai.php`                                      | AI 模块入口，判断环境、加载子模块、输出 AI SEO 按钮      |
+| `inc/functions/ai/abilities/ability.php`                       | 注册 `zib-ai` ability 分类和能力注册辅助函数             |
+| `inc/functions/ai/abilities/class-ability.php`                 | `Zib_AI_Ability` 基类，封装 schema、执行、输出和 AI 调用 |
+| `inc/functions/ai/abilities/class-ability-seo.php`             | SEO 能力基类，构建文章或分类上下文                       |
+| `inc/functions/ai/abilities/class-ability-seo-title.php`       | SEO 标题生成                                             |
+| `inc/functions/ai/abilities/class-ability-seo-keywords.php`    | SEO 关键词生成                                           |
+| `inc/functions/ai/abilities/class-ability-seo-description.php` | SEO 描述生成                                             |
+| `inc/functions/ai/inc/seo.php`                                 | 注册 SEO abilities，后台加载资源，执行单个字段生成       |
+| `inc/functions/ai/inc/ajax.php`                                | `ai_seo_generate` Ajax 动作                              |
+| `inc/functions/ai/inc/function.php`                            | AI 通用脚本、样式和本地化数据                            |
+| `inc/functions/ai/assets/ai.js`                                | 后台按钮点击、Ajax 请求、错误提示和字段回填              |
+
+## 启动条件
+
+AI 模块首先检查当前 WordPress 环境是否具备 Abilities API：
+
+```php
+function zib_ai_is_available()
+{
+    return function_exists('wp_get_ability');
+}
+```
+
+只有环境可用时，主题才会加载：
+
+```php
+$files = array(
+    'abilities/ability',
+    'inc/function',
+    'inc/ajax',
+    'inc/seo',
+);
+
+zib_require($files, false, 'inc/functions/ai/');
+```
+
+所以扩展主题内置 AI 能力时要先判断 `zib_ai_is_available()`，不要假设所有站点都已经升级到支持 Abilities API 的 WordPress 版本。
+
+## AI SEO 开关
+
+AI SEO 需要同时满足两个主题配置：
+
+```php
+function zib_ai_seo_is_enabled()
+{
+    return _pz('ai_seo_s', true) && _pz('post_keywords_description_s', true);
+}
+```
+
+`post_keywords_description_s` 是 SEO 关键词与描述能力的基础开关；`ai_seo_s` 是 AI 生成开关。任意一个关闭，后台资源、AI 按钮和 Ajax 生成都不应该继续执行。
+
+## Ability 分类与注册
+
+主题先注册一个 `zib-ai` 分类：
+
+```php
+function zib_ai_seo_register_ability_category()
+{
+    if (!function_exists('wp_register_ability_category')) {
+        return;
+    }
+
+    wp_register_ability_category('zib-ai', array(
+        'label'       => 'zibll AI',
+        'description' => __('子比主题AI扩展模块', 'zib_language'),
+    ));
+}
+add_action('wp_abilities_api_categories_init', 'zib_ai_seo_register_ability_category');
+```
+
+SEO 能力在 `wp_abilities_api_init` 中注册：
+
+```php
+function zib_ai_seo_register_abilities()
+{
+    if (!zib_ai_seo_is_enabled()) {
+        return;
+    }
+
+    $abilities = array(
+        'seo-title'       => 'Zib_AI_SEO_Title_Ability',
+        'seo-keywords'    => 'Zib_AI_SEO_Keywords_Ability',
+        'seo-description' => 'Zib_AI_SEO_Description_Ability',
+    );
+
+    foreach ($abilities as $name => $ability_class) {
+        zib_ai_register_ability($name, $ability_class);
+    }
+}
+add_action('wp_abilities_api_init', 'zib_ai_seo_register_abilities');
+```
+
+注册后的完整名称是：
+
+| Ability           | 完整名称                 | 输出字段  |
+| ----------------- | ------------------------ | --------- |
+| `seo-title`       | `zib-ai/seo-title`       | `content` |
+| `seo-keywords`    | `zib-ai/seo-keywords`    | `content` |
+| `seo-description` | `zib-ai/seo-description` | `content` |
+
+调用前用 `zib_ai_has_ability()` 检测能力是否存在，避免对未注册 ability 调用 `wp_get_ability()` 触发 WordPress 调试警告。
+
+## Ability 基类
+
+`Zib_AI_Ability` 继承 `WP_Ability`，把通用流程封装成固定结构：
+
+1. 定义 `input_schema()`。
+2. 定义 `output_schema()`。
+3. 执行 `execute_callback()`。
+4. 构建 `prompt_text()`。
+5. 获取 `system_instruction()`。
+6. 调用 `wp_ai_client_prompt()->using_system_instruction()->generate_text()`。
+7. 用 `output_filter()` 清洗结果。
+8. 返回 `array('content' => $text)`。
+
+基类默认权限回调返回 `true`：
+
+```php
+protected function permission_callback($input)
+{
+    return true;
+}
+```
+
+真正的业务权限应在子类 `validate_input()` 或自定义 `permission_callback()` 里补上。SEO 基类已经对文章和分类做了编辑权限判断。
+
+## SEO 输入校验
+
+`Zib_AI_SEO_Ability` 的输入 schema 包含三个字段：
+
+| 字段      | 类型    | 说明             |
+| --------- | ------- | ---------------- |
+| `post_id` | integer | 文章 ID          |
+| `type`    | string  | `post` 或 `term` |
+| `term_id` | integer | 分类 ID          |
+
+校验逻辑：
+
+- `type=post` 时必须提供 `post_id`。
+- 文章必须存在。
+- 当前用户必须具备 `edit_post` 权限。
+- `type=term` 时必须提供 `term_id`。
+- 分类必须存在。
+- 当前用户必须具备 `edit_term` 权限。
+
+因此即使 Ajax 动作注册了 `nopriv`，未登录用户也无法通过能力校验生成后台 SEO 字段。
+
+## 上下文构建
+
+文章上下文来自标题、摘要和正文：
+
+```php
+$title   = trim((string) $post->post_title);
+$excerpt = trim((string) $post->post_excerpt);
+
+$content = wp_strip_all_tags((string) $post->post_content);
+$content = trim(preg_replace('/\s+/u', ' ', $content));
+$content = wp_trim_words($content, max(50, (int) $word_limit), '');
+```
+
+分类上下文来自分类名称和描述：
+
+```php
+if ($term->name !== '') {
+    $parts[] = '标题: ' . $term->name;
+}
+if ($term->description !== '') {
+    $parts[] = '描述: ' . $term->description;
+}
+```
+
+如果标题、摘要、正文或分类描述都为空，能力会返回 `WP_Error`。扩展新能力时也应该在生成前检查上下文是否足够，不要把空 prompt 发送给 AI 服务。
+
+## SEO 输出处理
+
+三个 SEO 能力分别处理输出：
+
+| 能力                             | 输出处理                                                       |
+| -------------------------------- | -------------------------------------------------------------- |
+| `Zib_AI_SEO_Title_Ability`       | `sanitize_text_field()` 后追加 `zib_get_delimiter_blog_name()` |
+| `Zib_AI_SEO_Keywords_Ability`    | 去除包裹符号，统一中英文分隔符为英文逗号，去重后输出           |
+| `Zib_AI_SEO_Description_Ability` | 去换行、去包裹符号、`sanitize_text_field()`                    |
+
+关键词规范化会把换行、顿号、中文逗号、分号统一成英文逗号，并去重。扩展类似字段时，应在 `output_filter()` 里做格式收束，不要把模型原始输出直接写入后台字段。
+
+## 后台资源加载
+
+资源只在后台文章和分类编辑页面加载：
+
+```php
+function zib_ai_seo_enqueue_assets()
+{
+    if (!zib_ai_seo_is_enabled()) {
+        return;
+    }
+
+    if (!in_array(get_current_screen()->base, array('post', 'edit-tags', 'term'))) {
+        return;
+    }
+
+    $data = array(
+        'ai_seo_s' => true,
+    );
+
+    zib_ai_seo_enqueue_common_assets($data);
+}
+add_action('admin_enqueue_scripts', 'zib_ai_seo_enqueue_assets');
+```
+
+通用资源会注册 `zib_ai` 前端对象：
+
+```php
+wp_localize_script('zib-ai-common', 'zib_ai', array_merge(array(
+    'ajax_url' => admin_url('admin-ajax.php'),
+    'nonce'    => wp_create_nonce('zib_ai'),
+    'i18n'     => array(
+        'request_failed'  => __('网络异常，请稍后重试', 'zib_language'),
+        'request_timeout' => __('（请求超时，请稍后重试）', 'zib_language'),
+    ),
+), $data));
+```
+
+如果你新增主题后台 AI 能力，优先复用 `zib_ai_seo_enqueue_common_assets()`，这样 Ajax 地址、nonce 和提示文案都能保持一致。
+
+## AI SEO 按钮
+
+主题用 `zib_ai_seo_get_btn($type, $id)` 输出按钮：
+
+```php
+zib_ai_seo_get_btn('post', $post_id);
+zib_ai_seo_get_btn('term', $term_id);
+```
+
+按钮会带上：
+
+```html
+<button class="ai-seo-generate" ai-type="post" ai-id="123">AI 生成 SEO</button>
+```
+
+后台脚本监听 `.ai-seo-generate`，提交：
+
+```js
+{
+  action: 'ai_seo_generate',
+  type: type,
+  id: id
+}
+```
+
+返回后，脚本会把 `title`、`keywords`、`description` 写回对应字段。文章编辑页按 `name` 查找字段，分类页按 `.term-seo-{key}` 查找字段。
+
+## Ajax 生成流程
+
+Ajax 动作：
+
+```php
+add_action('wp_ajax_ai_seo_generate', 'zib_ajax_ai_seo_generate');
+add_action('wp_ajax_nopriv_ai_seo_generate', 'zib_ajax_ai_seo_generate');
+```
+
+服务端流程：
+
+1. 检查 `zib_ai_seo_is_enabled()`。
+2. 校验 `zib_ai` nonce。
+3. 校验 `type` 和 `id`。
+4. 依次执行 `seo-title`、`seo-keywords`、`seo-description`。
+5. 使用 `zib_send_json_success()` 返回结果。
+
+核心调用：
+
+```php
+function zib_ai_seo_run_field($ability, $type, $id)
+{
+    $ability_name = 'zib-ai/' . $ability;
+    if (!zib_ai_has_ability($ability_name)) {
+        return array('error' => sprintf(__('能力 %s 未注册', 'zib_language'), $ability_name));
+    }
+
+    $ability = wp_get_ability($ability_name);
+    $result  = $ability->execute(array(
+        'post_id' => $id,
+        'type'    => $type,
+        'term_id' => $id,
+    ));
+
+    if (is_wp_error($result)) {
+        return array('error' => $result->get_error_message());
+    }
+
+    return $result;
+}
+```
+
+这里按字段独立执行，所以某一个字段失败时，其它字段仍然可能成功。前端会收集 `error` 并展示在按钮后方。
+
+## 新增一个 AI Ability
+
+如果你在主题体系内新增能力，建议沿用 `Zib_AI_Ability` 的结构：定义 schema、校验输入、构造 prompt、清洗输出。
+
+```php
+if (!class_exists('WP_Ability') || !class_exists('Zib_AI_Ability')) {
+    return;
+}
+
+class Zib_AI_Summary_Ability extends Zib_AI_Ability
+{
+    public static function ability_args()
+    {
+        return array(
+            'label'         => __('zibll 摘要生成', 'zib_language'),
+            'description'   => __('基于文章内容生成简短摘要', 'zib_language'),
+            'ability_class' => self::class,
+        );
+    }
+
+    protected function input_schema()
+    {
+        return array(
+            'type'       => 'object',
+            'properties' => array(
+                'post_id' => array(
+                    'type'              => 'integer',
+                    'description'       => __('文章 ID。', 'zib_language'),
+                    'sanitize_callback' => 'absint',
+                ),
+            ),
+            'required'   => array('post_id'),
+        );
+    }
+
+    public function validate_input($input = null)
+    {
+        $post_id = is_array($input) && isset($input['post_id']) ? (int) $input['post_id'] : 0;
+        if (!$post_id || !get_post($post_id)) {
+            return new WP_Error('no_post', __('内容不存在', 'zib_language'));
+        }
+
+        if (!current_user_can('edit_post', $post_id)) {
+            return new WP_Error('forbidden', __('权限不足，无法编辑此文章', 'zib_language'));
+        }
+
+        return true;
+    }
+
+    protected function prompt_text()
+    {
+        $post_id = isset($this->input['post_id']) ? (int) $this->input['post_id'] : 0;
+        $post    = get_post($post_id);
+
+        $content = wp_strip_all_tags((string) $post->post_content);
+        $content = trim(preg_replace('/\s+/u', ' ', $content));
+
+        if ($content === '') {
+            return new WP_Error('empty_content', __('无可用内容', 'zib_language'));
+        }
+
+        return '请为以下文章生成 80 字以内的摘要：' . "\n\n" . $content;
+    }
+
+    protected function system_instruction()
+    {
+        return __('你是一名中文内容编辑，只输出摘要文本，不输出解释。', 'zib_language');
+    }
+}
+```
+
+注册时可以直接使用 WordPress Abilities API：
+
+```php
+function zib_docs_register_ai_summary_ability()
+{
+    if (!function_exists('wp_register_ability') || !class_exists('Zib_AI_Summary_Ability')) {
+        return;
+    }
+
+    wp_register_ability('zib-ai/summary', Zib_AI_Summary_Ability::ability_args());
+}
+add_action('wp_abilities_api_init', 'zib_docs_register_ai_summary_ability');
+```
+
+如果能力要走主题的 `zib_ai_register_ability()`，文件名必须符合 `class-ability-{name}.php` 的约定，并且类需要提前能被加载到主题能力目录中。插件或子主题扩展通常直接 `wp_register_ability()` 更清晰。
+
+## 新增 Ajax 入口
+
+自定义 Ajax 入口仍然要沿用主题响应风格：
+
+```php
+function zib_docs_ajax_ai_summary_generate()
+{
+    if (!zib_ai_is_available()) {
+        zib_send_json_error(__('当前环境不支持 AI 能力', 'zib_language'));
+    }
+
+    zib_ajax_wp_verify_nonce('zib_ai');
+
+    $post_id = !empty($_POST['post_id']) ? (int) $_POST['post_id'] : 0;
+    if (!$post_id || !current_user_can('edit_post', $post_id)) {
+        zib_send_json_error(__('权限不足，无法编辑此文章', 'zib_language'));
+    }
+
+    $ability_name = 'zib-ai/summary';
+    if (!zib_ai_has_ability($ability_name)) {
+        zib_send_json_error(__('摘要生成能力未注册', 'zib_language'));
+    }
+
+    $ability = wp_get_ability($ability_name);
+    $result  = $ability->execute(array(
+        'post_id' => $post_id,
+    ));
+
+    if (is_wp_error($result)) {
+        zib_send_json_error($result->get_error_message());
+    }
+
+    zib_send_json_success($result);
+}
+add_action('wp_ajax_docs_ai_summary_generate', 'zib_docs_ajax_ai_summary_generate');
+```
+
+不要为后台写入能力注册 `nopriv` 动作。即使能力层做了权限校验，入口层也应该先拦截未登录和无权限请求。
+
+## 扩展检查清单
+
+- 调用前先检查 `zib_ai_is_available()`。
+- 功能开关要和 `_pz()` 配置绑定。
+- Ability 名称要带分类，例如 `zib-ai/summary`。
+- 输入 schema 要写清字段类型和清洗回调。
+- 写入后台字段前必须检查 `current_user_can()`。
+- prompt 为空时返回 `WP_Error`，不要请求 AI。
+- 输出必须在 `output_filter()` 中清洗和收束格式。
+- Ajax 要校验 nonce、type、id 和权限。
+- 后台脚本只在需要的页面加载。
+- 前端按钮要有加载锁，避免重复请求。

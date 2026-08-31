@@ -1,0 +1,705 @@
+---
+title: 首页与归档列表
+description: 扩展子比主题首页 Tab、分类/标签/专题封面、筛选菜单、主文章列表、列表卡片、排序查询和 Ajax 分页。
+---
+
+## 模块边界
+
+子比主题的首页、分类页、标签页、归档页和专题页不是简单输出 WordPress 主循环。它们在模板层、查询层、列表渲染层和前端 Ajax 协议之间形成了一条完整链路：
+
+| 文件                               | 作用                                                         |
+| ---------------------------------- | ------------------------------------------------------------ |
+| `index.php`                        | 首页侧栏、首页内容区、首页 Tab、筛选菜单、主文章列表和分页   |
+| `category.php`                     | 分类页框架，文档模式时切换到 `template/category-dosc`        |
+| `tag.php`                          | 标签页封面、筛选菜单、文章列表和分页                         |
+| `archive.php`                      | 日期归档页标题、文章列表和分页                               |
+| `template/category-topics.php`     | 专题页模板入口                                               |
+| `inc/functions/zib-index.php`      | 首页 Tab 导航和 Tab 内容占位加载                             |
+| `inc/functions/zib-category.php`   | 分类/标签/专题封面、筛选菜单、排序按钮、分类权限和聚合模块   |
+| `inc/functions/zib-posts-list.php` | 主文章列表、卡片/列表模式、缩略图、标签、meta、分页和骨架屏  |
+| `inc/functions/zib-post.php`       | 主查询筛选、排序改写、置顶文章处理和 `zib_get_posts_query()` |
+| `action/function.php`              | `query_posts_lists` 通用 Ajax 文章列表                       |
+
+扩展这条链路时要先判断自己改的是“页面结构”“查询参数”“列表项展示”还是“Ajax 分页协议”。不要在模板里直接重写一套 `WP_Query` 和列表 HTML，否则主题的筛选、置顶、分页、付费角标、视频缩略图、暗黑模式和 Ajax 加载都会断开。
+
+## 首页结构
+
+首页模板的核心结构是：
+
+```php
+get_header();
+
+dynamic_sidebar('all_top_fluid');
+dynamic_sidebar('home_top_fluid');
+
+echo '<main role="main" class="container">';
+dynamic_sidebar('home_top_content');
+
+$index_tab_nav = zib_index_tab_html();
+if ($index_tab_nav) {
+    echo '<div class="home-tab-content">';
+    echo $index_tab_nav;
+    echo '<div class="tab-content">';
+    echo '<div class="posts-row ajaxpager tab-pane fade in active" id="index-tab-main">';
+    zib_ajax_option_menu('home');
+    zib_posts_list();
+    zib_paging();
+    echo '</div>';
+    echo zib_index_tab('content');
+    echo '</div>';
+    echo '</div>';
+}
+
+dynamic_sidebar('home_bottom_content');
+get_sidebar();
+
+dynamic_sidebar('home_bottom_fluid');
+dynamic_sidebar('all_bottom_fluid');
+
+get_footer();
+```
+
+这里有几个关键点：
+
+- 首页主列表必须在 `.posts-row.ajaxpager` 内。
+- 筛选菜单必须放在列表和分页之前。
+- 列表项由 `zib_posts_list()` 输出，每个列表项带 `.ajax-item`。
+- 分页由 `zib_paging()` 输出，分页容器带 `.ajax-pag`。
+- 首页上方和下方模块优先通过侧栏位置扩展。
+
+如果只是在首页列表前后加内容，优先使用 `home_top_content`、`home_bottom_content`、`home_top_fluid`、`home_bottom_fluid` 这些侧栏，或者模板覆盖局部插入。不要直接改 `zib_posts_list()`，那会影响分类页、标签页、作者页和其他主循环页面。
+
+## 首页 Tab
+
+首页 Tab 来自主题设置 `home_lists`。`zib_index_tab('nav')` 输出导航，`zib_index_tab('content')` 输出每个 Tab 的异步占位内容。
+
+Tab 导航会给每个分类或专题生成带 `data-ajax` 的链接：
+
+```php
+$query_arg = array('nofilter' => 'true');
+if (!empty($tabs[$key]['orderby'])) {
+    $query_arg['orderby'] = $tabs[$key]['orderby'];
+}
+
+$link = esc_url(add_query_arg($query_arg, get_term_link($term)));
+```
+
+Tab 内容不是提前把每个分类的列表都查出来，而是输出骨架屏和一个自动触发的 Ajax 链接：
+
+```php
+$html .= '<div class="ajaxpager tab-pane fade" id="index-tab-' . $i . '">';
+$html .= '<span class="post_ajax_trigger"><a class="ajax_load ajax-next ajax-open" href="' . $link . '"></a></span>';
+$html .= '<div class="post_ajax_loader">' . $placeholder . '</div>';
+$html .= '</div>';
+```
+
+`nofilter=true` 的作用是让目标分类页不输出筛选菜单：
+
+```php
+if (!empty($_GET['nofilter'])) {
+    return;
+}
+```
+
+因此扩展首页 Tab 时不要在 Tab 容器里再输出一套筛选条。Tab 内容应该让目标归档页按主题协议异步加载。
+
+## 分类、标签和专题封面
+
+分类页入口是 `zib_post_cat_page_content()`：
+
+```php
+zib_cat_cover();
+
+$allow_view = zib_get_post_cat_allow_view($cat_id);
+if (!$allow_view['allow']) {
+    echo '<div class="posts-row ajaxpager">';
+    echo '<div class="ajax-item zib-widget mt20">' . zib_get_null(__('抱歉！您暂无查看此内容的权限', 'zib_language'), 20, 'null-cap.svg', '') . $allow_view['not_html'] . '</div>';
+    echo '</div>';
+    return;
+}
+
+echo '<div class="posts-row ajaxpager">';
+zib_ajax_option_menu('cat');
+zib_posts_list();
+zib_paging();
+echo '</div>';
+```
+
+标签页使用 `zib_tag_cover()`，专题页使用 `zib_topics_cover()`。三者最终都会调用 `zib_page_cover()`，区别在标题图标、默认封面图、统计开关和居中样式。
+
+`zib_page_cover()` 在第一页会输出：
+
+```php
+<div win-ajax-replace="page-cover" class="page-cover zib-widget">
+```
+
+Ajax 路由切换分类或标签时，前端可以替换 `page-cover` 区域。新增分类封面组件时要保留 `win-ajax-replace="page-cover"` 的语义，否则筛选切换后封面可能不会更新。
+
+## 分类阅读限制
+
+分类权限从当前分类向父级递归继承：
+
+```php
+function zib_get_post_cat_allow_view($cat_id)
+{
+    $data = zib_get_post_single_cat_allow_view($cat_id);
+    if (!$data['allow']) {
+        return $data;
+    }
+
+    $parent_id = get_term($cat_id)->parent ?? 0;
+    if ($parent_id) {
+        $data = zib_get_post_cat_allow_view($parent_id);
+        return $data;
+    }
+
+    return $data;
+}
+```
+
+权限类型包括登录可见、收藏后可见、付费/积分预留、用户组权限。用户组权限会检查 VIP、等级和认证状态。
+
+扩展分类页时必须先检查 `zib_get_post_cat_allow_view()`。如果无权限，页面应只输出权限提示，不应继续输出筛选菜单、文章列表、分页或 Ajax 加载入口。
+
+## 筛选菜单
+
+筛选菜单统一由 `zib_ajax_option_menu($page)` 输出。支持页面类型：
+
+| page     | 常见使用位置 |
+| -------- | ------------ |
+| `home`   | 首页主列表   |
+| `cat`    | 分类页       |
+| `tag`    | 标签页       |
+| `topics` | 专题页       |
+
+筛选内容来自主题设置：
+
+| 内容           | 配置来源                                                    |
+| -------------- | ----------------------------------------------------------- |
+| 分类筛选       | `ajax_list_{page}_cat`、`ajax_list_option_{page}_cat`       |
+| 专题筛选       | `ajax_list_{page}_topics`、`ajax_list_option_{page}_topics` |
+| 标签筛选       | `ajax_list_{page}_tag`、`ajax_list_option_{page}_tag`       |
+| 排序筛选       | `{page}_orderby_s`、`{page}_orderby_option`                 |
+| 自定义筛选     | `custom_filter_show`、`custom_filter`                       |
+| 分类页单独筛选 | `cat_custom_filter`                                         |
+
+分类页可以对指定分类配置独立筛选：
+
+```php
+if ($page === 'cat') {
+    $this_id = get_queried_object_id();
+    $opt     = _pz('cat_custom_filter');
+    if ($this_id && $opt && is_array($opt)) {
+        foreach ($opt as $item) {
+            if (!empty($item['cats']) && is_array($item['cats']) && in_array($this_id, $item['cats'])) {
+                $page_args[$page] = array(
+                    'cat'            => $item['cat_s'],
+                    'cat_option'     => $item['cat_lists'],
+                    'topics'         => $item['topics_s'],
+                    'topics_option'  => $item['topics_lists'],
+                    'tag'            => $item['tag_s'],
+                    'tag_option'     => $item['tag_lists'],
+                    'orderby'        => $item['orderby_s'],
+                    'orderby_option' => $item['orderby_lists'],
+                    'custom'         => !empty($item['custom_filters']),
+                    'custom_filters' => !empty($item['custom_filters']) ? $item['custom_filters'] : array(),
+                );
+            }
+        }
+    }
+}
+```
+
+这意味着不同分类可以有不同筛选项。新增筛选时不要只在前端追加按钮，还要确认查询层会处理对应参数。
+
+## 排序项
+
+归档筛选菜单的排序项由 `zib_get_option_list_orderby()` 定义：
+
+| key                   | 含义     |
+| --------------------- | -------- |
+| `modified`            | 更新时间 |
+| `date`                | 发布时间 |
+| `views`               | 浏览数量 |
+| `like`                | 点赞数量 |
+| `comment_count`       | 评论数量 |
+| `favorite`            | 收藏数量 |
+| `zibpay_price`        | 销售价格 |
+| `zibpay_points_price` | 积分售价 |
+| `sales_volume`        | 销售数量 |
+| `rand`                | 随机排序 |
+
+查询层会在 `pre_get_posts` 读取 `$_GET['orderby']`：
+
+```php
+if (isset($_GET['orderby']) && $query->is_main_query() && !is_admin()) {
+    $orderby           = $_GET['orderby'];
+    $orderby_keys      = zib_get_query_mate_orderby_keys();
+    $mate_orderbys     = $orderby_keys['value'];
+    $mate_orderbys_num = $orderby_keys['value_num'];
+
+    if (in_array($orderby, $mate_orderbys_num)) {
+        $query->set('orderby', 'meta_value_num');
+        $query->set('meta_key', $orderby);
+    } elseif (in_array($orderby, $mate_orderbys)) {
+        $query->set('orderby', 'meta_value');
+        $query->set('meta_key', $orderby);
+    } else {
+        $query->set('orderby', $orderby);
+    }
+}
+```
+
+新增 meta 排序时，必须同时扩展排序显示和查询键：
+
+```php
+function zib_docs_query_orderby_keys($keys)
+{
+    $keys['value_num'][] = 'docs_score';
+    return $keys;
+}
+add_filter('query_mate_orderby_keys', 'zib_docs_query_orderby_keys');
+```
+
+然后在筛选菜单或主题设置里允许 `docs_score` 出现。只加按钮不加查询键，WordPress 会把它当普通 `orderby`，结果可能不正确。
+
+## 自定义筛选
+
+自定义筛选来自主题设置 `custom_filter`，每组筛选包含：
+
+| 字段          | 作用         |
+| ------------- | ------------ |
+| `key`         | meta key     |
+| `name`        | 筛选组名称   |
+| `vals`        | 可选值列表   |
+| `vals[].key`  | URL 参数值   |
+| `vals[].name` | 前台显示名称 |
+
+查询层在 `zib_sift_posts_per_page()` 里把自定义筛选转成 `meta_query`：
+
+```php
+$filter_args = zib_get_custom_filter_args();
+foreach ($filter_args as $filters) {
+    if (!empty($_GET[$filters['key']])) {
+        $meta_query = $query->get('meta_query');
+        $meta_query = is_array($meta_query) ? $meta_query : array();
+        $meta_query[] = array(
+            'key'     => $filters['key'],
+            'value'   => esc_sql($_GET[$filters['key']]),
+            'compare' => 'LIKE',
+        );
+
+        $query->set('meta_query', $meta_query);
+    }
+}
+```
+
+因为默认使用 `LIKE`，适合标签型、枚举型或数组序列化字段。数值范围筛选、价格区间筛选、日期范围筛选不要直接塞进 `custom_filter`，应单独处理查询逻辑。
+
+## 主文章列表
+
+`zib_posts_list()` 负责循环文章并调用 `zib_mian_posts_while()`。列表参数会自动判断当前页面类型：
+
+```php
+$defaults = array(
+    'type'        => 'auto',
+    'no_author'   => false,
+    'no_margin'   => false,
+    'is_category' => is_category(),
+    'is_search'   => is_search(),
+    'is_home'     => is_home(),
+    'is_author'   => is_author(),
+    'is_tag'      => is_tag(),
+    'is_topics'   => is_tax('topics'),
+);
+```
+
+`zib_mian_posts_while()` 会决定使用卡片模式还是列表模式。影响因素包括：
+
+- `$args['type'] == 'card'`。
+- 调用方显式传入 `$args['is_card']`。
+- 全局 `list_type == card`。
+- 标签页、首页、作者页、专题页对应的卡片开关。
+- 当前分类是否在 `list_card_cat` 中。
+
+源码里的判断顺序可以理解为：
+
+```php
+$is_card = $args['type'] == 'card' || $args['is_card'];
+
+if (!$is_card && _pz('list_type') == 'card') {
+    $is_card = true;
+}
+
+if (!$is_card && (
+    ($args['is_tag'] && _pz('list_card_tag')) ||
+    ($args['is_home'] && _pz('list_card_home')) ||
+    ($args['is_author'] && _pz('list_card_author')) ||
+    ($args['is_topics'] && _pz('list_card_topics'))
+)) {
+    $is_card = true;
+}
+
+if (!$is_card && in_array(get_queried_object_id(), (array) _pz('list_card_cat'))) {
+    $is_card = true;
+}
+```
+
+所以“默认列表模式”并不等于所有页面统一展示。全局可以保持图文列表，再把首页、标签页、专题页、作者页或指定分类单独切到卡片。扩展时如果只想让某个模块显示卡片，优先在调用 `zib_posts_list()` 时传入：
+
+```php
+zib_posts_list(array(
+    'type' => 'card',
+));
+```
+
+不要为了一个局部模块去改全局 `list_type`，否则首页、分类、搜索、作者页和 Ajax 加载都会一起变化。
+
+列表模式输出：
+
+```php
+<posts class="posts-item list ajax-item">
+```
+
+卡片模式输出：
+
+```php
+<posts class="posts-item card ajax-item">
+```
+
+自定义列表项时必须保留 `.ajax-item`，否则 Ajax 追加、替换和无限加载无法正确识别新内容。
+
+### 列表样式字段
+
+后台“文章列表”相关字段大致分成四组：
+
+| 字段                            | 作用                                            |
+| ------------------------------- | ----------------------------------------------- |
+| `list_show_type`                | 列表模式外观，控制分离卡片或无间距样式          |
+| `list_type`                     | 默认列表模式：文字、图文、自动图文、卡片        |
+| `list_card_home`                | 首页列表是否强制卡片                            |
+| `list_card_tag`                 | 标签页列表是否强制卡片                          |
+| `list_card_topics`              | 专题页列表是否强制卡片                          |
+| `list_card_author`              | 作者页列表是否强制卡片                          |
+| `list_card_cat`                 | 指定分类或专题强制卡片                          |
+| `list_list_option.style`        | 列表模式内部结构，默认或 `style2`               |
+| `list_list_option.img_position` | 列表缩略图靠左或靠右                            |
+| `list_list_option.scale`        | 列表缩略图比例，最终输出为 `--posts-list-scale` |
+| `list_card_option.style`        | 卡片模式样式，默认或 `style3`                   |
+| `list_card_option.scale`        | 卡片缩略图比例，最终输出为 `--posts-card-scale` |
+| `mult_thumb_cat`                | 指定哪些分类进入多图模式                        |
+
+`list_list_option.scale` 和 `list_card_option.scale` 不是直接写在每张卡片行内，而是在 `inc/functions/zib-head.php` 中汇总为 CSS 变量。扩展样式时优先使用这些变量，不要直接给 `.item-thumbnail` 写死高度。
+
+## 自动模式与多图模式
+
+`list_type` 有四个用户能感知的模式：
+
+| 模式           | 源码含义                                      |
+| -------------- | --------------------------------------------- |
+| `text`         | 列表文字模式，满足条件时不输出缩略图          |
+| `thumb`        | 列表图文模式，无缩略图时使用备用缩略图        |
+| `thumb_if_has` | 自动图文模式，无真实缩略图时降级为文字模式    |
+| `card`         | 卡片模式，直接走 `zib_posts_mian_list_card()` |
+
+这里的“自动图文模式”只在列表模式里生效，且只有在开启侧边栏的页面或移动端才会进入文字/多图判断：
+
+```php
+if ($is_show_sidebar || wp_is_mobile()) {
+    $list_type = _pz('list_type');
+
+    if ($args['is_no_thumb'] !== 'disable' && (
+        $list_type == 'text' ||
+        ($list_type == 'thumb_if_has' && strstr($graphic, 'data-thumb="default"'))
+    )) {
+        $is_no_thumb = true;
+    }
+}
+```
+
+关键点是 `data-thumb="default"`。`zib_post_thumbnail()` 如果没有找到真实图片，会改用备用缩略图并给图片加上这个标记；自动图文模式据此判断“这篇文章其实没有缩略图”，然后让列表变成文字模式。
+
+多图模式同样只在列表模式、侧栏页面或移动端生效。触发条件是文章内容图片数量大于 2，并且满足以下任一条件：
+
+| 条件                              | 说明                               |
+| --------------------------------- | ---------------------------------- |
+| 文章格式是 `image` 或 `gallery`   | 图片文章、图库文章自动进入多图模式 |
+| 当前文章分类命中 `mult_thumb_cat` | 后台指定分类下的文章进入多图模式   |
+
+```php
+$_thumb_count = zib_get_post_imgs_count($post);
+if ($_thumb_count > 2) {
+    if (has_post_format(array('image', 'gallery'))) {
+        $is_mult_thumb = true;
+    }
+
+    if (!$is_mult_thumb) {
+        foreach (get_the_category() as $category) {
+            if (in_array($category->term_id, (array) _pz('mult_thumb_cat'))) {
+                $is_mult_thumb = true;
+                break;
+            }
+        }
+    }
+}
+```
+
+多图输出不是读取特色图像，而是读取正文里的图片：
+
+```php
+function zib_posts_multi_thumbnail($post)
+{
+    $html = zib_get_post_imgs($post, _pz('thumb_postfirstimg_size'), 'fit-cover radius8', 4, true);
+    return $html;
+}
+```
+
+`zib_get_post_imgs()` 会从文章正文解析 `<img src="...">`，最多输出 4 张；如果实际图片超过 4 张，最后一张会叠加 `+N` 角标。它不会自动读取特色图片、外链缩略图或分类封面，所以多图模式适合正文图片充足的图集文章，不适合只设置特色图像的普通文章。
+
+## 列表缩略图
+
+缩略图由 `zib_get_posts_thumb_graphic()` 输出，按优先级处理：
+
+1. 特色视频 `featured_video`，可生成视频预览。
+2. 特色幻灯片 `featured_slide`，可生成 Swiper。
+3. 普通文章缩略图 `zib_post_thumbnail()`。
+4. 图片/图库/视频格式角标。
+5. 置顶角标。
+6. `list_thumb_fit == contain` 时使用渐变背景和 contain 模式。
+
+普通缩略图最终来自 `zib_post_thumbnail()`，它的图片来源优先级是：
+
+```php
+特色图像 > 外链特色图像 thumbnail_url > 文章首图 > 分类封面图 > 备用缩略图
+```
+
+对应后台配置：
+
+| 字段                      | 作用                                               |
+| ------------------------- | -------------------------------------------------- |
+| `list_thumb_slides_s`     | 允许 `featured_slide` 作为列表缩略图               |
+| `list_thumb_video_s`      | 允许 `featured_video` 作为列表视频缩略图           |
+| `list_thumb_video_mute_s` | 视频缩略图是否静音播放                             |
+| `thumb_postfirstimg_s`    | 无特色图时读取文章首图                             |
+| `thumb_catimg_s`          | 无文章图时读取分类封面图                           |
+| `list_thumb_fit`          | `cover` 铺满或 `contain` 等比例缩放                |
+| `thumb_postfirstimg_size` | 使用 `thumbnail`、`medium`、`large` 或 `full` 尺寸 |
+| `spare_thumbnail`         | 备用缩略图，可配置多张随机取用                     |
+
+文章编辑页还有两个和列表缩略图直接相关的 Meta：
+
+| Meta             | 来源         | 作用                                   |
+| ---------------- | ------------ | -------------------------------------- |
+| `featured_slide` | 文章扩展字段 | 列表缩略图幻灯片，优先级高于普通缩略图 |
+| `featured_video` | 文章扩展字段 | 列表视频缩略图，优先级高于幻灯片       |
+
+不要在列表模板里只读取 `thumbnail_url`。主题列表缩略图还承载视频、幻灯片、默认图、懒加载、置顶角标、图片数量角标、缩略图比例和 `contain` 背景。
+
+### 缓存与刷新
+
+主题会缓存普通缩略图和多图 HTML：
+
+| 缓存 key                    | 内容                       |
+| --------------------------- | -------------------------- |
+| `post_thumbnail_url_{size}` | 某个尺寸下的文章缩略图 URL |
+| `post_multi_thumbnail`      | 多图模式的 4 张图片 HTML   |
+
+保存文章时主题会清理这些缓存。二开如果批量修改 `thumbnail_url`、正文图片、特色图像或分类封面，建议在保存后同步清理相关缓存，避免列表短时间继续显示旧图。
+
+## 列表 Meta 与标签
+
+列表 Meta 由 `zib_get_posts_list_meta()` 输出，包含作者、头像、时间和右侧统计。时间来源受 `post_time_source` 影响，可以用发布时间或更新时间。
+
+标签区由 `zib_get_posts_list_badge()` 输出，受 `list_badge_show` 控制：
+
+| badge    | 来源                               |
+| -------- | ---------------------------------- |
+| `pay`    | 付费阅读、付费资源、积分、会员专属 |
+| `cat`    | 文章分类                           |
+| `topics` | 专题                               |
+| `tag`    | 标签                               |
+
+如果要给列表项增加新角标，优先组合到列表项内部，不要删除 `zib_get_posts_list_pay_tags()`。付费、免费资源、积分售价和会员专属角标都是用户判断内容权限的重要信息。
+
+## 分页协议
+
+主分页由 `zib_paging()` 输出。开启 Ajax 分页时：
+
+```php
+$pag_html = '<div class="text-center theme-pagination ajax-pag"><div class="next-page ajax-next lazyload" lazyload-action="ias">' . $next_posts_link . '</div></div>';
+```
+
+关闭 Ajax 分页时输出数字分页：
+
+```php
+<div class="pagenav ajax-pag">...</div>
+```
+
+无限加载由这些设置控制：
+
+| 设置                | 作用                                 |
+| ------------------- | ------------------------------------ |
+| `paging_ajax_s`     | 是否使用 Ajax 分页                   |
+| `ajax_trigger`      | 加载更多按钮文字                     |
+| `paging_ajax_ias_s` | 是否自动无限加载                     |
+| `ias_max`           | 自动加载最大页数，超过后变成手动点击 |
+
+自定义列表必须保持：
+
+- 外层 `.ajaxpager`。
+- 列表项 `.ajax-item`。
+- 分页容器 `.ajax-pag`。
+- 下一页链接 `.ajax-next`。
+
+这四个类是主题前端分页协议的骨架。
+
+## 通用 Ajax 文章列表
+
+短代码、小工具和动态模块可能使用 `query_posts_lists`：
+
+```php
+add_action('wp_ajax_query_posts_lists', 'zib_ajax_query_posts_lists');
+add_action('wp_ajax_nopriv_query_posts_lists', 'zib_ajax_query_posts_lists');
+```
+
+它读取：
+
+| 参数       | 作用                           |
+| ---------- | ------------------------------ |
+| `count`    | 每页数量，默认 12              |
+| `paged`    | 页码                           |
+| `style`    | `minicard` 时显示缩略图和 meta |
+| `paginate` | `ajax`、`number` 或无分页      |
+| `blank`    | 链接打开方式                   |
+| `cat`      | 分类筛选                       |
+| `topics`   | 专题筛选                       |
+| `orderby`  | 排序                           |
+
+查询由 `zib_get_posts_query()` 生成：
+
+```php
+$query_args = array(
+    'post_type'           => 'post',
+    'post_status'         => 'publish',
+    'ignore_sticky_posts' => 1,
+    'order'               => isset($args['order']) && in_array($args['order'], array('asc', 'ASC')) ? 'ASC' : 'DESC',
+    'posts_per_page'      => $args['count'],
+    'paged'               => $args['paged'],
+);
+
+$query_args = zib_query_orderby_filter($args['orderby'], $query_args);
+```
+
+Ajax 返回时调用 `zib_ajax_send_ajaxpager($posts_lists)`，所以前端会按主题 Ajax pager 协议插入列表和分页。自定义 Ajax 列表也应复用这个返回方式。
+
+## 置顶文章和首页排除
+
+首页主查询会处理排除文章、排除分类和文档模式分类：
+
+```php
+if ($query->is_home() && $query->is_main_query()) {
+    $home_exclude_posts = _pz('home_exclude_posts', array()) ?: array();
+    if ($home_exclude_posts) {
+        $query->set('post__not_in', $home_exclude_posts);
+    }
+
+    $home_exclude_cats = _pz('home_exclude_cats', array());
+    // 子分类也会合并排除。
+}
+```
+
+置顶文章有独立处理，用于首页、分类、标签和专题。列表缩略图通过 `zib_is_sticky()` 输出“置顶”角标。自定义主查询时如果忽略主题置顶逻辑，置顶文章可能重复出现，或角标状态不正确。
+
+## 新增一个归档筛选示例
+
+例如给分类页增加一个 `difficulty` 难度筛选。主题内置 `zib_get_custom_filter_args()` 直接读取后台设置，优先通过主题后台配置 `custom_filter`。如果必须用代码追加，可以在分类页列表前输出一组符合 Ajax 协议的按钮，并在 `pre_get_posts` 中处理同名参数：
+
+```php
+function zib_docs_difficulty_filter_buttons()
+{
+    if (!is_category()) {
+        return;
+    }
+
+    $current = isset($_GET['difficulty']) ? $_GET['difficulty'] : '';
+    $url     = zib_url_del_paged(zib_get_current_url());
+    $items   = array(
+        'easy' => __('入门', 'zib_language'),
+        'hard' => __('进阶', 'zib_language'),
+    );
+
+    echo '<div class="ajax-option ajax-replace" win-ajax-replace="filter">';
+    echo '<div class="flex ac">';
+    echo '<div class="option-dropdown splitters-this-r dropdown flex0">' . __('难度', 'zib_language') . '</div>';
+    echo '<ul class="list-inline scroll-x mini-scrollbar option-items">';
+
+    foreach ($items as $key => $name) {
+        $class = 'ajax-next';
+        $href  = add_query_arg('difficulty', $key, $url);
+
+        if ($current === $key) {
+            $class .= ' focus-color';
+            $href = add_query_arg('difficulty', false, $url);
+        }
+
+        echo '<a rel="nofollow" ajax-replace="true" class="' . esc_attr($class) . '" href="' . esc_url($href) . '">' . esc_html($name) . '</a>';
+    }
+
+    echo '</ul>';
+    echo '</div>';
+    echo '</div>';
+}
+```
+
+模板覆盖里可以在 `zib_ajax_option_menu('cat')` 后调用 `zib_docs_difficulty_filter_buttons()`。查询层再处理 `difficulty`：
+
+```php
+function zib_docs_archive_difficulty_query($query)
+{
+    if (!is_category() || !$query->is_main_query() || is_admin()) {
+        return;
+    }
+
+    if (empty($_GET['difficulty'])) {
+        return;
+    }
+
+    $meta_query   = $query->get('meta_query');
+    $meta_query   = is_array($meta_query) ? $meta_query : array();
+    $meta_query[] = array(
+        'key'     => 'difficulty',
+        'value'   => esc_sql($_GET['difficulty']),
+        'compare' => '=',
+    );
+
+    $query->set('meta_query', $meta_query);
+}
+add_action('pre_get_posts', 'zib_docs_archive_difficulty_query', 9999);
+```
+
+更推荐的方式是使用主题后台的自定义筛选配置，让前台显示和查询层保持一致。
+
+## 开发检查
+
+| 场景       | 应检查                                                     |
+| ---------- | ---------------------------------------------------------- |
+| 首页 Tab   | `home_lists`、`nofilter`、骨架屏、目标分类链接、第一页限制 |
+| 分类页     | 分类封面、父级权限继承、无权限时不输出列表                 |
+| 筛选菜单   | 显示按钮和查询参数是否同时生效                             |
+| 自定义排序 | 是否扩展 `query_mate_orderby_keys`，meta 类型是否正确      |
+| 列表项     | 是否保留 `.ajax-item`、付费角标、缩略图逻辑和 meta         |
+| 分页       | 是否保留 `.ajaxpager`、`.ajax-pag`、`.ajax-next`           |
+| Ajax 列表  | 是否使用 `zib_ajax_send_ajaxpager()` 返回                  |
+| 首页排除   | 是否尊重排除文章、排除分类、文档模式分类和置顶逻辑         |
+
+## 常见误区
+
+- 不要只加筛选按钮，不处理 `pre_get_posts` 或查询参数。
+- 不要重写列表项时去掉 `.ajax-item`。
+- 不要把分类权限只当成封面提示，无权限时列表也不能继续输出。
+- 不要把付费角标、会员专属角标和免费资源角标删掉。
+- 不要让首页 Tab 同时输出筛选菜单，Tab 链接已经带 `nofilter=true`。
+- 不要在主查询和 Ajax 查询里使用两套不同排序规则。
+- 不要自定义分页 HTML 后丢失 `.ajax-pag` 和 `.ajax-next`。
+
+本页根据 `index.php`、`category.php`、`tag.php`、`archive.php`、`inc/functions/zib-index.php`、`inc/functions/zib-category.php`、`inc/functions/zib-posts-list.php`、`inc/functions/zib-post.php`、`action/function.php` 蒸馏整理。

@@ -1,0 +1,31 @@
+name: 源码研究
+description: 记录子比主题、子主题或插件源码结构、版本差异和可复用结论
+title: '源码研究：'
+labels: [source-research]
+body:
+  - type: input
+    id: scope
+    attributes:
+      label: 研究范围
+      placeholder: 主题版本、模块、函数、Hook 或源码目录
+    validations:
+      required: true
+  - type: textarea
+    id: finding
+    attributes:
+      label: 当前结论
+      description: 说明调用链、输入输出、版本边界和仍待确认的部分。
+    validations:
+      required: true
+  - type: textarea
+    id: references
+    attributes:
+      label: 证据与参考
+      description: 填写可公开的最小源码片段、文档链接或复现步骤。
+  - type: checkboxes
+    id: compliance
+    attributes:
+      label: 发布确认
+      options:
+        - label: 内容已脱敏，且没有公开未授权的完整主题或插件源码。
+          required: true

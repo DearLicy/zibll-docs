@@ -1,0 +1,400 @@
+---
+title: 字段速查
+description: 汇总子比主题常用 CSF 字段、保存形态、真实使用位置、读取方式和输出转义规则。
+---
+
+## 字段选择原则
+
+字段选择先看数据形态，再看后台体验。子比主题源码的习惯是：简单值用简单字段，复杂配置再用 `group`、`fieldset`、`accordion`。
+
+| 需求         | 推荐字段                                         | 保存结果                              |
+| ------------ | ------------------------------------------------ | ------------------------------------- |
+| 开关         | `switcher`                                       | 布尔值或空值                          |
+| 单行文本     | `text`                                           | 字符串                                |
+| 多行文本     | `textarea`                                       | 字符串                                |
+| 数字         | `number`、`spinner`                              | 字符串或数字                          |
+| 单选         | `radio`、`button_set`、`image_select`            | 字符串                                |
+| 多选         | `checkbox`、`select` + `multiple`                | 数组                                  |
+| 颜色 class   | `palette`                                        | 字符串，例如 `jb-blue`                |
+| 自定义颜色   | `color`                                          | 十六进制颜色                          |
+| 图片或文件   | `upload`、`media`、`gallery`                     | URL、ID、数组或逗号字符串，取决于字段 |
+| 链接         | `link`                                           | 数组，常见 `url`、`text`、`target`    |
+| 代码         | `code_editor`                                    | 字符串                                |
+| 一组相关字段 | `fieldset`                                       | 关联数组                              |
+| 可重复复杂项 | `group`                                          | 数组列表                              |
+| 可重复简单项 | `repeater`                                       | 数组列表                              |
+| 折叠分区     | `accordion`                                      | 按子字段结构保存                      |
+| 背景         | `background`                                     | 背景属性数组                          |
+| 间距         | `spacing`                                        | top、right、bottom、left 数组         |
+| 提示说明     | `content`、`submessage`、`heading`、`subheading` | 不保存业务值                          |
+
+## 子比增强字段
+
+子比在原版 Codestar 基础上扩展或覆盖了一批字段，常见于：
+
+```txt
+inc/csf-framework/fields
+inc/options/options-module.php
+```
+
+重点字段：
+
+| 字段             | 典型位置                           | 用途                      |
+| ---------------- | ---------------------------------- | ------------------------- |
+| `palette`        | 菜单徽章、小工具按钮、主题色配置   | 选择主题内置色板 class    |
+| `between_number` | 投稿标题长度、价格限制             | 设置最小值和最大值        |
+| `accordion`      | 页面背景、小工具背景、轮播图层     | 折叠组织复杂字段          |
+| `group`          | 导航高级子菜单、首页模块、按钮列表 | 可排序多项配置            |
+| `upload`         | LOGO、封面、头像、二维码           | 上传图片或文件            |
+| `gallery`        | 幻灯片、图库                       | 多图选择                  |
+| `background`     | 页面背景、小工具背景               | 背景图、颜色、位置、尺寸  |
+| `link`           | 标题链接、菜单卡片链接             | URL、文字、打开方式       |
+| `icon`           | 菜单图标、按钮图标                 | Font Awesome 或自定义图标 |
+| `code_editor`    | 自定义 CSS/JS/HTML                 | 保存代码文本              |
+
+## 读取来源
+
+同一个字段类型在不同位置读取方式不同。先判断保存入口：
+
+| 保存入口                 | 读取方式                                                |
+| ------------------------ | ------------------------------------------------------- |
+| 主题设置 `zibll_options` | `_pz($key, $default)`                                   |
+| 主题设置数组子项         | `_pz($key, $default, $subkey)`                          |
+| 文章/页面聚合 Meta       | `zib_get_post_meta($post_id, $key, true)`               |
+| 用户聚合 Meta            | `zib_get_user_meta($user_id, $key, true)`               |
+| Term 聚合 Meta           | `zib_get_term_meta($term_id, $key, true)`               |
+| 菜单项配置               | `zib_menu_pz($item_id, $key, $default)`                 |
+| CSF serialize prefix     | `get_post_meta()` 或 `get_term_meta()` 先读 prefix 数组 |
+| 小工具实例               | `$instance[$key]`                                       |
+
+## switcher
+
+开关字段：
+
+```php
+array(
+    'id'      => 'post_article_s',
+    'type'    => 'switcher',
+    'title'   => __('允许前台投稿', 'zib_language'),
+    'default' => true,
+)
+```
+
+主题设置读取：
+
+```php
+if (!_pz('post_article_s')) {
+    return;
+}
+```
+
+switcher 在不同上下文可能保存为 `true`、`1`、`on` 或空值。主题源码常用 `!= ''` 做依赖判断，前台逻辑优先按 truthy 判断。
+
+## text 和 textarea
+
+文本字段：
+
+```php
+array(
+    'id'    => 'ajax_trigger',
+    'type'  => 'text',
+    'title' => __('加载更多按钮文案', 'zib_language'),
+)
+```
+
+读取：
+
+```php
+$text = _pz('ajax_trigger', __('加载更多', 'zib_language'));
+echo esc_html($text);
+```
+
+textarea 允许多行。普通说明文字用：
+
+```php
+echo nl2br(esc_html($text));
+```
+
+允许 HTML 的字段再用：
+
+```php
+echo wp_kses_post($html);
+```
+
+## palette
+
+子比大量用 `palette` 选择主题色 class：
+
+```php
+array(
+    'id'      => 'badge_class',
+    'type'    => 'palette',
+    'title'   => __('徽章背景色', 'zib_language'),
+    'default' => 'jb-red',
+    'options' => CFS_Module::zib_palette(),
+)
+```
+
+读取并输出 class：
+
+```php
+$class = zib_menu_pz($item->ID, 'badge_class', 'jb-red');
+echo '<span class="' . esc_attr($class) . '">Hot</span>';
+```
+
+`palette` 保存的是 key，不是颜色数组。不要把 `jb-red` 当作 CSS 颜色值直接写入 `style`。
+
+## upload
+
+上传字段：
+
+```php
+array(
+    'id'      => 'cover_image',
+    'type'    => 'upload',
+    'title'   => __('封面图片', 'zib_language'),
+    'library' => 'image',
+    'preview' => true,
+)
+```
+
+文章封面读取：
+
+```php
+$cover = zib_get_post_meta($post_id, 'cover_image', true);
+if ($cover) {
+    echo '<img src="' . esc_url($cover) . '" alt="">';
+}
+```
+
+用户头像字段会同时保存 URL 和附件 ID：
+
+```php
+$avatar    = zib_get_user_meta($user_id, 'custom_avatar', true);
+$avatar_id = zib_get_user_meta($user_id, 'custom_avatar_id', true);
+```
+
+字段返回值要看具体配置。输出前先判断是字符串、数组还是 ID。
+
+## link
+
+链接字段常用于菜单卡片、小工具标题按钮：
+
+```php
+array(
+    'id'           => 'link',
+    'type'         => 'link',
+    'add_title'    => __('添加链接', 'zib_language'),
+    'edit_title'   => __('编辑链接', 'zib_language'),
+    'remove_title' => __('删除链接', 'zib_language'),
+)
+```
+
+读取：
+
+```php
+$link   = !empty($item['link']) && is_array($item['link']) ? $item['link'] : array();
+$url    = !empty($link['url']) ? $link['url'] : '';
+$text   = !empty($link['text']) ? $link['text'] : '';
+$target = !empty($link['target']) && $link['target'] === '_blank' ? ' target="_blank"' : '';
+
+if ($url) {
+    echo '<a href="' . esc_url($url) . '"' . $target . '>' . esc_html($text) . '</a>';
+}
+```
+
+## group
+
+导航高级子菜单、首页模块、小工具列表经常使用 `group`：
+
+```php
+array(
+    'id'                     => 'items',
+    'type'                   => 'group',
+    'accordion_title_number' => '1',
+    'button_title'           => __('添加图文卡片', 'zib_language'),
+    'fields'                 => array(
+        array(
+            'id'   => 'title',
+            'type' => 'text',
+        ),
+        array(
+            'id'      => 'img',
+            'type'    => 'upload',
+            'library' => 'image',
+        ),
+        array(
+            'id'   => 'link',
+            'type' => 'link',
+        ),
+    ),
+)
+```
+
+读取：
+
+```php
+$opts  = zib_menu_pz($item->ID, 'graphic_card_opts', array());
+$items = !empty($opts['items']) && is_array($opts['items']) ? $opts['items'] : array();
+
+foreach ($items as $card) {
+    $title = !empty($card['title']) ? $card['title'] : '';
+    $img   = !empty($card['img']) ? $card['img'] : '';
+}
+```
+
+所有 `group` 读取前都要 `is_array()`，避免旧数据、空值或错误配置造成警告。
+
+## fieldset
+
+`fieldset` 把一组字段保存到同一个数组里：
+
+```php
+array(
+    'id'     => 'graphic_card_opts',
+    'type'   => 'fieldset',
+    'fields' => array(
+        array(
+            'id'   => 'items',
+            'type' => 'group',
+        ),
+    ),
+)
+```
+
+读取：
+
+```php
+$opts = zib_menu_pz($item->ID, 'graphic_card_opts', array());
+$opts = is_array($opts) ? $opts : array();
+```
+
+## accordion
+
+小工具背景使用 `accordion` 分日间和夜间：
+
+```php
+array(
+    'id'         => 'layout_bg',
+    'type'       => 'accordion',
+    'title'      => __('区块背景', 'zib_language'),
+    'accordions' => array(
+        array(
+            'title'  => __('日间模式背景', 'zib_language'),
+            'fields' => array(
+                array(
+                    'id'   => 'img_white',
+                    'type' => 'background',
+                ),
+            ),
+        ),
+        array(
+            'title'  => __('夜间模式背景', 'zib_language'),
+            'fields' => array(
+                array(
+                    'id'   => 'img_dark',
+                    'type' => 'background',
+                ),
+            ),
+        ),
+    ),
+)
+```
+
+读取：
+
+```php
+$layout_bg = !empty($instance['layout_bg']) && is_array($instance['layout_bg']) ? $instance['layout_bg'] : array();
+$white_bg  = !empty($layout_bg['img_white']) ? $layout_bg['img_white'] : array();
+```
+
+## background
+
+`background` 返回多个 CSS 子属性：
+
+```php
+$bg = !empty($instance['layout_bg']['img_white']) ? $instance['layout_bg']['img_white'] : array();
+
+$color = !empty($bg['background-color']) ? $bg['background-color'] : '';
+$image = !empty($bg['background-image']) ? $bg['background-image'] : '';
+```
+
+子比小工具已经用 `CSF_Widget::wrap_attributes()` 处理背景变量。普通输出场景不要直接拼未转义的 `style`。
+
+## select
+
+选择字段可以选择文章、分类、用户，也可以写固定 options：
+
+```php
+array(
+    'id'          => 'post_ids',
+    'type'        => 'select',
+    'title'       => __('选择文章', 'zib_language'),
+    'options'     => 'posts',
+    'chosen'      => true,
+    'multiple'    => true,
+    'sortable'    => true,
+    'placeholder' => __('请选择文章', 'zib_language'),
+)
+```
+
+多选读取：
+
+```php
+$post_ids = _pz('post_ids', array());
+$post_ids = is_array($post_ids) ? array_map('intval', $post_ids) : array();
+```
+
+单选读取：
+
+```php
+$orderby = _pz('posts_orderby', 'date');
+```
+
+## code_editor
+
+代码编辑字段用于 CSS、JS、HTML、JSON：
+
+```php
+array(
+    'id'       => 'custom_css',
+    'type'     => 'code_editor',
+    'title'    => __('自定义 CSS', 'zib_language'),
+    'settings' => array(
+        'mode' => 'css',
+    ),
+)
+```
+
+输出 CSS：
+
+```php
+$css = _pz('custom_css');
+if ($css) {
+    echo '<style>' . wp_strip_all_tags($css) . '</style>';
+}
+```
+
+HTML 字段要用白名单：
+
+```php
+echo wp_kses_post($html);
+```
+
+JS 字段不要随意开放给普通用户。
+
+## 输出转义
+
+按输出位置选择转义函数：
+
+| 输出位置      | 函数                                 |
+| ------------- | ------------------------------------ |
+| 文本节点      | `esc_html()`                         |
+| HTML 属性     | `esc_attr()`                         |
+| URL           | `esc_url()`                          |
+| 允许部分 HTML | `wp_kses_post()`                     |
+| 整数          | `(int)` 或 `intval()`                |
+| CSS class     | `esc_attr()`，并尽量来自固定 options |
+| 数组          | 先 `is_array()`，再逐项处理          |
+
+字段越复杂，越不能直接 `echo`。

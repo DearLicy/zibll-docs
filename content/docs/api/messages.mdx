@@ -1,0 +1,363 @@
+---
+title: 消息通知
+description: 按子比主题源码梳理站内消息、私信、微信模板消息、业务通知、Ajax 动作和消息中心扩展点。
+---
+
+## 模块入口
+
+消息模块入口在 `inc/functions/message/functions.php`。它加载消息类、私信类、用户消息页面、Ajax、后台页面和微信模板消息能力。
+
+| 目录                                                      | 作用                 |
+| --------------------------------------------------------- | -------------------- |
+| `inc/functions/message/class/message-class.php`           | 站内消息类 `ZibMsg`  |
+| `inc/functions/message/class/private-class.php`           | 私信类 `Zib_Private` |
+| `inc/functions/message/functions/new.php`                 | 新消息创建与业务封装 |
+| `inc/functions/message/functions/ajax.php`                | 消息 Ajax 动作       |
+| `inc/functions/message/functions/user.php`                | 用户消息相关展示     |
+| `inc/functions/message/functions/wechat-template-msg.php` | 微信模板消息         |
+| `inc/functions/message/page/msg-center.php`               | 消息中心页面         |
+| `inc/functions/message/functions/admin.php`               | 后台管理入口         |
+
+消息中心是前台路由：
+
+```php
+add_action('generate_rewrite_rules', 'zibmsg_rewrite_rules');
+add_filter('query_vars', 'zibmsg_query_vars');
+add_action('template_redirect', 'zibmsg_load_template', 5);
+add_action('pre_get_posts', 'zibmsg_pre_get_posts');
+add_action('ajax_get_current_user', 'zibmsg_auto_clear');
+```
+
+模板 `inc/functions/message/page/msg-center.php` 会触发：
+
+```php
+do_action('locate_template_' . $page_type);
+do_action($page_type . '_page_header');
+do_action($page_type . '_page_content');
+do_action($page_type . '_page_footer');
+```
+
+消息中心的 `$page_type` 是 `msg_center`，所以可用入口包括 `locate_template_msg_center`、`msg_center_page_header`、`msg_center_page_content`、`msg_center_page_footer`。
+
+## 消息数据结构
+
+站内消息类是 `ZibMsg`。创建或更新消息都走 `ZibMsg::update($values)`，默认字段如下：
+
+```php
+$defaults = array(
+    'send_user'     => '',
+    'receive_user'  => '',
+    'type'          => '',
+    'title'         => '',
+    'content'       => '',
+    'create_time'   => current_time('mysql'),
+    'modified_time' => current_time('mysql'),
+    'parent'        => '',
+    'status'        => '',
+    'meta'          => '',
+    'other'         => '',
+);
+```
+
+`meta` 和 `other` 会用 `maybe_serialize()` 保存，读取单条消息时再反序列化。结构化数据优先放到 `meta` 或 `other`，不要把数组拼进 `content`。
+
+新增系统消息示例：
+
+```php
+function zib_docs_add_system_message($user_id, $post_id)
+{
+    if (!$user_id || !$post_id || !class_exists('ZibMsg')) {
+        return false;
+    }
+
+    return ZibMsg::update(array(
+        'send_user'    => 0,
+        'receive_user' => $user_id,
+        'type'         => 'system',
+        'title'        => __('文章状态更新', 'zib_language'),
+        'content'      => sprintf(__('你的文章《%s》状态已更新。', 'zib_language'), get_the_title($post_id)),
+        'meta'         => array(
+            'post_id' => $post_id,
+        ),
+    ));
+}
+```
+
+`ZibMsg::update()` 提供这些 Hook：
+
+```php
+$values = apply_filters('zib_add_message_values', $values);
+do_action('zib_update_message', $values);
+do_action('zib_add_message', $values);
+```
+
+状态变更和已读也有 Hook：
+
+```php
+do_action('zib_message_set_status', $id, $values);
+do_action('zib_message_set_status_batch', $where, $values);
+do_action('zib_message_readed', $id, $_user_id);
+do_action('zib_message_all_readed', $where, $user_id);
+```
+
+## 业务通知来源
+
+源码里已有许多业务 Hook 会自动创建消息，集中在 `inc/functions/message/functions/new.php`：
+
+| Hook                                     | 消息场景                                 |
+| ---------------------------------------- | ---------------------------------------- |
+| `comment_unapproved_to_approved`         | 评论审核通过                             |
+| `comment_post`                           | 新评论、回复父评论                       |
+| `new_posts_pending`                      | 投稿待审核通知管理员                     |
+| `pending_to_publish`                     | 投稿发布通知作者                         |
+| `bbs_posts_delete`                       | 论坛帖子删除通知                         |
+| `bbs_add_posts`                          | 论坛新帖待审核通知管理员、版块作者和版主 |
+| `answer_adopted`                         | 论坛回答被采纳通知回答用户               |
+| `comment_is_hot`                         | 论坛评论成为热评通知评论用户             |
+| `posts_is_hot`                           | 论坛帖子成为热门通知帖子作者             |
+| `plate_is_hot`                           | 论坛版块成为热门通知版块作者             |
+| `bbs_posts_essence_set`                  | 论坛帖子设为精华通知帖子作者             |
+| `publish_to_pending`                     | 文章退回待审核                           |
+| `zib_ajax_frontend_links_submit_success` | 友情链接提交                             |
+| `like-posts`                             | 文章被点赞                               |
+| `like-comment`                           | 评论被点赞                               |
+| `favorite-posts`                         | 文章被收藏                               |
+| `follow-user`                            | 用户被关注                               |
+| `zib_user_bind_phone`                    | 手机绑定成功                             |
+| `zib_user_bind_email`                    | 邮箱绑定成功                             |
+
+如果只是给已有业务补一条通知，优先挂这些业务 Hook。不要在前端点击事件里直接发消息，否则容易绕过权限、重复发送或漏掉后台操作。
+
+## 消息分类与 Tab
+
+消息分类由 `zib_get_msg_cat()` 返回，并经过 `message_cats` 过滤：
+
+```php
+return apply_filters('message_cats', $cat_type);
+```
+
+消息中心主区域来自 `inc/functions/message/functions/user.php`：
+
+```php
+$tabs_array = apply_filters('mag_ctnter_main_tabs_array', $tabs_array);
+add_filter('main_msg_tab_content_news', 'zibmsg_page_main_tab_content_news');
+add_filter('main_msg_tab_content_posts', 'zibmsg_main_msg_tab_content_posts');
+add_filter('main_msg_tab_content_like', 'zibmsg_main_msg_tab_content_like');
+add_filter('main_msg_tab_content_system', 'zibmsg_main_msg_tab_content_system');
+add_filter('main_msg_tab_content_private', 'zibmsg_main_msg_tab_content_private');
+```
+
+注意源码里的主 Tab filter 名是 `mag_ctnter_main_tabs_array`。
+
+新增消息分类时要同时补分类、Tab 和内容：
+
+```php
+function zib_docs_message_cats($cat_type)
+{
+    $cat_type['docs'] = __('开发通知', 'zib_language');
+    return $cat_type;
+}
+add_filter('message_cats', 'zib_docs_message_cats');
+
+function zib_docs_msg_tabs($tabs_array)
+{
+    $tabs_array['docs'] = array(
+        'title' => __('开发通知', 'zib_language'),
+        'icon'  => 'fa fa-code',
+    );
+
+    return $tabs_array;
+}
+add_filter('mag_ctnter_main_tabs_array', 'zib_docs_msg_tabs');
+
+function zib_docs_main_msg_tab_content_docs()
+{
+    return zib_get_user_cat_msg('docs');
+}
+add_filter('main_msg_tab_content_docs', 'zib_docs_main_msg_tab_content_docs');
+```
+
+## 消息 Ajax 动作
+
+消息 Ajax 在 `inc/functions/message/functions/ajax.php`：
+
+| Ajax action            | 函数                              | 用途           |
+| ---------------------- | --------------------------------- | -------------- |
+| `user_news_msg`        | `zib_ajax_user_news_msg()`        | 顶部新消息列表 |
+| `newmsg_drop`          | 匿名回调                          | 新消息下拉     |
+| `user_msg`             | `zib_ajax_user_msg()`             | 消息列表       |
+| `message_shield`       | `zib_ajax_user_message_shield()`  | 消息屏蔽设置   |
+| `user_msg_content`     | `zib_ajax_user_msg_content()`     | 消息详情       |
+| `msg_all_readed`       | `zib_ajax_user_msg_all_readed()`  | 全部标记已读   |
+| `send_private`         | `zib_ajax_send_private()`         | 发送私信       |
+| `private_window_modal` | `zib_ajax_private_window_modal()` | 私信窗口弹窗   |
+| `user_private_lists`   | `zib_ajax_user_private_lists()`   | 私信会话列表   |
+| `private_window`       | `zib_ajax_private_window()`       | 私信窗口内容   |
+| `private_blacklist`    | `zib_ajax_private_blacklist()`    | 私信黑名单     |
+| `clear_user_private`   | `zib_ajax_clear_user_private()`   | 清空私信       |
+
+私信类是 `Zib_Private`。它负责会话列表、消息列表、输入框、私信按钮和窗口内容。扩展私信时要区分“站内消息”和“私信消息”：站内消息走 `ZibMsg`，私信对话走 `Zib_Private`。
+
+## 微信模板消息
+
+微信模板消息依赖公众号配置、用户绑定状态和模板配置。发送入口：
+
+```php
+zib_wechat_template_send($user_id, $type, $data, $url = '');
+zib_send_wechat_template_msg_to_admin($type, $data, $url = '');
+zib_get_user_wechat_open_id($user_id);
+zib_get_wechat_template_id($type);
+```
+
+扩展前先确认：
+
+1. 公众号配置是否完整。
+2. 用户是否有 openid。
+3. 模板 ID 是否正确。
+4. 发送频率和失败日志是否可控。
+5. 是否需要与站内消息同时发送。
+
+微信模板消息应该作为站内消息的补充，而不是替代。模板消息失败不应中断订单、评论、绑定邮箱等主流程。
+
+后台入口在“用户互动 -> 微信通知”。字段结构是：
+
+| 字段                    | 说明                                                     |
+| ----------------------- | -------------------------------------------------------- |
+| `wechat_template_msg_s` | 总开关，关闭后 `zib_wechat_template_send()` 直接返回错误 |
+| `wechat_template_ids`   | 模板消息配置集合                                         |
+| `{type}_s`              | 某一种模板消息是否启用                                   |
+| `{type}`                | 该类型对应的公众号模板 ID                                |
+| `{type}_keys`           | 主题业务字段到公众号模板字段名的映射                     |
+
+后台说明里有三个重要前提：微信公众号登录必须正常；公众号必须开通模板消息能力；只有绑定了本站微信公众号登录且已关注的用户才能收到通知。主题读取用户 openid 的方式是：
+
+```php
+function zib_get_user_wechat_open_id($user_id)
+{
+    return get_user_meta($user_id, 'oauth_weixingzh_openid', true);
+}
+```
+
+所以微信模板消息和“微信公众号登录”不是两套独立配置。用户没有 `oauth_weixingzh_openid` 时，即使站内消息和邮件能发送，微信模板消息也会返回“用户未绑定微信”。
+
+模板类型和默认参数来自 `CFS_Module::wechat_template_msg_args()`：
+
+| 类型                               | 场景                       |
+| ---------------------------------- | -------------------------- |
+| `shop_notify_shipping_to_author`   | 通知商家发货               |
+| `shop_express_shipping`            | 快递发货通知用户           |
+| `shop_after_sale_to_author`        | 用户申请售后通知商家       |
+| `shop_after_sale_wait_user_return` | 售后等待用户发货           |
+| `shop_after_sale_end`              | 售后订单处理完成           |
+| `payment_order`                    | 新订单通知用户             |
+| `payment_order_admin`              | 新订单通知管理员           |
+| `payment_order_to_income`          | 创作分成通知作者           |
+| `payment_order_to_referrer`        | 推荐佣金通知推荐人         |
+| `apply_withdraw_admin`             | 用户申请提现通知管理员     |
+| `withdraw_process`                 | 提现处理后通知用户         |
+| `auth_apply_admin`                 | 用户提交身份认证通知管理员 |
+| `auth_apply_process`               | 身份认证处理后通知用户     |
+| `report_user_admin`                | 收到举报后通知管理员       |
+| `report_process`                   | 处理用户举报后通知举报人   |
+| `bind_phone`                       | 绑定或修改手机号通知用户   |
+| `bind_email`                       | 绑定或修改邮箱通知用户     |
+| `comment_to_postauthor`            | 新评论通知文章作者         |
+| `comment_to_parent`                | 评论有新回复通知用户       |
+
+发送流程由 `zib_wechat_template_send()` 统一处理：
+
+1. 检查 `wechat_template_msg_s`。
+2. 读取 `get_oauth_config('weixingzh')`，要求 `appid` 和 `appkey` 存在。
+3. 通过 `zib_get_wechat_template_id($type)` 检查该类型开关和模板 ID。
+4. 通过 `zib_get_user_wechat_open_id($user_id)` 获取接收用户 openid。
+5. 用 `zib_wechat_template_data_handle($type, $data)` 做参数映射和长度处理。
+6. 加载 `oauth/sdk/weixingzh.php`，调用公众号 SDK 的 `sendTemplateMsg()`。
+
+参数映射有一个容易忽略的细节：如果后台给某个业务字段配置了模板字段名，就按配置写入；如果没有配置，则按 `keyword1`、`keyword2` 顺序补齐。模板字段名包含 `thing` 时，主题会把超过 19 个字符的内容截断为前 16 个字符加省略号：
+
+```php
+function zib_docs_wechat_template_data($order)
+{
+    return array(
+        'name'  => get_the_title($order->post_id),
+        'price' => zibpay_format_local_price_text($order->price),
+        'time'  => current_time('Y-m-d H:i:s'),
+        'num'   => $order->order_num,
+    );
+}
+```
+
+后台配置里如果把 `name` 映射到 `thing1`，长商品名会被主题截断，避免公众号模板接口拒绝过长 `thing` 字段。
+
+给所有管理员发送模板消息使用：
+
+```php
+function zib_docs_notice_admins($post_id, $user_id)
+{
+    $data = array(
+        'name' => get_the_title($post_id),
+        'time' => current_time('Y-m-d H:i:s'),
+        'user' => get_the_author_meta('display_name', $user_id),
+    );
+
+    zib_send_wechat_template_msg_to_admin('auth_apply_admin', $data, admin_url('users.php'));
+}
+```
+
+`zib_send_wechat_template_msg_to_admin()` 会遍历 `zib_get_admin_user_ids()`，对每个管理员调用 `zib_wechat_template_send()`。这意味着管理员也必须绑定公众号 openid，否则不会收到微信通知。
+
+后台测试入口是 Ajax action：
+
+```php
+add_action('wp_ajax_test_wechat_template_test', 'zib_ajax_test_wechat_template_test');
+```
+
+测试只允许超级管理员执行，会检查模板消息总开关、单个类型开关、模板 ID、微信公众号登录配置，然后按测试类型构造一组示例数据发给当前登录管理员。排查模板消息时优先用后台测试确认“公众号配置、模板 ID、参数名、当前管理员 openid”四件事，再回到具体业务 Hook。
+
+主题内置调用点分布较广：
+
+| 模块         | 典型类型                                                                                                                                          |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 评论通知     | `comment_to_postauthor`、`comment_to_parent`                                                                                                      |
+| 账号安全     | `bind_phone`、`bind_email`                                                                                                                        |
+| 用户认证     | `auth_apply_admin`、`auth_apply_process`                                                                                                          |
+| 举报与禁封   | `report_user_admin`、`report_process`                                                                                                             |
+| 商城订单     | `payment_order`、`payment_order_admin`、`payment_order_to_income`、`payment_order_to_referrer`                                                    |
+| 商城发货售后 | `shop_notify_shipping_to_author`、`shop_express_shipping`、`shop_after_sale_to_author`、`shop_after_sale_wait_user_return`、`shop_after_sale_end` |
+
+商城用户中心订单展示、联系商家、收货地址修改申请，以及商城邮件、站内信和微信模板通知矩阵见 [商城用户中心与消息通知](/docs/api/shop-user-center-messages)。
+
+新增业务通知时，不建议直接在任意模板里远程请求公众号接口。更稳的方式是先完成站内消息或业务状态写入，再在同一个业务完成 Hook 中调用 `zib_wechat_template_send()`，并忽略失败返回或记录日志：
+
+```php
+function zib_docs_send_task_wechat_notice($user_id, $task_title)
+{
+    if (!$user_id || !$task_title) {
+        return;
+    }
+
+    $data = array(
+        'name' => $task_title,
+        'time' => current_time('Y-m-d H:i:s'),
+        'desc' => __('任务状态已更新', 'zib_language'),
+    );
+
+    $send = zib_wechat_template_send($user_id, 'report_process', $data, zib_get_user_center_url('msg'));
+
+    if (!empty($send['error'])) {
+        error_log('docs task wechat notice failed: ' . $send['msg']);
+    }
+}
+```
+
+新增模板类型需要改后台类型表，属于主题能力扩展，不只是调用发送函数。要补齐类型 key、后台开关、模板 ID、参数 key 配置和业务调用，否则后台不会出现该模板，也无法通过 `zib_get_wechat_template_id($type)`。
+
+## 注意事项
+
+- 不要把敏感订单信息、隐私资料直接放进公开可见消息。
+- 不要在高频 Hook 中同步远程消息，必要时写队列。
+- 消息发送失败要有日志，不要影响主流程。
+- 批量通知要限制频率，避免拖慢请求。
+- 私信和系统通知要区分权限和可见范围。
+- 新增消息分类时，要同时补 `message_cats`、消息中心 Tab 和读取条件。
+- `content` 会经过表情、图片、代码格式化，原始用户输入仍然要在写入前控制长度和格式。

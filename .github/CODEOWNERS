@@ -1,0 +1,11 @@
+# Default reviewers for the documentation and its release automation.
+* @DearLicy
+
+/.github/ @DearLicy
+/app/ @DearLicy
+/components/ @DearLicy
+/content/docs/ @DearLicy
+/lib/ @DearLicy
+/packages/zibll-docs-mcp/ @DearLicy
+/scripts/ @DearLicy
+/workers/ @DearLicy

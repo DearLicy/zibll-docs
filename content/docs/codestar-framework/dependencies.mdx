@@ -1,0 +1,280 @@
+---
+title: 依赖条件
+description: 说明子比主题 CSF dependency 写法、多条件、visible 模式、group 内依赖和保存读取注意事项。
+---
+
+## dependency 的作用
+
+`dependency` 用来根据其它字段的值控制当前字段显示。子比主题后台配置很多，如果不做依赖条件，设置页会非常臃肿。
+
+最常见写法：
+
+```php
+array(
+    'id'         => 'notice_text',
+    'type'       => 'textarea',
+    'title'      => __('提示文字', 'zib_language'),
+    'dependency' => array('enabled', '!=', ''),
+)
+```
+
+意思是：`enabled` 不为空时显示 `notice_text`。
+
+## 子比源码常见写法
+
+开关控制子字段：
+
+```php
+'dependency' => array('header_slider_show', '!=', ''),
+```
+
+多个字段同时判断：
+
+```php
+'dependency' => array('submenu_s|submenu_type', '!=|==', '|graphic_card'),
+```
+
+可见但不完全隐藏：
+
+```php
+'dependency' => array('featured_video', '!=', '', '', 'visible'),
+```
+
+用户权限或会员设置常见：
+
+```php
+'dependency' => array('allow_view', '==', 'roles'),
+```
+
+这些写法都能在 `inc/options/metabox-options.php`、`inc/options/admin-options.php`、`inc/widgets/*.php` 中看到。
+
+## 参数结构
+
+完整结构可以理解为：
+
+```txt
+字段名, 比较符, 目标值, 关系, 显示模式
+```
+
+示例：
+
+```php
+'dependency' => array('pay_user_vip_1_s', '!=', '', 'all', 'visible'),
+```
+
+含义：
+
+| 位置 | 值                 | 说明        |
+| ---- | ------------------ | ----------- |
+| 1    | `pay_user_vip_1_s` | 依赖字段 id |
+| 2    | `!=`               | 比较符      |
+| 3    | `''`               | 目标值      |
+| 4    | `all`              | 多条件关系  |
+| 5    | `visible`          | 显示模式    |
+
+多数场景只写前三项即可。
+
+## 常见比较符
+
+| 写法                                | 含义           |
+| ----------------------------------- | -------------- |
+| `array('enabled', '!=', '')`        | 不为空         |
+| `array('type', '==', 'post')`       | 等于指定字符串 |
+| `array('layout', '!=', 'grid')`     | 不等于         |
+| `array('type', 'any', 'post,page')` | 命中多个值之一 |
+| `array('count', '>=', '2')`         | 大于等于       |
+| `array('count', '<=', '10')`        | 小于等于       |
+
+switcher 字段优先用：
+
+```php
+'dependency' => array('enabled', '!=', ''),
+```
+
+因为开关在不同字段上下文里可能是 `true`、`1`、`on` 或空字符串。
+
+## 多条件
+
+子比源码用 `|` 把多个字段、比较符、目标值对应起来：
+
+```php
+'dependency' => array('submenu_s|submenu_type', '!=|==', '|graphic_card'),
+```
+
+拆开看：
+
+```txt
+submenu_s != ''
+submenu_type == graphic_card
+```
+
+注意目标值第一段为空，所以写成：
+
+```txt
+|graphic_card
+```
+
+如果字段名、比较符、目标值数量对不上，依赖就会失效。
+
+## visible 模式
+
+普通 dependency 会隐藏字段。`visible` 模式更像“不可用或弱显示”，子比在某些媒体字段旁边会使用它：
+
+```php
+'dependency' => array('featured_video', '!=', '', '', 'visible'),
+```
+
+适合场景：
+
+- 希望用户知道这个字段存在。
+- 字段在条件不满足时仍保持布局提示。
+- 不希望隐藏造成后台布局跳动。
+
+如果只是简单开关控制，普通隐藏更清爽。
+
+## 同一上下文原则
+
+dependency 只能稳定依赖同一个 CSF 表单上下文里的字段：
+
+| 场景                 | 可依赖 |
+| -------------------- | ------ |
+| 同一个 section       | 可以   |
+| 同一个 metabox       | 可以   |
+| 同一个 fieldset 内   | 可以   |
+| 同一个 group item 内 | 可以   |
+| 跨 option prefix     | 不可靠 |
+| 跨后台页面           | 不可靠 |
+| 前台运行时状态       | 不适合 |
+
+如果字段是否出现取决于主题开关，应在 PHP 构建字段时判断：
+
+```php
+$fields = array();
+
+if (_pz('shop_s')) {
+    $fields[] = array(
+        'id'    => 'shop_cat',
+        'type'  => 'select',
+        'title' => __('商品分类', 'zib_language'),
+    );
+}
+```
+
+## group 内依赖
+
+group 子字段可以依赖同一条 item 内的其它子字段：
+
+```php
+array(
+    'id'     => 'items',
+    'type'   => 'group',
+    'fields' => array(
+        array(
+            'id'      => 'img_icon',
+            'type'    => 'radio',
+            'default' => 'icon',
+            'options' => array(
+                'icon' => __('图标', 'zib_language'),
+                'img'  => __('图片', 'zib_language'),
+            ),
+        ),
+        array(
+            'dependency' => array('img_icon', '==', 'icon'),
+            'id'         => 'icon',
+            'type'       => 'icon',
+        ),
+        array(
+            'dependency' => array('img_icon', '==', 'img'),
+            'id'         => 'img',
+            'type'       => 'upload',
+            'library'    => 'image',
+        ),
+    ),
+)
+```
+
+不要让 group 子字段依赖 group 外部同名字段。字段 id 重名时，前端脚本很容易匹配错。
+
+## 隐藏不等于删除
+
+字段被隐藏后，旧值通常还在数据库中。前台读取时必须先判断总开关。
+
+主题设置：
+
+```php
+if (!_pz('header_slider_show')) {
+    return;
+}
+
+$slide = _pz('header_slider', array());
+```
+
+菜单项：
+
+```php
+if (!zib_menu_pz($item->ID, 'submenu_s')) {
+    return;
+}
+
+$type = zib_menu_pz($item->ID, 'submenu_type', 'graphic_card');
+```
+
+小工具：
+
+```php
+if (empty($instance['show_module'])) {
+    return;
+}
+
+$items = !empty($instance['items']) && is_array($instance['items']) ? $instance['items'] : array();
+```
+
+## 保存注意
+
+隐藏字段可能不会提交。ZCSF 手动保存时如果只处理 `isset($_POST[$field])`，关闭状态可能不会写入空值：
+
+```php
+foreach ($fields as $field) {
+    if (isset($_POST[$field])) {
+        zib_update_post_meta($post_id, $field, $_POST[$field]);
+    }
+}
+```
+
+对开关字段可以在保存时补默认值：
+
+```php
+$enabled = !empty($_POST['enabled']) ? 1 : 0;
+zib_update_post_meta($post_id, 'enabled', $enabled);
+```
+
+对数组字段可以规范化：
+
+```php
+$items = !empty($_POST['items']) && is_array($_POST['items']) ? $_POST['items'] : array();
+```
+
+## 排查清单
+
+字段不显示：
+
+1. 依赖字段 id 是否写对。
+2. 依赖字段和目标字段是否在同一个表单上下文。
+3. switcher 是否应该用 `!= ''`。
+4. 多条件的字段名、比较符、目标值数量是否一致。
+5. group 内是否有重名字段。
+
+字段显示但前台无效：
+
+1. 保存位置是否正确。
+2. 隐藏旧值是否还在。
+3. 前台是否先判断总开关。
+4. 数组字段是否做了 `is_array()`。
+5. serialize prefix 是否被当成单独字段读取。
+
+后台样式异常：
+
+1. 是否存在无效字段类型。
+2. `dependency` 是否写成了不完整数组。
+3. 依赖字段是否在当前页面被条件移除了。
+4. 浏览器控制台是否有 CSF 脚本错误。

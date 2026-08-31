@@ -1,0 +1,601 @@
+---
+title: 论坛小工具与侧栏
+description: 蒸馏子比主题论坛 widgets 模块的侧栏注册、页面挂载、版块小工具、帖子列表、话题列表、Ajax 加载和 Tab 切换写法。
+---
+
+## 模块边界
+
+论坛小工具不是通用文章小工具的简单复用。它依赖论坛模块的对象、查询、权限和前端列表协议，入口在：
+
+```txt
+inc/functions/bbs/widgets/widgets.php
+inc/functions/bbs/widgets/widgets-plate.php
+inc/functions/bbs/widgets/widgets-posts.php
+inc/functions/bbs/widgets/widgets-term.php
+inc/functions/bbs/widgets/widgets-other.php
+```
+
+`widgets.php` 负责引入子文件和注册论坛页面侧栏；`widgets-plate.php` 负责版块信息、版主和版块列表；`widgets-posts.php` 负责帖子列表和多 Tab 帖子列表；`widgets-term.php` 负责话题列表。
+
+论坛小工具只有在论坛模块开启后才会随 `inc/functions/bbs/bbs.php` 加载。扩展时不要假设 `zib_bbs()`、`plate`、`forum_post` 或论坛模板 Hook 在所有站点都存在。
+
+## 侧栏注册
+
+论坛侧栏由 `zib_bbs_register_sidebar()` 在 `widgets_init` 中注册：
+
+```php
+add_action('widgets_init', 'zib_bbs_register_sidebar');
+```
+
+它把页面和位置组合成侧栏 id：
+
+| 页面 key | 位置 key         | 生成示例                   |
+| -------- | ---------------- | -------------------------- |
+| `home`   | `top_content`    | `bbs_home_top_content`     |
+| `home`   | `bottom_content` | `bbs_home_bottom_content`  |
+| `plate`  | `sidebar`        | `bbs_plate_sidebar`        |
+| `plate`  | `top_content`    | `bbs_plate_top_content`    |
+| `plate`  | `bottom_content` | `bbs_plate_bottom_content` |
+| `posts`  | `sidebar`        | `bbs_posts_sidebar`        |
+| `posts`  | `top_content`    | `bbs_posts_top_content`    |
+| `posts`  | `bottom_content` | `bbs_posts_bottom_content` |
+
+完整位置还包括：
+
+| 位置 key         | 说明                               |
+| ---------------- | ---------------------------------- |
+| `sidebar`        | 侧边栏，宽度较窄，不适合大尺寸模块 |
+| `top_fluid`      | 顶部全宽度                         |
+| `top_content`    | 主内容上方                         |
+| `bottom_content` | 主内容下方                         |
+| `bottom_fluid`   | 底部全宽度                         |
+
+发帖页额外注册：
+
+```txt
+bbs_new_posts_sidebar_top
+bbs_new_posts_sidebar_bottom
+```
+
+新增论坛页面容器时，优先复用 `zib_register_sidebar($sidebars)`，不要直接手写另一套 `register_sidebar()` 外壳。这样才能保留主题小工具的统一 `.zib-widget` 结构、自定义预览和标题样式。
+
+## 页面挂载
+
+论坛小工具侧栏通过论坛模板 Hook 挂载，而不是直接写在模板固定位置：
+
+```php
+add_action('bbs_plate_page_content', function () {
+    dynamic_sidebar('bbs_plate_top_content');
+}, 1);
+
+add_action('bbs_plate_page_content', function () {
+    dynamic_sidebar('bbs_plate_bottom_content');
+}, 99);
+
+add_action('bbs_home_tab_content_top', function () {
+    dynamic_sidebar('bbs_home_top_content');
+});
+
+add_action('bbs_home_tab_content_bottom', function () {
+    dynamic_sidebar('bbs_home_bottom_content');
+});
+
+add_action('bbs_posts_page_content_top', function () {
+    dynamic_sidebar('bbs_posts_top_content');
+});
+
+add_action('bbs_posts_page_content_bottom', function () {
+    dynamic_sidebar('bbs_posts_bottom_content');
+});
+```
+
+这说明扩展论坛页面时可以先找 `bbs_*_page_*`、`bbs_home_tab_content_*`、`bbs_posts_page_content_*` 这些 Hook。只有需要改变页面结构时，才考虑模板覆盖。
+
+## 模板骨架与侧栏 class
+
+论坛首页、版块页、帖子页最终都会进入 `zib_bbs_page_template($type)`。它不是只输出主内容，而是固定分成全宽顶部、页面头部、容器、主内容、侧栏、全宽底部和页面底部：
+
+```php
+function zib_bbs_page_template($type = 'home')
+{
+    do_action('bbs_locate_template');
+    do_action('bbs_locate_template_' . $type);
+
+    if (!_pz('bbs_s', true)) {
+        bbs_locate_template_nocan_edit();
+    }
+
+    get_header();
+    $page_type = $type;
+    ?>
+    <main id="forum">
+        <div class="fluid-widget-wrap">
+            <?php dynamic_sidebar('bbs_' . $page_type . '_top_fluid'); ?>
+        </div>
+        <?php do_action('bbs_' . $page_type . '_page_header'); ?>
+        <div class="container">
+            <div class="content-wrap">
+                <div class="content-layout">
+                    <?php do_action('bbs_' . $page_type . '_page_content'); ?>
+                </div>
+            </div>
+            <div class="<?php echo apply_filters('bbs_' . $page_type . '_sidebar_class', 'sidebar'); ?>">
+                <?php dynamic_sidebar('bbs_' . $page_type . '_sidebar'); ?>
+                <?php do_action('bbs_' . $page_type . '_page_sidebar'); ?>
+            </div>
+        </div>
+        <div class="fluid-widget-wrap">
+            <?php dynamic_sidebar('bbs_' . $page_type . '_bottom_fluid'); ?>
+        </div>
+        <?php do_action('bbs_' . $page_type . '_page_footer'); ?>
+    </main>
+    <?php
+    get_footer();
+}
+```
+
+这段结构决定了不同位置适合放什么模块：
+
+| 位置                             | 适合内容                     | 注意点                               |
+| -------------------------------- | ---------------------------- | ------------------------------------ |
+| `top_fluid` / `bottom_fluid`     | 横幅、全宽推荐、视觉模块     | 不在 `.container` 内，宽度更大       |
+| `page_header` / `page_footer`    | 页面级头尾结构               | 通过 Hook 输出，不是后台小工具位置   |
+| `top_content` / `bottom_content` | 主内容上下的列表、提示、推荐 | 跟随主内容宽度                       |
+| `sidebar`                        | 版块信息、版主、紧凑列表     | 宽度小，不适合大卡片或横向滚动大模块 |
+| `page_sidebar`                   | 代码追加的侧栏内容           | 在后台小工具之后输出                 |
+
+侧栏容器 class 可以通过 `bbs_home_sidebar_class`、`bbs_plate_sidebar_class`、`bbs_posts_sidebar_class` 调整。比如某个论坛专题页需要隐藏侧栏，应优先用页面级 Filter，而不是在模板里删掉侧栏结构：
+
+```php
+add_filter('bbs_plate_sidebar_class', 'zib_docs_bbs_plate_sidebar_class');
+
+function zib_docs_bbs_plate_sidebar_class($class)
+{
+    if (!zib_bbs_get_the_plate_id()) {
+        return $class;
+    }
+
+    return $class . ' hide-sm';
+}
+```
+
+如果是发帖编辑页，侧栏不是 `zib_bbs_page_template()` 的普通侧栏，而是 `bbs_new_posts_sidebar_top`、`bbs_new_posts_sidebar_bottom` 加 `bbs_posts_edit_page_sidebar` 组合输出。不要把发帖页扩展误挂到 `bbs_posts_sidebar`。
+
+## 版块信息小工具
+
+版块信息小工具先判断当前是否存在版块对象：
+
+```php
+function zib_bbs_widget_ui_plate_info_is_show($show_class, $args, $instance)
+{
+    $obj = zib_bbs_get_the_plate();
+    if (!$obj) {
+        return false;
+    }
+
+    return $show_class;
+}
+```
+
+渲染时仍然再次读取和判断：
+
+```php
+function zib_bbs_widget_ui_plate_info($args, $instance)
+{
+    $obj = zib_bbs_get_the_plate();
+    if (!$obj) {
+        return;
+    }
+
+    echo zib_bbs_get_plate_info_mini_box($obj, 'mb20');
+}
+```
+
+这个模式很重要：`is_show_filter` 负责避免空外壳，渲染函数负责防御异常上下文。不要只在后台说明“只能添加到版块页”，前台仍要做对象判断。
+
+## 版块头部与侧栏信息盒
+
+版块页头部 `zib_bbs_get_plate_header()` 和侧栏信息盒 `zib_bbs_get_plate_info_mini_box()` 都读同一个版块对象，但适配不同展示场景。头部用于主内容区，强调背景、标题、分区、统计、版主入口和发布按钮；侧栏信息盒用于窄栏，强调缩略图、关注、发布、统计和更多菜单。
+
+共享的数据来源包括：
+
+| 数据     | 读取函数或字段                         | 用途                     |
+| -------- | -------------------------------------- | ------------------------ |
+| 标题     | `get_the_title($plate_id)`             | 头部标题、侧栏标题       |
+| 摘要     | `get_the_excerpt($plate_id)`           | 版块说明                 |
+| 缩略图   | `zib_bbs_get_thumbnail($post)`         | 背景、封面、侧栏图       |
+| 权限徽章 | `zib_bbs_get_plate_badge_popover()`    | 发帖限制、查看限制等提示 |
+| 热门徽章 | `zib_bbs_get_hot_badge()`              | 热门版块标识             |
+| 帖子数   | `zib_bbs_get_plate_posts_cut_count()`  | 统计展示                 |
+| 回复数   | `zib_bbs_get_plate_reply_cut_count()`  | 互动统计                 |
+| 阅读数   | `zib_bbs_get_plate_views_cut_count()`  | 热度统计                 |
+| 关注数   | `zib_bbs_get_plate_follow_cut_count()` | 关注提示                 |
+
+主内容版块头部会把更多菜单和版主按钮放到同一块：
+
+```php
+$more_dropdown  = zib_bbs_get_plate_header_more_btn($plate_id, '', true);
+$moderator_btns = zib_bbs_get_plate_header_moderator_btns($post);
+$moderator_btns = $moderator_btns ? '<div class="mt10 moderator-btns em09 ">' . $moderator_btns . ' </div>' : '';
+```
+
+侧栏信息盒也复用更多菜单，但按钮组合改为发帖和关注：
+
+```php
+$follow_btn = zib_bbs_get_all_plate_follow_btn($plate_id, 'but hollow c-red', zib_get_svg('add') . $zib_bbs->plate_follow_name);
+$new_btn    = zib_bbs_get_posts_add_page_link(array('plate_id' => $plate_id), 'but hollow c-blue mr10');
+$more_dropdown = zib_bbs_get_plate_header_more_btn($plate_id);
+```
+
+更多菜单由 `zib_bbs_get_plate_more_dropdown()` 统一生成，内部按权限逐项加入创建、编辑、发帖限制、查看权限、收费关注、管理版主和删除入口。扩展版块管理菜单时，优先包装或过滤现有入口函数，不要在头部和侧栏各写一份菜单：
+
+```php
+$edit = zib_bbs_get_plate_edit_link($plate_id, false, '', zib_get_svg('set', null, 'icon mr6 fa-fw') . sprintf(__('编辑此%s', 'zib_language'), $name), 'a');
+$allow_view = zib_bbs_get_plate_allow_view_set_link($plate_id);
+$follow_pay = zib_bbs_get_plate_follow_pay_set_link($plate_id);
+```
+
+版主按钮同样有降级逻辑：有版主时显示头像和查看弹窗，没有版主时优先显示申请入口；如果当前用户有添加权限，则显示添加入口。二开时不要只判断 `moderator` meta 是否为空，还要让 `zib_bbs_get_apply_moderator_link()` 和 `zib_bbs_get_add_plate_moderator_link()` 自己处理权限与申请状态。
+
+分区和话题头部也遵循类似模式。`bbs_plate_cat_header_excerpt` 会追加分区版主入口和创建版块按钮，`bbs_forum_topic_header_excerpt` 会追加话题作者和发帖按钮：
+
+```php
+add_filter('bbs_plate_cat_header_excerpt', 'zib_bbs_plate_cat_header_excerpt_filter', 10, 2);
+add_filter('bbs_forum_topic_header_excerpt', 'zib_bbs_forum_topic_header_excerpt_filter', 10, 2);
+```
+
+因此扩展版块展示时要先判断位置：版块页头部改 `zib_bbs_get_plate_header()` 周边，版块侧栏改 `zib_bbs_get_plate_info_mini_box()` 或小工具，分区/话题头部改对应 `bbs_*_header_excerpt` Filter。
+
+## 版主列表小工具
+
+版主列表读取当前版块，再调用主题函数生成版主列表：
+
+```php
+$obj = zib_bbs_get_the_plate();
+$moderator_lists = zib_bbs_get_moderator_lists('plate', $obj);
+```
+
+按钮区遵循主题已有入口：
+
+```php
+$apply_btn = !empty($instance['apply_btn'])
+    ? zib_bbs_get_apply_moderator_link(0, 'but hollow c-blue p2-10 em09')
+    : '';
+
+if (!$apply_btn) {
+    $apply_btn = zib_bbs_get_edit_plate_moderator_link($obj->ID, 'c-blue em09');
+}
+```
+
+扩展版主相关功能时，不要自己拼接添加、编辑、申请 URL。版主申请、编辑入口背后还有权限、弹窗、Ajax 和业务状态判断。
+
+## 版块列表小工具
+
+版块列表小工具使用通用 `ajax_widget_ui` 协议延迟加载：
+
+```php
+$ias_args = array(
+    'type'   => 'ias',
+    'loader' => $placeholder,
+    'query'  => array(
+        'action' => 'ajax_widget_ui',
+        'id'     => 'zib_bbs_widget_ui_plate_lists',
+        'index'  => $index,
+    ),
+);
+
+echo zib_get_ias_ajaxpager($ias_args);
+```
+
+Ajax 回调使用保存的小工具配置生成查询参数：
+
+```php
+$posts_args = array(
+    'cat'       => $instance['cat'],
+    'filter'    => $instance['filter'],
+    'orderby'   => $instance['orderby'],
+    'showposts' => $instance['showposts'],
+);
+```
+
+渲染时根据样式分支调用主题函数：
+
+```php
+if ('card' == $style) {
+    $lists = zib_bbs_get_plate_slide_card($posts_args);
+} else {
+    $lists = '<div class="plate-lists">' . zib_bbs_get_plate_main_lists($posts_args) . '</div>';
+}
+
+zib_ajax_send_ajaxpager($lists, true);
+```
+
+字段配置里的 `cat` 使用 `options => 'categories'` 并指定 `taxonomy => 'plate_cat'`，排序选项来自 `zib_bbs_get_plate_order_options()`。新增版块列表筛选时，优先扩展查询参数和排序选项，不要绕过 `zib_bbs_get_plate_main_lists()` 重新写一套列表 HTML。
+
+## 帖子列表小工具
+
+帖子列表小工具支持“当前版块”模式：
+
+```php
+if (!empty($instance['current_plate'])) {
+    $current_plate = zib_bbs_get_the_plate_id();
+    if (!$current_plate) {
+        return false;
+    }
+}
+```
+
+渲染时把当前版块 id 带入 Ajax query：
+
+```php
+'query' => array(
+    'action'        => 'ajax_widget_ui',
+    'id'            => 'zib_bbs_widget_ui_posts_lists',
+    'index'         => $index,
+    'current_plate' => $current_plate,
+),
+```
+
+Ajax 回调再合并配置：
+
+```php
+$posts_args = array(
+    'plate'         => $instance['include_plate'] ?? '',
+    'plate_exclude' => $instance['exclude_plate'] ?? '',
+    'topic'         => $instance['include_topic'] ?? '',
+    'tag'           => $instance['include_tag'] ?? '',
+    'orderby'       => $instance['orderby'] ?? 'date',
+    'bbs_type'      => $instance['bbs_type'] ?? '',
+    'filter'        => $instance['filter'] ?? array(),
+    'allow_view'    => $instance['allow_view'] ?? array(),
+    'paged'         => $paged,
+    'paged_size'    => $paged_size,
+);
+
+if (!empty($_REQUEST['current_plate'])) {
+    $posts_args['plate'] = $_REQUEST['current_plate'];
+}
+```
+
+这里可以看到一个边界：前端请求只允许传当前版块这个上下文，真正的筛选、排序、数量和权限过滤仍来自后台保存的小工具配置。自定义小工具也应采用这个策略，避免用户通过请求参数任意改查询范围。
+
+## 列表样式
+
+帖子列表按 `style` 输出三种结构：
+
+| `style`      | 渲染函数                                                                           |
+| ------------ | ---------------------------------------------------------------------------------- |
+| `detail`     | `zib_bbs_get_posts_list()`                                                         |
+| `mini`       | `zib_bbs_get_posts_mini_list()`                                                    |
+| `minimalism` | `zib_bbs_get_posts_lists_title()` 包在 `<posts class="forum-posts minimalism">` 中 |
+
+示例：
+
+```php
+if ('detail' === $style) {
+    $lists .= zib_bbs_get_posts_list('class=' . $lists_class . '&show_topping=' . $show_topping);
+} elseif ('minimalism' === $style) {
+    $lists .= '<posts class="forum-posts minimalism ' . $lists_class . '">';
+    $lists .= zib_bbs_get_posts_lists_title('forum-title', 'em09', $show_topping, true, false);
+    $lists .= '</posts>';
+} else {
+    $lists .= zib_bbs_get_posts_mini_list($lists_class, $show_topping);
+}
+```
+
+不要把论坛帖子当普通 `post` 调用文章列表函数。论坛帖子还有置顶、精华、投票、提问状态、阅读权限、版块关系和论坛专用标题结构。
+
+## 分页协议
+
+帖子列表小工具根据 `paginate` 输出分页：
+
+| `paginate`   | 行为                                      |
+| ------------ | ----------------------------------------- |
+| `none`       | 不显示分页，但仍输出隐藏 `.ajax-pag` 兜底 |
+| `ajax_lists` | Ajax 追加列表分页                         |
+| `default`    | 数字分页                                  |
+
+源码模式：
+
+```php
+if ('none' !== $paginate) {
+    $paginate = zib_bbs_get_paginate($posts->found_posts, $paged, $paged_size, $ajax_url, $paginate, 'close');
+    if (!$paginate && 1 == $paged) {
+        $lists .= '<div class="ajax-pag hide"><div class="next-page ajax-next"><a href="#"></a></div></div>';
+    } else {
+        $lists .= $paginate;
+    }
+} else {
+    $lists .= '<div class="ajax-pag hide"><div class="next-page ajax-next"><a href="#"></a></div></div>';
+}
+```
+
+这个隐藏分页不是多余代码，它让前端 Ajax pager 在没有下一页时仍能正确完成状态处理。
+
+## 多 Tab 帖子列表
+
+多 Tab 小工具使用 `group` 字段保存多个栏目，每个栏目就是一组帖子查询参数。渲染时首个 Tab 直接输出 `zib_get_ias_ajaxpager()`，后续 Tab 只输出隐藏触发器：
+
+```php
+if ($tabs_i == 1) {
+    $ias_args = array(
+        'type'   => 'ias',
+        'loader' => $placeholder,
+        'url'    => $ajax_href,
+    );
+
+    $con_html = zib_get_ias_ajaxpager($ias_args);
+} else {
+    $con_html = '';
+    $con_html .= '<span class="post_ajax_trigger hide"><a href="' . add_query_arg('tab', $tabs_key, $ajax_href) . '" class="ajax_load ajax-next ajax-open" no-scroll="true"></a></span>';
+    $con_html .= '<div class="post_ajax_loader" style="display: none;">' . $placeholder . '</div>';
+}
+```
+
+导航链接使用主题 Tab 协议：
+
+```php
+$tabs_nav .= '<li class="' . $nav_class . '"><a' . ($tabs_i !== 1 ? ' data-ajax' : '') . ' data-toggle="tab" href="#' . $tab_id . '">' . $tabs['title'] . '</a></li>';
+```
+
+Ajax 回调读取 `tab` 序号，取出当前栏目配置，再复用帖子列表 Ajax：
+
+```php
+$tab = isset($_REQUEST['tab']) ? (int) $_REQUEST['tab'] : 0;
+$tab_args = isset($instance['tabs'][$tab]) ? $instance['tabs'][$tab] : array();
+$tab_args['style'] = $instance['style'] ?? 'mini';
+
+zib_bbs_widget_ui_posts_lists_ajax($tab_args);
+```
+
+新增论坛 Tab 模块时，优先复用这个结构，不要另写独立前端请求逻辑。这样能继续使用主题的加载动画、`auto_fun()` 初始化和 Ajax pager 状态管理。
+
+## 话题列表小工具
+
+话题列表使用 `forum_topic` taxonomy：
+
+```php
+$query = array(
+    'taxonomy'   => array('forum_topic'),
+    'orderby'    => $instance['orderby'],
+    'hide_empty' => $instance['hide_empty'],
+    'number'     => $instance['paged_size'],
+    'include'    => $instance['include'],
+);
+
+$new_query = zib_bbs_get_term_query($query);
+```
+
+渲染每个话题时调用：
+
+```php
+$lists .= zib_bbs_get_topic_lists($term, $style);
+```
+
+字段里 `include` 支持 Ajax 搜索、多选和排序：
+
+```php
+array(
+    'id'          => 'include',
+    'options'     => 'categories',
+    'query_args'  => array(
+        'taxonomy' => 'forum_topic',
+    ),
+    'chosen'      => true,
+    'multiple'    => true,
+    'ajax'        => true,
+    'sortable'    => true,
+    'type'        => 'select',
+)
+```
+
+如果排序选择 `include`，只有手动选择了话题时才有意义。文档、后台说明和默认值都要把这个边界讲清楚，否则用户会以为“手动排序”能自动作用于全部话题。
+
+## 注册写法
+
+论坛小工具统一通过 `Zib_CFSwidget::create()` 注册，并挂在 `after_setup_theme`：
+
+```php
+add_action('after_setup_theme', 'zib_bbs_widget_create_posts');
+
+function zib_bbs_widget_create_posts()
+{
+    global $zib_bbs;
+
+    Zib_CFSwidget::create('zib_bbs_widget_ui_posts_lists', array(
+        'title'       => sprintf(__('[%1$s]%2$s列表', 'zib_language'), $zib_bbs->forum_name, $zib_bbs->posts_name),
+        'zib_title'   => true,
+        'zib_affix'   => true,
+        'zib_show'    => true,
+        'callback'    => 'zib_bbs_widget_ui_posts_lists',
+        'description' => __('显示帖子列表，支持筛选、样式、排序和翻页。', 'zib_language'),
+        'fields'      => array(
+            // fields
+        ),
+    ));
+}
+```
+
+真实源码里部分 `callback` 由 Codestar 的 id 与函数名约定推断。二次开发时建议显式写出 `callback`，降低维护时的猜测成本。
+
+## 自定义论坛小工具示例
+
+下面示例保留主题的命名函数、`array()`、`is_show_filter`、`Zib_CFSwidget::create()` 写法，只演示结构：
+
+```php
+function zib_docs_bbs_widget_plate_notice_is_show($show_class, $args, $instance)
+{
+    if (!zib_bbs_get_the_plate()) {
+        return false;
+    }
+
+    if (empty($instance['text'])) {
+        return false;
+    }
+
+    return $show_class;
+}
+
+function zib_docs_bbs_widget_plate_notice($args, $instance)
+{
+    $obj = zib_bbs_get_the_plate();
+    if (!$obj || empty($instance['text'])) {
+        return;
+    }
+
+    echo '<div class="zib-widget">';
+    echo '<div class="box-body">';
+    echo wp_kses_post($instance['text']);
+    echo '</div>';
+    echo '</div>';
+}
+
+function zib_docs_bbs_widget_create_plate_notice()
+{
+    Zib_CFSwidget::create('zib_docs_bbs_widget_plate_notice', array(
+        'title'          => __('版块提示', 'zib_language'),
+        'zib_title'      => true,
+        'zib_affix'      => true,
+        'zib_show'       => true,
+        'is_show_filter' => 'zib_docs_bbs_widget_plate_notice_is_show',
+        'callback'       => 'zib_docs_bbs_widget_plate_notice',
+        'fields'         => array(
+            array(
+                'title'   => __('提示内容', 'zib_language'),
+                'id'      => 'text',
+                'type'    => 'textarea',
+                'default' => '',
+            ),
+        ),
+    ));
+}
+add_action('after_setup_theme', 'zib_docs_bbs_widget_create_plate_notice');
+```
+
+如果这个提示只适合版块页侧栏，后台说明要写清楚；前台也要用 `zib_bbs_get_the_plate()` 再判断一次。
+
+## 扩展建议
+
+| 需求                     | 推荐入口                                                             |
+| ------------------------ | -------------------------------------------------------------------- |
+| 注册论坛页面容器         | `zib_bbs_register_sidebar()` 同类写法 + `zib_register_sidebar()`     |
+| 在论坛首页上下方插入模块 | `bbs_home_tab_content_top` / `bbs_home_tab_content_bottom`           |
+| 在版块页主内容插入模块   | `bbs_plate_page_content` 优先级 `1` 或 `99`                          |
+| 在帖子页主内容插入模块   | `bbs_posts_page_content_top` / `bbs_posts_page_content_bottom`       |
+| 显示当前版块信息         | `zib_bbs_get_the_plate()` + `zib_bbs_get_plate_info_mini_box()`      |
+| 显示版主                 | `zib_bbs_get_moderator_lists()`                                      |
+| 显示版块列表             | `zib_bbs_get_plate_main_lists()` 或 `zib_bbs_get_plate_slide_card()` |
+| 显示帖子列表             | `zib_bbs_get_posts_query()` + 论坛帖子列表函数                       |
+| 显示话题列表             | `zib_bbs_get_term_query()` + `zib_bbs_get_topic_lists()`             |
+| 异步加载小工具           | `ajax_widget_ui` + `{id}_ajax`                                       |
+| 多 Tab 异步加载          | `data-toggle="tab"` + `data-ajax` + `.post_ajax_trigger`             |
+
+## 风险清单
+
+- 不要把论坛帖子小工具改成普通文章查询，`forum_post` 有独立权限、版块、话题、标签、置顶和精华状态。
+- 不要让前端请求参数直接决定查询范围，筛选和排序应来自后台保存的小工具配置。
+- 不要把当前版块模式放到非版块页后仍强制显示，`zib_bbs_get_the_plate_id()` 为空时应隐藏。
+- 不要在全宽位置使用只适合侧栏的小卡片，也不要在侧栏放横向滚动大模块。
+- 不要删除空分页兜底结构，Ajax pager 依赖它处理结束状态。
+- 不要复制论坛列表 HTML 后长期维护，优先调用主题已有列表函数。
+- 不要在论坛关闭时加载小工具扩展，先判断论坛模块和相关函数是否存在。

@@ -1,0 +1,295 @@
+---
+title: 字段值格式
+description: 汇总子比主题常用 CSF 字段的保存形态、读取方式、默认值策略和前台输出边界。
+---
+
+## 先判断保存层
+
+同一个字段类型，在不同保存层的读取方式不同：
+
+| 保存层              | 字段来源                                        | 读取方式                                        |
+| ------------------- | ----------------------------------------------- | ----------------------------------------------- |
+| 主题设置            | `CSF::createOptions('zibll_options')`           | `_pz('field_id', $default)`                     |
+| 文章/页面/商品/帖子 | `ZCSF::instance()` 或 `CSF::createMetabox()`    | `zib_get_post_meta($post_id, 'field_id', true)` |
+| 分类/标签/话题      | `CSF::createTaxonomyOptions()`                  | `zib_get_term_meta($term_id, 'field_id', true)` |
+| 用户资料            | `ZCSF::instance('profile_options')`             | `zib_get_user_meta($user_id, 'field_id', true)` |
+| 菜单项              | `CSF::createNavMenuOptions('zib_menu_options')` | `zib_menu_pz($menu_item_id, 'field_id')`        |
+| 小工具              | `CSF::createWidget()`                           | `$instance['field_id']`                         |
+
+字段类型只决定值长什么样，保存层决定从哪里读。
+
+## 标量字段
+
+常见标量字段包括 `text`、`textarea`、`number`、`switcher`、`radio`、`button_set`、`select`。
+
+| 类型         | 保存值                     | 读取建议                                        |
+| ------------ | -------------------------- | ----------------------------------------------- |
+| `text`       | 字符串                     | 给默认值，输出时 `esc_html()` 或 `esc_attr()`   |
+| `textarea`   | 字符串                     | 普通文本用 `esc_textarea()`，前台 HTML 用白名单 |
+| `number`     | 字符串或数字               | 使用前转 `intval()`、`floatval()`               |
+| `switcher`   | `true`/`false` 或 `1`/空值 | 用 `if (_pz('xxx'))` 判断                       |
+| `radio`      | 选项 key                   | 和白名单选项比较                                |
+| `button_set` | 选项 key                   | 和白名单选项比较                                |
+| `select`     | 单个 key 或数组            | 先判断 `multiple`                               |
+
+示例：
+
+```php
+$limit = (int) _pz('search_keywords_limit', 10);
+
+if (_pz('lazy_posts_thumb')) {
+    // 文章缩略图懒加载已开启
+}
+
+$style = _pz('theme_mode', 'white');
+if (!in_array($style, array('white', 'dark'), true)) {
+    $style = 'white';
+}
+```
+
+## upload 字段
+
+子比主题大量使用上传字段，例如 Logo、图标、背景、用户封面、商品主图。
+
+典型字段：
+
+```php
+array(
+    'id'      => 'logo_src',
+    'type'    => 'upload',
+    'library' => 'image',
+    'preview' => true,
+)
+```
+
+保存值通常是 URL 字符串。使用时要：
+
+```php
+$logo = _pz('logo_src');
+if ($logo) {
+    echo '<img src="' . esc_url($logo) . '" alt="">';
+}
+```
+
+如果业务需要附件 ID，要确认字段是否额外保存了 `*_id`。不要假设所有 upload 都有附件 ID。
+
+## image_select 与 palette
+
+这类字段保存选中的 key，不保存图片或颜色对象。
+
+```php
+$layout = _pz('sidebar_layout', 'right');
+```
+
+使用时要把 key 映射到主题允许的 class：
+
+```php
+$allowed = array(
+    'left'  => 'sidebar-left',
+    'right' => 'sidebar-right',
+    'none'  => 'sidebar-none',
+);
+
+$class = isset($allowed[$layout]) ? $allowed[$layout] : $allowed['right'];
+```
+
+不要把后台提交的 key 直接拼成 class 或模板路径。
+
+## group 字段
+
+`group` 保存为数组列表，每一项是一个子字段数组。
+
+典型形态：
+
+```php
+array(
+    array(
+        'text' => '按钮文字',
+        'url'  => 'https://example.com',
+        'type' => 'primary',
+    ),
+    array(
+        'text' => '第二个按钮',
+        'url'  => '/about',
+        'type' => 'muted',
+    ),
+)
+```
+
+读取示例：
+
+```php
+$buttons = _pz('modal_buttons', array());
+if (is_array($buttons)) {
+    foreach ($buttons as $button) {
+        $text = !empty($button['text']) ? $button['text'] : '';
+        $url  = !empty($button['url']) ? $button['url'] : '';
+
+        if (!$text || !$url) {
+            continue;
+        }
+
+        echo '<a href="' . esc_url($url) . '">' . esc_html($text) . '</a>';
+    }
+}
+```
+
+处理 group 时要把每一项都当成不完整数据看待：子字段可能为空、缺失或来自旧版本配置。
+
+## repeater 字段
+
+`repeater` 也是列表，但通常更偏“重复相同结构”的配置。它和 `group` 的读取方式类似：
+
+```php
+$items = _pz('footer_links', array());
+foreach ((array) $items as $item) {
+    $name = isset($item['name']) ? $item['name'] : '';
+    $link = isset($item['link']) ? $item['link'] : '';
+}
+```
+
+注意：
+
+- 不要依赖数组下标连续。
+- 不要把用户可见排序写死。
+- 前台输出前过滤空项。
+- URL、图片、HTML、class 要分别转义。
+
+## accordion 与嵌套字段
+
+`accordion` 常用于把多个子配置折叠在一个字段里。保存值通常仍是数组，只是后台视觉上可折叠。
+
+读取时先确认层级：
+
+```php
+$option = _pz('checkin_header_user_option', array());
+$class  = isset($option['class']) ? $option['class'] : 'c-yellow';
+$text   = isset($option['text']) ? $option['text'] : __('签到领取今日奖励', 'zib_language');
+```
+
+`_pz()` 也支持第三个参数读取一级子 key：
+
+```php
+$class = _pz('checkin_header_user_option', 'c-yellow', 'class');
+```
+
+第三个参数只适合一层子 key。更深层嵌套建议先读整个数组，再逐层判断。
+
+## fieldset 字段
+
+`fieldset` 保存为关联数组，适合一组固定子项，例如：
+
+```php
+$size = _pz('popup_size', array());
+$width  = isset($size['width']) ? (int) $size['width'] : 480;
+$height = isset($size['height']) ? (int) $size['height'] : 320;
+```
+
+使用时要给每个子项默认值，而不是只给整个字段默认值。
+
+## checkbox 和 multiple select
+
+多选字段保存为数组：
+
+```php
+$types = _pz('search_types', array('post'));
+if (!is_array($types)) {
+    $types = array($types);
+}
+
+if (in_array('forum_post', $types, true)) {
+    // 搜索论坛帖子
+}
+```
+
+多选值必须和白名单比对。不要把多选值直接传给查询参数：
+
+```php
+$allowed = array('post', 'page', 'forum_post', 'product');
+$types   = array_values(array_intersect($types, $allowed));
+```
+
+## dependency 隐藏字段
+
+`dependency` 只控制后台显示，不等于字段不存在。
+
+常见情况：
+
+- 字段被隐藏后，旧值可能仍在数据库里。
+- 字段没有提交时，保存流程可能写入空值。
+- 前台必须先判断总开关，再读子配置。
+
+正确读取方式：
+
+```php
+if (!_pz('email_s')) {
+    return;
+}
+
+$smtp = _pz('email_smtp', array());
+```
+
+不要因为 `email_smtp` 有值就认为邮件功能已启用。
+
+## 聚合 meta 字段
+
+子比主题会把部分 meta 聚合到 `zib_other_data`。这些字段在 `inc/dependent.php` 的 `zib_get_option_meta_keys()` 中维护。
+
+典型键：
+
+| 类型         | 示例                                                                            |
+| ------------ | ------------------------------------------------------------------------------- |
+| user meta    | `auth_info`、`cover_image`、`custom_avatar`、`message_shield`、`favorite-posts` |
+| post meta    | `score_data`、`vote_data`、`pay_hide_part`、`featured_video`、`cover_image`     |
+| term meta    | `cover_image`、`term_seo`                                                       |
+| comment meta | `order_data`、`score_data`、`comment_addr`                                      |
+
+读取这些字段时必须用子比封装：
+
+```php
+$cover = zib_get_user_meta($user_id, 'cover_image', true);
+$score = zib_get_post_meta($post_id, 'score_data', true);
+$seo   = zib_get_term_meta($term_id, 'term_seo', true);
+```
+
+直接 `get_user_meta($user_id, 'cover_image', true)` 可能读不到聚合字段。
+
+## 默认值策略
+
+字段默认值有三层：
+
+| 层级     | 来源                     | 作用                           |
+| -------- | ------------------------ | ------------------------------ |
+| 字段定义 | `default`                | 后台首次渲染和保存默认值       |
+| 读取函数 | `_pz($key, $default)`    | 未保存或缺失时的运行时兜底     |
+| 业务兜底 | `if` / `wp_parse_args()` | 旧数据、不完整数组和非法值修正 |
+
+建议写法：
+
+```php
+$args = wp_parse_args((array) _pz('search_options', array()), array(
+    'limit' => 10,
+    'order' => 'date',
+));
+
+$args['limit'] = max(1, (int) $args['limit']);
+```
+
+不要只依赖后台字段 `default`。用户可能从旧版本升级，数据库里没有新字段；也可能导入过不完整配置。
+
+## 输出边界
+
+字段值从后台保存，不代表前台可以直接输出。
+
+| 值类型    | 输出前处理                         |
+| --------- | ---------------------------------- |
+| 文本      | `esc_html()`                       |
+| HTML      | `wp_kses_post()` 或主题白名单      |
+| URL       | `esc_url()`                        |
+| 图片 URL  | `esc_url()` 并准备空值 fallback    |
+| CSS class | 白名单映射                         |
+| 数字      | `intval()`、`floatval()`、范围限制 |
+| 查询参数  | 白名单 + 类型转换                  |
+| 富文本    | 按业务权限过滤                     |
+
+最稳的原则是：保存尽量保持数据完整，读取时给默认值，输出时按上下文转义。

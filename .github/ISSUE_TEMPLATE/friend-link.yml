@@ -1,0 +1,60 @@
+name: 申请友情链接
+description: 提交一个与 WordPress、主题、插件或开发者社区相关的网站
+title: '友情链接申请：'
+labels: [friend-link]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        申请内容会公开显示在 GitHub Issue 中。联系邮箱和回链仅用于审核，不会写入友情链接公开数据；不希望公开的信息请留空。
+  - type: input
+    id: name
+    attributes:
+      label: 名称
+      description: 最多 80 个字符。
+      placeholder: 网站或项目名称
+    validations:
+      required: true
+  - type: input
+    id: url
+    attributes:
+      label: 网站地址
+      description: 必须是可公开访问的完整 http(s) 地址。
+      placeholder: https://example.com
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: 网站介绍
+      description: 最多 300 个字符，请说明网站内容及其与 WordPress 或开发者社区的关系。
+      placeholder: 用一到两句话介绍网站或项目
+    validations:
+      required: true
+  - type: input
+    id: logo
+    attributes:
+      label: Logo 地址
+      description: 可选。请填写长期可用的公开 http(s) 图片地址；留空时显示名称首字。
+      placeholder: https://example.com/logo.png
+  - type: input
+    id: email
+    attributes:
+      label: 联系邮箱
+      description: 可选。该字段会公开显示在 Issue 中，请只填写可公开邮箱。
+      placeholder: public@example.com
+  - type: input
+    id: backlink
+    attributes:
+      label: 回链地址
+      description: 可选。放置本站链接的公开页面，该字段也会显示在 Issue 中。
+      placeholder: https://example.com/links
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: 提交确认
+      options:
+        - label: 我确认网站可以正常访问，内容真实有效，并同意公开展示名称、网址、介绍和 Logo。
+          required: true
+        - label: 我知道 Issue 及其中填写的邮箱、回链和其他内容均为公开信息。
+          required: true

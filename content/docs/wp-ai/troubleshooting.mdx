@@ -1,0 +1,117 @@
+---
+title: 排错清单
+description: WordPress AI Client、Abilities API、Provider、Connector、日志和自动化调用常见问题。
+---
+
+## 先看哪一层
+
+遇到问题时，先判断卡在哪一层：
+
+| 层级          | 常见现象                                               |
+| ------------- | ------------------------------------------------------ |
+| Abilities API | Ability 注册失败、REST 列表看不到、权限错误            |
+| AI Client     | `wp_ai_client_prompt()` 不存在、prompt 被阻止          |
+| Provider      | 没有可用模型、API Key 错误、上游 4xx/5xx               |
+| AI 插件       | 日志不记录、模型列表为空、审批阻断                     |
+| 自动化调用    | 模型请求了未允许的 Ability、function response 格式错误 |
+
+不要一上来就改 prompt。先确认环境、Provider、Ability 注册和权限都正常。
+
+## 常见问题表
+
+| 现象                           | 优先检查                                                            |
+| ------------------------------ | ------------------------------------------------------------------- |
+| `wp_ai_client_prompt()` 不存在 | 运行环境是否加载 AI Client，WordPress 版本是否满足                  |
+| `wp_supports_ai()` 为 false    | `WP_AI_SUPPORT`、`wp_ai_client_prevent_prompt`、Provider 状态       |
+| Ability 注册失败               | 是否在 `wp_abilities_api_init` 内注册，名称是否为 `namespace/name`  |
+| 分类找不到                     | 是否在 `wp_abilities_api_categories_init` 内先注册分类              |
+| REST 列表看不到                | `meta.show_in_rest` 是否是布尔 `true`                               |
+| REST 执行 405                  | annotation 和 HTTP 方法不匹配，只读用 GET，更新用 POST              |
+| `ability_missing_input_schema` | 传了输入但没有写 `input_schema`                                     |
+| `ability_invalid_input`        | 输入类型、required、enum、minimum 等不符合 schema                   |
+| `ability_invalid_output`       | 返回结果和 `output_schema` 不匹配                                   |
+| `ability_invalid_permissions`  | 当前用户 capability 不够，或权限回调返回 false/WP_Error             |
+| `prompt_prevented`             | 环境或过滤器禁用了 AI 请求                                          |
+| 没有可用模型                   | Provider 插件未启用、API Key 未配置、模型不支持对应 capability      |
+| Anthropic 报 `max_tokens`      | Anthropic Messages API 需要 `max_tokens`，建议显式设置              |
+| OpenAI function call 报格式    | Responses API 要求 function call/response 是单独 message part       |
+| 日志没有记录                   | AI 请求日志实验是否启用，Logging transporter 是否成功包装           |
+| 请求被 403 阻断                | Connector Approval 是否要求管理员批准当前插件或主题使用该 connector |
+
+## Ability 注册排查
+
+检查点：
+
+1. 分类是否先注册。
+2. Ability 是否挂在 `wp_abilities_api_init`。
+3. 名称是否只有一层斜杠。
+4. `input_schema` 是否是合法 JSON Schema。
+5. `permission_callback` 是否返回布尔值或 `WP_Error`。
+6. `execute_callback` 是否返回数组、字符串或 `WP_Error`，不要直接输出。
+
+可以临时用：
+
+```php
+$ability = wp_get_ability( 'zibll-ai-ext/read-post-context' );
+
+if ( ! $ability ) {
+    error_log( 'Ability not found.' );
+}
+```
+
+## REST 排查
+
+REST 看不到能力时：
+
+- 确认 `meta.show_in_rest` 是布尔 `true`，不是字符串 `'true'`。
+- 确认当前用户有 `read` 或对应能力。
+- 确认站点 REST API 没被安全插件禁用。
+- 确认 Ability 注册时机没有太晚。
+
+REST 执行失败时：
+
+- GET 的输入通常走 query string。
+- POST 的输入放在 JSON body 的 `input` 字段里。
+- 只读能力用 GET。
+- 保存能力用 POST。
+
+## Provider 排查
+
+模型不可用时：
+
+1. Provider 插件是否启用。
+2. API Key 是否配置。
+3. API Key 是否被遮罩但真实为空。
+4. 模型是否支持当前 capability。
+5. 站点服务器能否访问模型服务。
+6. Connector 审批是否拦截。
+
+不要把 API Key 打到错误日志里。调试时只输出 provider、model、错误码和简短错误信息。
+
+## 自动化调用排查
+
+如果 `using_abilities()` 后模型没有调用 Ability：
+
+- system instruction 是否说明“需要文章内容时先调用读取能力”。
+- Ability 的 description 是否写清楚用途。
+- input schema 是否能让模型知道需要 `post_id`。
+- 用户问题里是否提供了足够的输入。
+
+如果模型调用了但执行失败：
+
+- allowed list 是否包含该 Ability。
+- Resolver 是否用同一组 allowed list 初始化。
+- Ability 权限是否允许当前用户执行。
+- function response 是否放回历史对话。
+
+## 最后检查
+
+上线前至少跑一遍：
+
+1. 无 API Key 时，页面提示是否友好。
+2. API Key 错误时，日志是否能定位。
+3. 无权限用户能否被拦住。
+4. 空文章、长文章、特殊字符是否处理。
+5. AI 返回空内容或非法 JSON 时是否失败得可控。
+6. 用户不点击保存时，数据库是否不会变化。
+7. 用户点击保存时，nonce 和 capability 是否重新校验。

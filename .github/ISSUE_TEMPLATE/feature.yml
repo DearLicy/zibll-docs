@@ -1,0 +1,52 @@
+name: 功能建议
+description: 为静态文档、MCP、Codex 插件或协作流程提出建议
+title: 'feat: '
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        功能建议应服务于文档、GitHub 社区、本地 MCP 或 Codex 插件。GitHub Pages 不承载登录、在线 AI 对话、数据库和常驻后端。
+  - type: dropdown
+    id: area
+    attributes:
+      label: 建议范围
+      options:
+        - 文档内容或信息架构
+        - Fumadocs 页面或交互
+        - GitHub Issue、Discussion 或自动化
+        - 本地 MCP
+        - Codex 插件或 Skill
+        - 多语言、搜索或 SEO
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 其他方案
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 可验收结果
+      description: 说明完成后用户能做什么，以及如何验证该能力确实可用。
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索文档、Issues 和 Discussions，确认没有现成方案。
+          required: true

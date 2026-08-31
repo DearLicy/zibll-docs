@@ -1,0 +1,70 @@
+---
+title: Codex 插件
+description: 使用 Codex 插件把子比主题开发文档、MCP 和任务约束一起接入本地 Codex。
+icon: Puzzle
+---
+
+Codex 插件把本站开发资料整理成可安装能力：插件携带 Skill 说明，并通过本地 `stdio` MCP 包按需读取文档。网站只负责发布静态仓库内容，不保存账号、API Key、对话或项目数据。
+
+## 插件结构
+
+本站插件市场包含一个默认主插件和几个可选专业插件：
+
+| 插件                     | 适合场景                                                    |
+| ------------------------ | ----------------------------------------------------------- |
+| `zibll-docs`             | 默认主插件，覆盖整套子比主题开发文档                        |
+| `zibll-theme-dev`        | 插件、子主题、Hook、Ajax、Meta、Codestar 和模板覆盖         |
+| `zibll-wp-ai-dev`        | WordPress AI Client、Abilities API、Provider 和子比 AI 二开 |
+| `zibll-migration-helper` | 旧站迁移、Zibpay、下载资源、媒体路径和内容整理              |
+
+普通用户建议先安装 `zibll-docs`。经常处理某一类任务时，再额外安装对应专业插件。
+
+## 插件能力
+
+- 启动本地 `zibll-docs-mcp`，提供文档列表、搜索、单页读取、相关文档包、大纲和代码示例查询。
+- 在子比主题、Zibll、Zibpay、Codestar Framework、插件、子主题和迁移任务中优先读取本站资料。
+- 用 Skill 约束工作顺序：先查文档，再读用户项目源码；优先插件、子主题、Hook、Filter 和模板覆盖。
+- MCP 进程只在客户端需要时运行，退出客户端后不会继续占用网站服务器资源。
+
+## 安装
+
+在终端中执行：
+
+```bash
+codex plugin marketplace add https://github.com/DearLicy/zibll-docs.git
+codex plugin add zibll-docs@zibll-docs
+```
+
+如果仓库迁移到新的 GitHub 组织，只需要把第一行的仓库地址替换为新地址，插件名称和本地 MCP 命令不变。
+
+## 按需安装专业插件
+
+```bash
+codex plugin add zibll-theme-dev@zibll-docs
+codex plugin add zibll-wp-ai-dev@zibll-docs
+codex plugin add zibll-migration-helper@zibll-docs
+```
+
+## 手动配置 MCP
+
+不安装插件时，可以在 Codex 的 MCP 配置中加入：
+
+```toml
+[mcp_servers.zibll-docs]
+command = "npx"
+args = ["-y", "zibll-docs-mcp"]
+```
+
+本地包默认只读取随包发布的公开文档。如果需要让 MCP 参考你本机的子主题或插件源码，可以在客户端中把源码目录作为工作区交给 Codex；MCP 不会编辑或上传这些文件。
+
+## 推荐工作方式
+
+1. 让 Codex 使用 `search_docs` 找到任务相关页面。
+2. 使用 `read_docs_bundle` 装载少量相关文档，而不是一次性塞入全文。
+3. 再读取你的实际主题、子主题或插件源码，核对版本和项目差异。
+4. 生成代码前确认权限、nonce、数据归属、转义和回滚方案。
+5. 完成后运行项目自己的测试、类型检查或 WordPress 验收步骤。
+
+## 隐私和安全
+
+插件和 MCP 不需要本站登录，也不会把 API Key、Cookie、数据库密码或源码发送到文档站。AI 客户端使用的模型供应商仍由你自己配置，敏感信息应留在本地配置或密钥管理器中。

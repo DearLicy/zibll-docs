@@ -1,0 +1,345 @@
+---
+title: 商城用户中心与消息通知
+description: 蒸馏子比主题商城订单在用户中心的展示、联系商家、收货地址修改申请、站内信、邮件和微信模板通知链路。
+---
+
+## 适用范围
+
+本页关注用户已经下单后的可见体验：用户中心订单入口、订单卡片、订单详情弹窗、联系商家、收货地址修改申请，以及订单发货和售后流程产生的通知。商品发布、确认下单、发货和售后状态机需要先阅读：
+
+| 主题                   | 文档                                                                          |
+| ---------------------- | ----------------------------------------------------------------------------- |
+| 商品和购买入口         | [商城模块](/docs/api/shop)、[商城商品发布字段](/docs/api/shop-product-fields) |
+| 购物车和确认下单       | [商城购物车与确认下单](/docs/api/shop-cart-checkout)                          |
+| 发货、物流、售后和优惠 | [商城发货、售后与优惠](/docs/api/shop-shipping-after-sale)                    |
+| 后台列表和异常订单     | [商城后台与订单排查](/docs/api/shop-admin-diagnostics)                        |
+| 通用消息系统           | [消息通知](/docs/api/messages)                                                |
+
+对应源码主要分布在：
+
+| 文件                                                | 负责                                                |
+| --------------------------------------------------- | --------------------------------------------------- |
+| `inc/functions/shop/inc/user-center.php`            | 用户中心订单侧栏、订单 Tab、订单卡片和订单详情弹窗  |
+| `inc/functions/shop/inc/order.php`                  | 订单地址修改入口、订单物流和订单状态辅助函数        |
+| `inc/functions/shop/inc/author.php`                 | 联系商家按钮和商家联系方式读取                      |
+| `inc/functions/shop/inc/msg.php`                    | 商城邮件、站内信和微信模板通知                      |
+| `inc/functions/shop/action/action.php`              | 联系商家弹窗、地址修改申请、地址修改处理和撤销 Ajax |
+| `inc/functions/shop/admin/options/admin-option.php` | 商城客服联系方式后台配置                            |
+| `inc/functions/shop/admin/admin.php`                | 后台待处理收货地址修改 notice                       |
+
+商城用户中心不是一个孤立页面。它和 `zibpay` 订单、商城订单 meta、站内消息 `ZibMsg`、微信模板消息、私信模块和后台发货售后管理共同工作。扩展时要先确认订单类型、订单归属和订单状态，再考虑展示或通知。
+
+## 用户中心入口
+
+商城向用户中心侧栏追加“我的订单”区块：
+
+```php
+add_filter('user_center_page_sidebar', 'zib_shop_user_center_page_sidebar_order');
+```
+
+侧栏按钮固定覆盖这些二级 Tab：
+
+| 按钮   | second-tab      | 计数来源                                         |
+| ------ | --------------- | ------------------------------------------------ |
+| 待支付 | `wait-pay`      | `zib_shop_get_user_order_count('wait-pay')`      |
+| 待发货 | `wait-shipped`  | `zib_shop_get_user_order_count('wait-shipped')`  |
+| 待收货 | `wait-receive`  | `zib_shop_get_user_order_count('wait-receive')`  |
+| 待评价 | `wait-evaluate` | `zib_shop_get_user_order_count('wait-evaluate')` |
+| 售后   | `after-sale`    | `zib_shop_get_user_order_count('after-sale')`    |
+
+这些按钮通过 `data-onclick` 同时激活用户中心主 Tab 和订单二级 Tab：
+
+```php
+data-onclick="[data-target='#user-tab-order'],[data-target='#user-order-tab-wait-receive']"
+```
+
+购物车入口不是放在订单块里，而是插入用户中心第一组按钮：
+
+```php
+add_filter('zib_user_center_page_sidebar_button_1_args', 'zib_shop_user_center_page_sidebar_button_1_args_cart');
+```
+
+用户中心主 Tab 由 `user_ctnter_main_tabs_array` 追加：
+
+```php
+add_filter('user_ctnter_main_tabs_array', 'zib_shop_user_ctnter_main_tabs_array_filter_order', 20);
+```
+
+订单页二级 Tab 则通过 `user_page_order_tabs` 补齐：
+
+```php
+add_filter('user_page_order_tabs', 'zib_shop_user_order_tabs');
+```
+
+扩展用户中心订单入口时，优先追加侧栏按钮或二级 Tab。不要直接替换整个用户中心主结构，否则会影响主题已有的收藏、评论、资产、消息和资料区域。
+
+## 订单卡片
+
+订单列表卡片通过 `user_order_list_card` 过滤器接管：
+
+```php
+add_filter('user_order_list_card', 'zib_shop_user_order_list_card', 10, 3);
+```
+
+函数首先确认订单类型：
+
+```php
+if ($order_type != zib_shop_get_order_type()) {
+    return $html;
+}
+```
+
+订单卡片会从订单和订单 meta 中组合展示信息：
+
+| 信息       | 来源                                                                       |
+| ---------- | -------------------------------------------------------------------------- |
+| 商品标题   | `get_post($order['post_id'])`，商品不存在时回退 `order_data.product_title` |
+| 商品图片   | `zib_shop_get_order_thumb($order, 'radius8 fit-cover', 'medium')`          |
+| 规格名称   | `order_data.options_active_name`                                           |
+| 商品数量   | `order_data.count`                                                         |
+| 单价和合计 | `order_data.prices.unit_price`、`order_data.prices.pay_price`              |
+| 退款金额   | `order_data.prices.refund`                                                 |
+| 支付标记   | `order_data.pay_modo` 判断金额或积分                                       |
+| 商家展示   | `_pz('shop_author_show')` 和 `post_author`                                 |
+| 物流摘要   | `order_data.express_data` 或 `order_data.shipping_data`                    |
+| 售后摘要   | `order_data.after_sale_data` 和 `zib_shop_get_order_after_sale_status()`   |
+
+状态展示并不只看 `order.status`。已支付订单还要读取商城发货状态和售后状态：
+
+| 条件                                    | 展示                       |
+| --------------------------------------- | -------------------------- |
+| `status == 0`                           | 待支付，带倒计时           |
+| `status == -1`                          | 交易已关闭                 |
+| `status == -2`                          | 已退款或已退货退款         |
+| `status == 1` 且 `shipping_status == 0` | 待发货                     |
+| `status == 1` 且 `shipping_status == 1` | 待收货，展示物流或发货摘要 |
+| `status == 1` 且 `shipping_status == 2` | 交易完成                   |
+| `after_sale_status` 为处理中            | 覆盖展示售后中             |
+
+所以扩展订单卡片时不要只判断 `order.status`。商城订单的真实用户体验由支付状态、发货状态、售后状态、评价状态和支付超时共同决定。
+
+## 订单详情弹窗
+
+订单详情弹窗通过 `user_order_details_modal` 过滤器输出：
+
+```php
+add_filter('user_order_details_modal', 'zib_shop_user_order_details_modal', 10, 3);
+```
+
+详情内容由几个函数组合：
+
+| 函数                                          | 内容                                 |
+| --------------------------------------------- | ------------------------------------ |
+| `zib_shop_user_order_details_header_title()`  | 弹窗标题和订单主状态                 |
+| `zib_shop_user_order_details_consignee_box()` | 收货人、手机号、地址和修改入口       |
+| `zib_shop_user_order_details_info()`          | 商品、规格、价格、订单号、时间等信息 |
+| `zib_shop_user_order_details_footer()`        | 联系商家和订单操作按钮               |
+
+底部按钮来自 `zib_shop_get_user_order_btns()`。这个函数不是过滤器，而是按订单状态直接返回按钮数组：
+
+| 状态               | 按钮                           |
+| ------------------ | ------------------------------ |
+| 待支付             | 关闭订单、立即支付             |
+| 已支付             | 售后、查看物流、评价、确认收货 |
+| 已退款或已退货退款 | 售后详情                       |
+| 按钮不足时         | 补“再次购买”“加入购物车”       |
+
+如果需要新增订单动作，推荐新建独立入口并复用主题弹窗、nonce、权限和订单状态校验；不要假设按钮数组可以通过某个不存在的过滤器直接追加。需要替换订单详情 UI 时，也要保留原有的订单归属校验、发货状态、售后状态和地址修改入口。
+
+## 联系商家
+
+联系商家按钮由 `zib_shop_get_author_contact_link($author_id, $class, $text)` 生成。它读取后台配置：
+
+```php
+$options = _pz('shop_author_contact_opt', array());
+```
+
+后台字段在商城设置中，主要结构是：
+
+| 字段          | 说明                           |
+| ------------- | ------------------------------ |
+| `msg_s`       | 是否允许把私信作为客服联系入口 |
+| `msg_name`    | 私信入口名称                   |
+| `msg_desc`    | 私信入口说明                   |
+| `more[]`      | 自定义联系方式列表             |
+| `more[].name` | 联系方式名称                   |
+| `more[].desc` | 联系方式说明                   |
+| `more[].icon` | 图标                           |
+| `more[].link` | 跳转链接                       |
+| `more[].img`  | 二维码或图片                   |
+
+联系入口的优先级是：
+
+1. 如果存在 `more` 配置且至少有 `name`，生成 `RefreshModal`，打开 `author_contact_modal`。
+2. 否则如果 `msg_s`、全站消息开关 `_pz('message_s')`、私信开关 `_pz('private_s')` 都开启，返回 `Zib_Private::get_but()`。
+3. 都不满足时返回空。
+
+弹窗 Ajax 支持登录和游客：
+
+```php
+add_action('wp_ajax_author_contact_modal', 'zib_shop_ajax_author_contact_modal');
+add_action('wp_ajax_nopriv_author_contact_modal', 'zib_shop_ajax_author_contact_modal');
+```
+
+这意味着商家联系方式可能展示给未登录用户。配置二维码、手机号、外链时要按公开信息处理，不要把只应该在成交后展示的隐私资料放进这里。订单详情页底部的“客服”按钮也调用同一个函数：
+
+```php
+$author_contact = zib_shop_get_author_contact_link($order['post_author'], 'but', $text);
+```
+
+## 收货地址修改
+
+用户修改收货地址不是直接写订单 meta，而是发起一条待处理消息。入口由 `zib_shop_get_order_modify_address_link()` 生成，必须同时满足：
+
+| 条件                                     | 含义               |
+| ---------------------------------------- | ------------------ |
+| `status == 1`                            | 订单已支付         |
+| `order_data.shipping_type === 'express'` | 订单是快递配送     |
+| `shipping_status == 0`                   | 商家尚未发货       |
+| `after_sale_status` 不为 `1` 或 `2`      | 订单不在售后处理中 |
+
+用户点击后打开 `order_modify_address_modal`：
+
+```php
+add_action('wp_ajax_order_modify_address_modal', 'zib_shop_ajax_order_modify_address_modal');
+```
+
+弹窗会再次校验订单、权限、支付状态、快递类型、未发货状态和售后状态。没有待处理申请时，弹窗展示 Vue 地址选择器，并带上 `order_modify_address` nonce；如果已有待处理申请，则展示新地址、联系客服和撤销修改按钮。
+
+提交申请走：
+
+```php
+add_action('wp_ajax_order_modify_address', 'zib_shop_ajax_order_modify_address');
+```
+
+主题不会马上改 `order_data.consignee.address_data`，而是创建一条 `ZibMsg`：
+
+```php
+ZibMsg::add(array(
+    'send_user'    => $order['user_id'],
+    'receive_user' => $order['post_author'] ?: 'admin',
+    'type'         => 'order_modify_address',
+    'status'       => 0,
+    'other'        => 'order_id_' . $order_id,
+    'meta'         => array(
+        'new_address' => $new_address,
+        'order_id'    => $order_id,
+        'time'        => current_time('mysql'),
+    ),
+));
+```
+
+待处理申请读取入口是：
+
+```php
+zib_shop_get_order_modify_addressing_data($order_id);
+```
+
+它按 `type=order_modify_address`、`other=order_id_{order_id}`、`status=0` 查询 `ZibMsg`。这就是地址修改的“处理中”状态来源。
+
+## 地址修改处理状态机
+
+商家或管理员处理地址修改申请时，打开 `modify_address_apply_modal`：
+
+```php
+add_action('wp_ajax_modify_address_apply_modal', 'zib_shop_ajax_modify_address_apply_modal');
+```
+
+弹窗可以查看单条申请，也可以查看列表，核心信息是旧地址、新地址、批准或驳回按钮、备注和 nonce。提交处理走：
+
+```php
+add_action('wp_ajax_modify_address_apply', 'zib_shop_ajax_modify_address_apply');
+```
+
+处理逻辑可以拆成这张表：
+
+| 动作         | 写入                                                           |
+| ------------ | -------------------------------------------------------------- |
+| 批准         | 把 `meta.new_address` 写入 `order_data.consignee.address_data` |
+| 驳回         | 不修改订单地址                                                 |
+| 批准或驳回后 | `ZibMsg::set_status($msg_id, 1/2)`                             |
+| 回复用户     | 新建 `order_modify_address_reply` 消息，`parent` 指向原消息    |
+
+用户撤销申请走：
+
+```php
+add_action('wp_ajax_modify_address_cancel', 'zib_shop_ajax_modify_address_cancel');
+```
+
+只有申请发送者或管理员可以撤销，已处理申请不能撤销。撤销不是把状态改成驳回，而是删除这条待处理消息：
+
+```php
+ZibMsg::delete(array('id' => $msg_id));
+```
+
+后台 notice 由 `zib_shop_add_admin_order_address_notice()` 统计未处理申请：
+
+```php
+ZibMsg::get_count(array(
+    'type'   => 'order_modify_address',
+    'status' => 0,
+));
+```
+
+如果要扩展地址修改流程，必须继续走消息申请和审核，不要在用户提交时直接改订单地址。直接改地址会绕过商家确认，也会让后台 notice、申请回复和用户可见状态全部失效。
+
+## 商城通知矩阵
+
+商城通知集中在 `inc/functions/shop/inc/msg.php`。它不是单一渠道，而是根据场景同时发送邮件、站内信和微信模板消息。
+
+| 场景               | 函数                                             | 接收方 | 渠道                                                      |
+| ------------------ | ------------------------------------------------ | ------ | --------------------------------------------------------- |
+| 自动发货失败       | `zib_shop_auto_delivery_fail_to_user()`          | 用户   | 邮件、站内信、微信模板 `shop_auto_delivery_fail`          |
+| 虚拟商品发货       | `zib_shop_virtual_shipping_to_user()`            | 用户   | 邮件、站内信                                              |
+| 通知商家发货       | `zib_shop_notify_shipping_to_author()`           | 商家   | 邮件、站内信、微信模板 `shop_notify_shipping_to_author`   |
+| 商家发货后通知用户 | `zib_shop_manual_shipping_to_user()`             | 用户   | 邮件、站内信、微信模板 `shop_express_shipping`            |
+| 用户申请售后       | `zib_shop_user_apply_after_sale_to_author()`     | 商家   | 邮件、站内信、微信模板 `shop_after_sale_to_author`        |
+| 商家同意售后       | `zib_shop_after_sale_wait_user_return_to_user()` | 用户   | 邮件、站内信、微信模板 `shop_after_sale_wait_user_return` |
+| 用户退货发货       | `zib_shop_after_sale_user_returned_to_author()`  | 商家   | 邮件、站内信                                              |
+| 售后结束           | `zib_shop_after_sale_to_end_to_user()`           | 用户   | 邮件、站内信、微信模板 `shop_after_sale_end`              |
+| 用户取消售后       | `zib_shop_after_sale_user_cancels_to_author()`   | 商家   | 邮件、站内信                                              |
+
+通知正文会复用这些辅助函数：
+
+```php
+zib_shop_msg_pay_type_suffix($order);
+zib_shop_msg_greeting($display_name);
+zib_shop_msg_product_link($product_id, $post_title, $options_active_name);
+zib_shop_msg_view_order_btn($link, $text);
+```
+
+邮件通过 `zib_send_email()` 发送；站内信通过 `ZibMsg::add()` 写入，通常使用 `type=pay`；微信模板消息通过 `zib_wechat_template_send()` 发送。扩展通知时应先完成订单状态写入，再发送通知。通知失败不应该回滚发货、售后或退款状态。
+
+## 发货通知链路
+
+发货相关入口在 `inc/functions/shop/inc/shipping.php`。自动发货失败会先通知用户，再触发商家待发货通知；商家后台发货后会通知用户。
+
+关键链路是：
+
+```php
+zib_shop_auto_delivery_fail_to_user($order, $order_meta_data);
+zib_shop_notify_shipping($order, $order_meta_data);
+zib_shop_notify_shipping_to_author($order, $order_meta_data);
+zib_shop_manual_shipping_to_user($order, $order_meta_data);
+```
+
+`zib_shop_manual_shipping_to_user()` 会根据发货方式处理微信模板字段：
+
+| 发货方式     | 模板字段                                 |
+| ------------ | ---------------------------------------- |
+| `express`    | 快递公司、快递单号、发货时间             |
+| `no_express` | 快递公司显示为“无需物流发货”，单号写 `0` |
+
+不要把虚拟发货内容、快递单号、收货地址等敏感字段写到公开页面。站内信和邮件也要控制信息范围，尤其是商家通知里只应包含履约所需信息。
+
+## 扩展边界
+
+- 不要绕过 `zib_shop_get_order_type()`，非商城订单不应该进入商城订单 UI。
+- 不要只看 `order.status`，用户中心展示还依赖发货、售后、评价和支付超时。
+- 不要直接改 `order_data.consignee.address_data`，地址修改要走 `ZibMsg` 申请和商家或管理员处理。
+- 不要把 `author_contact_modal` 当作成交后私密信息入口，它支持游客访问。
+- 不要伪造订单按钮过滤器；当前按钮由 `zib_shop_get_user_order_btns()` 直接生成。
+- 不要在通知函数里改变订单状态，通知是状态变化后的结果，不是状态机本身。
+- 不要让邮件、微信模板失败中断主流程，必要时记录日志。
+- 不要在用户侧完整展示手机号、地址、物流原始响应、售后备注或后台处理备注。
+- 不要把商城通知和通用消息中心割裂，站内信仍要走 `ZibMsg`，微信通知仍要检查模板配置和用户 openid。

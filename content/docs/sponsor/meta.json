@@ -1,0 +1,7 @@
+{
+  "title": "赞助打赏",
+  "description": "赞助开发文档和知识库蒸馏预算",
+  "icon": "HeartHandshake",
+  "root": true,
+  "pages": ["index"]
+}

@@ -1,0 +1,6 @@
+{
+  "title": "LLM 文本",
+  "description": "自动生成并展示 llms.txt 文档索引",
+  "icon": "FileText",
+  "pages": ["index"]
+}

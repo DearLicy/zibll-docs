@@ -1,0 +1,152 @@
+---
+title: 快速开始
+description: 从子比主题源码出发，快速理解 CSF 设置页、字段注册、读取配置和事件挂载写法。
+---
+
+## 先看主题自己的入口
+
+子比主题的 CSF 后台设置不是单独的外部示例，而是主题自身的一部分。入口在：
+
+```txt
+inc/options/options.php
+inc/options/admin-options.php
+inc/options/metabox-options.php
+inc/options/profile-options.php
+```
+
+`inc/options/options.php` 负责加载后台设置相关文件，并启用 Font Awesome 4：
+
+```php
+zib_require(array(
+    'inc/options/options-module',
+    'inc/options/upgrade',
+));
+
+if (is_admin()) {
+    zib_require(array(
+        'admin-options',
+        'metabox-options',
+        'profile-options',
+        'action',
+    ), false, 'inc/options/');
+}
+
+add_filter('csf_fa4', '__return_true');
+```
+
+这就是子比主题的代码风格：入口只做加载和挂载，具体字段拆到对应文件。
+
+## 后台设置页如何创建
+
+主题后台设置页在 `inc/options/admin-options.php` 的 `zib_csf_admin_options()` 中创建。核心 prefix 是：
+
+```php
+$prefix = 'zibll_options';
+```
+
+设置页创建方式：
+
+```php
+CSF::createOptions($prefix, array(
+    'menu_title'         => __('zibll主题设置', 'zib_language'),
+    'menu_slug'          => 'zibll_options',
+    'framework_title'    => __('子比主题', 'zib_language'),
+    'show_in_customizer' => false,
+    'save_defaults'      => !$no_create,
+    'footer_text'        => sprintf(__('更优雅的wordpress主题-Zibll主题 V%s', 'zib_language'), wp_get_theme()['Version']),
+    'footer_credit'      => '<i class="fa fa-fw fa-heart-o" aria-hidden="true"></i> ',
+    'theme'              => 'light',
+));
+```
+
+注意两个细节：
+
+- `menu_slug` 和 `$prefix` 都是 `zibll_options`。
+- `save_defaults` 会结合 `$no_create` 控制，避免后台每个页面都完整保存默认配置。
+
+## Section 如何组织
+
+主题先创建一级 section，再继续创建子 section 和字段。一级分组示例：
+
+```php
+CSF::createSection($prefix, array(
+    'id'    => 'basic',
+    'title' => __('全局&功能', 'zib_language'),
+    'icon'  => 'fa fa-fw fa-bullseye',
+));
+
+CSF::createSection($prefix, array(
+    'id'    => 'user',
+    'title' => __('用户&互动', 'zib_language'),
+    'icon'  => 'fa fa-fw fa-user-o',
+));
+
+CSF::createSection($prefix, array(
+    'id'    => 'pay',
+    'title' => __('支付&付费', 'zib_language'),
+    'icon'  => 'fa fa-fw fa-jpy',
+));
+```
+
+这个结构说明：子比主题不是把所有字段堆进一个页面，而是先按业务域分组，再在各业务域里细分配置。
+
+## 读取主题设置
+
+主题设置读取统一走 `_pz()`：
+
+```php
+$shop_s = _pz('shop_s');
+$vip_1_name = _pz('pay_user_vip_1_name', 'VIP');
+$class = _pz('checkin_header_user_option', 'c-yellow', 'class');
+```
+
+`_pz()` 来自 `inc/dependent.php`，读取的是 `zibll_options`。它支持默认值和子字段：
+
+```php
+function _pz($name, $default = false, $subname = '')
+```
+
+## Meta 字段如何渲染
+
+主题在很多自定义场景里使用 `ZCSF::instance()` 渲染字段，比如用户资料页和自定义 meta box。基本形态是：
+
+```php
+ZCSF::instance('profile_options', array(
+    'value'  => $value,
+    'form'   => false,
+    'nonce'  => false,
+    'fields' => $fields,
+));
+```
+
+这类写法的重点是：CSF 只负责渲染字段，保存逻辑由主题函数自己处理。这样主题可以决定字段保存到普通 meta，还是聚合到 `zib_other_data`。
+
+## 事件挂载方式
+
+子比主题常见挂载方式是命名函数加 `add_action()` 或 `add_filter()`：
+
+```php
+add_action('after_setup_theme', 'zib_admin_widgets_register_menu_options');
+add_action('show_user_profile', 'zib_profile_options');
+add_action('edit_user_profile', 'zib_profile_options');
+add_action('personal_options_update', 'zib_profile_options_save');
+add_action('edit_user_profile_update', 'zib_profile_options_save');
+```
+
+文档中的示例也应优先保持这种风格：函数名清晰、使用 `array()`、通过 Hook 挂载，围绕主题本体源码说明问题。
+
+## 继续阅读
+
+按任务选择阅读路径：
+
+| 你要做什么                                                  | 先看                                                     |
+| ----------------------------------------------------------- | -------------------------------------------------------- |
+| 理清 CSF 从哪里加载、什么时候注册字段                       | [生命周期与加载顺序](/docs/codestar-framework/lifecycle) |
+| 判断字段应该放在哪个后台设置页                              | [主题设置结构地图](/docs/codestar-framework/option-map)  |
+| 理解 `zibll_options` 和 `_pz()`                             | [后台设置菜单](/docs/codestar-framework/admin-options)   |
+| 判断字段保存到 options、post meta、term meta 还是 user meta | [数据保存与读取](/docs/codestar-framework/data-storage)  |
+| 排查保存、重置、导入、缓存刷新问题                          | [保存流程与备份链路](/docs/codestar-framework/save-flow) |
+| 查看字段类型、参数和输出边界                                | [字段速查](/docs/codestar-framework/field-reference)     |
+| 判断 group、repeater、upload、多选等值怎么读                | [字段值格式](/docs/codestar-framework/value-shapes)      |
+| 看子比覆盖或新增的字段类型                                  | [子比自定义字段](/docs/codestar-framework/custom-fields) |
+| 在已有表单里渲染 CSF 字段                                   | [ZCSF 表单渲染](/docs/codestar-framework/zcsf-form)      |

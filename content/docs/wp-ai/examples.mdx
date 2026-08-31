@@ -1,0 +1,278 @@
+---
+title: 实战示例
+description: 读取文章、生成 SEO 描述、保存结果和类封装写法的可复制代码骨架。
+---
+
+## 示例目标
+
+这一页用一个完整场景串起来：
+
+1. 读取文章上下文。
+2. 生成 SEO 描述。
+3. 用户确认后保存 SEO 描述。
+4. 复杂逻辑改成类封装。
+
+示例使用 `zibll-ai-ext` 作为命名空间，表示“用户自己写的子比主题 AI 扩展”。它不是子比主题内置 Ability 分类，也不需要用户提供完整站点源码。实际项目中可以换成你的插件 slug。
+
+## 生成 SEO 描述
+
+这个 Ability 读取文章内容，调用 AI 生成描述，但不保存数据库。
+
+```php
+add_action( 'wp_abilities_api_init', function () {
+    wp_register_ability(
+        'zibll-ai-ext/generate-seo-description',
+        array(
+            'label'       => __( 'Generate SEO description', 'zibll-ai-ext-demo' ),
+            'description' => __( 'Generates a concise SEO meta description for a post without saving it.', 'zibll-ai-ext-demo' ),
+            'category'    => 'zibll-ai-ext',
+
+            'input_schema' => array(
+                'type'                 => 'object',
+                'required'             => array( 'post_id' ),
+                'properties'           => array(
+                    'post_id' => array(
+                        'type'        => 'integer',
+                        'description' => __( 'The post ID.', 'zibll-ai-ext-demo' ),
+                    ),
+                    'length'  => array(
+                        'type'        => 'integer',
+                        'default'     => 120,
+                        'minimum'     => 60,
+                        'maximum'     => 180,
+                        'description' => __( 'Target character length.', 'zibll-ai-ext-demo' ),
+                    ),
+                ),
+                'additionalProperties' => false,
+            ),
+
+            'output_schema' => array(
+                'type'                 => 'object',
+                'required'             => array( 'description' ),
+                'properties'           => array(
+                    'description' => array(
+                        'type'        => 'string',
+                        'description' => __( 'Generated SEO meta description.', 'zibll-ai-ext-demo' ),
+                    ),
+                ),
+                'additionalProperties' => false,
+            ),
+
+            'permission_callback' => function ( array $input ) {
+                return current_user_can( 'edit_post', absint( $input['post_id'] ) );
+            },
+
+            'execute_callback' => function ( array $input ) {
+                $post_id = absint( $input['post_id'] );
+                $post    = get_post( $post_id );
+
+                if ( ! $post ) {
+                    return new WP_Error( 'post_not_found', __( 'Post not found.', 'zibll-ai-ext-demo' ) );
+                }
+
+                $length  = isset( $input['length'] ) ? absint( $input['length'] ) : 120;
+                $content = wp_strip_all_tags( (string) $post->post_content );
+                $content = trim( preg_replace( '/\s+/u', ' ', $content ) );
+
+                if ( '' === $content ) {
+                    return new WP_Error( 'empty_content', __( 'Post content is empty.', 'zibll-ai-ext-demo' ) );
+                }
+
+                $prompt = sprintf(
+                    "请为下面文章生成一段 SEO 描述，长度控制在 %d 个中文字符左右，只输出描述文本。\n\n标题：%s\n\n正文：%s",
+                    $length,
+                    get_the_title( $post_id ),
+                    wp_trim_words( $content, 300, '' )
+                );
+
+                $text = wp_ai_client_prompt( $prompt )
+                    ->using_system_instruction( '你是一个熟悉 WordPress 和中文内容 SEO 的编辑。输出要自然、准确，不要编造文章不存在的信息。' )
+                    ->using_temperature( 0.4 )
+                    ->using_max_tokens( 300 )
+                    ->generate_text();
+
+                if ( is_wp_error( $text ) ) {
+                    return $text;
+                }
+
+                return array(
+                    'description' => sanitize_text_field( trim( $text, " \t\n\r\0\x0B\"'" ) ),
+                );
+            },
+
+            'meta' => array(
+                'annotations' => array(
+                    'readonly'    => true,
+                    'destructive' => false,
+                    'idempotent'  => false,
+                ),
+                'show_in_rest' => true,
+            ),
+        )
+    );
+} );
+```
+
+为什么 `idempotent=false`？因为同样输入多次调用 AI，输出可能不同。它不写数据库，但结果不保证完全一致。
+
+## 保存 SEO 描述
+
+保存能力会写数据库，所以不要标记 `readonly=true`，也不建议默认暴露 REST。
+
+```php
+add_action( 'wp_abilities_api_init', function () {
+    wp_register_ability(
+        'zibll-ai-ext/save-seo-description',
+        array(
+            'label'       => __( 'Save SEO description', 'zibll-ai-ext-demo' ),
+            'description' => __( 'Saves a SEO meta description to a post after permission checks.', 'zibll-ai-ext-demo' ),
+            'category'    => 'zibll-ai-ext',
+
+            'input_schema' => array(
+                'type'                 => 'object',
+                'required'             => array( 'post_id', 'description' ),
+                'properties'           => array(
+                    'post_id'     => array( 'type' => 'integer' ),
+                    'description' => array(
+                        'type'      => 'string',
+                        'minLength' => 20,
+                        'maxLength' => 220,
+                    ),
+                ),
+                'additionalProperties' => false,
+            ),
+
+            'output_schema' => array(
+                'type'       => 'object',
+                'required'   => array( 'updated' ),
+                'properties' => array(
+                    'updated' => array( 'type' => 'boolean' ),
+                ),
+            ),
+
+            'permission_callback' => function ( array $input ) {
+                return current_user_can( 'edit_post', absint( $input['post_id'] ) );
+            },
+
+            'execute_callback' => function ( array $input ) {
+                update_post_meta(
+                    absint( $input['post_id'] ),
+                    '_zibll_ai_ext_seo_description',
+                    sanitize_text_field( $input['description'] )
+                );
+
+                return array( 'updated' => true );
+            },
+
+            'meta' => array(
+                'annotations' => array(
+                    'readonly'    => false,
+                    'destructive' => false,
+                    'idempotent'  => true,
+                ),
+                'show_in_rest' => false,
+            ),
+        )
+    );
+} );
+```
+
+后台应该先展示生成结果，让用户确认后再调用这个保存能力。
+
+## 类封装写法
+
+当能力变复杂时，建议继承 `WP_Ability` 或自己的基类。
+
+```php
+class Zibll_AI_Ext_Post_Summary_Ability extends WP_Ability {
+    public function __construct( string $name, array $args ) {
+        parent::__construct(
+            $name,
+            array_merge(
+                array(
+                    'label'               => __( 'Generate post summary', 'zibll-ai-ext-demo' ),
+                    'description'         => __( 'Generates a summary for a post without saving it.', 'zibll-ai-ext-demo' ),
+                    'category'            => 'zibll-ai-ext',
+                    'input_schema'        => $this->input_schema(),
+                    'output_schema'       => $this->output_schema(),
+                    'permission_callback' => array( $this, 'permission_callback' ),
+                    'execute_callback'    => array( $this, 'execute_callback' ),
+                    'meta'                => array(
+                        'annotations'  => array(
+                            'readonly'    => true,
+                            'destructive' => false,
+                            'idempotent'  => false,
+                        ),
+                        'show_in_rest' => true,
+                    ),
+                ),
+                $args
+            )
+        );
+    }
+
+    private function input_schema(): array {
+        return array(
+            'type'       => 'object',
+            'required'   => array( 'post_id' ),
+            'properties' => array(
+                'post_id' => array( 'type' => 'integer' ),
+                'style'   => array(
+                    'type'    => 'string',
+                    'enum'    => array( 'short', 'bullet' ),
+                    'default' => 'short',
+                ),
+            ),
+        );
+    }
+
+    private function output_schema(): array {
+        return array(
+            'type'       => 'object',
+            'properties' => array(
+                'summary' => array( 'type' => 'string' ),
+            ),
+        );
+    }
+
+    public function permission_callback( array $input ) {
+        return current_user_can( 'edit_post', absint( $input['post_id'] ) );
+    }
+
+    public function execute_callback( array $input ) {
+        $post = get_post( absint( $input['post_id'] ) );
+
+        if ( ! $post ) {
+            return new WP_Error( 'post_not_found', __( 'Post not found.', 'zibll-ai-ext-demo' ) );
+        }
+
+        $content = wp_strip_all_tags( (string) $post->post_content );
+
+        $summary = wp_ai_client_prompt( '<content>' . $content . '</content>' )
+            ->using_system_instruction( '请为内容生成中文摘要，只输出摘要。' )
+            ->using_temperature( 0.5 )
+            ->generate_text();
+
+        if ( is_wp_error( $summary ) ) {
+            return $summary;
+        }
+
+        return array( 'summary' => sanitize_textarea_field( $summary ) );
+    }
+}
+```
+
+注册时指定类：
+
+```php
+add_action( 'wp_abilities_api_init', function () {
+    wp_register_ability(
+        'zibll-ai-ext/generate-post-summary',
+        array(
+            'ability_class' => Zibll_AI_Ext_Post_Summary_Ability::class,
+        )
+    );
+} );
+```
+
+类封装适合需要复用 schema、权限、AI 调用和日志处理的场景。

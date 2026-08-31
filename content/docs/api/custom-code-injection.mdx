@@ -1,0 +1,339 @@
+---
+title: 自定义代码与安全注入
+description: 梳理子比主题自定义 CSS、JavaScript、头部/底部 HTML、统计代码、Hook 注入和 PHP 扩展边界。
+---
+
+子比主题后台提供了自定义 CSS、JavaScript、头部 HTML、底部 HTML 和统计代码字段。它们适合做轻量样式、统计脚本、第三方验证标签和少量前端交互，不适合承载复杂 PHP 业务逻辑。
+
+二次开发时先判断代码类型：CSS/JS/HTML 可以放到主题设置或小工具；PHP 逻辑应该放到插件、子主题或受控加载文件，并通过 WordPress Hook、主题 Hook、Ajax 和 Codestar Framework 接入。
+
+## 源码入口
+
+| 文件                                                          | 作用                                           |
+| ------------------------------------------------------------- | ---------------------------------------------- |
+| `inc/options/admin-options.php`                               | 注册“全局&功能 -> 自定义代码”字段              |
+| `inc/functions/zib-head.php`                                  | 输出自定义 CSS 和头部 HTML                     |
+| `inc/functions/zib-footer.php`                                | 输出底部 HTML、统计代码和自定义 JavaScript     |
+| `inc/widgets/`                                                | 小工具区域可承载局部 HTML 或展示模块           |
+| `inc/functions/zib-single.php`、`inc/functions/zib-theme.php` | 文章内容前后和正文区域 Hook                    |
+| `inc/functions/zib-footer.php`                                | 页脚、右侧浮动按钮、底部 Tabbar 和全局变量输出 |
+
+官网教程强调不要直接修改主题源码。主题设置里的自定义代码保存到数据库，主题更新不会覆盖；但代码本身没有业务级校验，写错仍然会造成样式错乱、脚本报错、统计重复或页面白屏。
+
+## 后台字段
+
+后台字段在 `inc/options/admin-options.php` 中注册：
+
+| 字段             | 类型       | 输出位置                           | 是否需要标签       |
+| ---------------- | ---------- | ---------------------------------- | ------------------ |
+| `csscode`        | CSS        | `<head>` 内统一 `<style>`          | 不需要 `<style>`   |
+| `javascriptcode` | JavaScript | `wp_footer`，主题自动包 `<script>` | 不需要 `<script>`  |
+| `headcode`       | HTML       | `</head>` 前                       | 需要完整 HTML 标签 |
+| `footcode`       | HTML       | `</body>` 前                       | 需要完整 HTML 标签 |
+| `trackcode`      | HTML       | `</body>` 前                       | 需要完整 HTML 标签 |
+
+这些字段都是 `code_editor`，并且 `sanitize` 为 `false`。这意味着主题会尽量原样保存和输出代码，适合高级用户，但也要求代码本身必须可信、完整、可回滚。
+
+## CSS 输出
+
+`csscode` 不是单独一个 `<style>` 字段，而是追加到主题动态 CSS 里：
+
+```php
+if (_pz('csscode')) {
+    $styles .= _pz('csscode');
+}
+
+if ($styles) {
+    echo '<style>' . $styles . '</style>';
+}
+```
+
+它会和主题色、夜间模式、布局背景、代码高亮高度、懒加载动画等 CSS 一起输出。写样式时建议：
+
+- 优先使用主题 CSS 变量，例如 `--theme-color`、`--main-radius`。
+- 给自定义模块加明确 class，避免全站选择器误伤。
+- 不要用过高优先级覆盖主题核心结构，除非已经确认移动端和夜间模式。
+- 修改文章、商城、论坛等局部样式时，尽量加页面 class 或 post type 条件。
+
+示例：
+
+```css
+.zib-docs-notice {
+  border-radius: var(--main-radius);
+  border: 1px solid var(--focus-color-opacity3);
+  background: var(--focus-color-opacity05);
+  color: var(--main-color);
+}
+
+body.dark-theme .zib-docs-notice {
+  background: rgba(255, 255, 255, 0.06);
+}
+```
+
+如果样式只属于某个页面、某篇文章或某个业务模块，不建议堆进全局 `csscode`。更好的方式是在页面模板、子主题样式文件或模块输出时按条件加载。
+
+## JavaScript 输出
+
+`javascriptcode` 会在 `wp_footer` 里输出，主题自动包 `<script>`：
+
+```php
+if (_pz('javascriptcode')) {
+    $code .= '<script type="text/javascript">' . _pz('javascriptcode') . '</script>';
+}
+```
+
+因此后台字段里只写 JS 内容，不要再写 `<script>`。适合放少量统计初始化、轻量 DOM 行为或第三方脚本加载器。
+
+示例：
+
+```js
+(function () {
+  var button = document.querySelector('.zib-docs-scroll-top');
+  if (!button) {
+    return;
+  }
+
+  button.addEventListener('click', function () {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+})();
+```
+
+注意几个边界：
+
+| 问题     | 说明                                                             |
+| -------- | ---------------------------------------------------------------- |
+| 执行时机 | 位于 `wp_footer`，DOM 大多已存在，但 Ajax 后加载的内容不一定存在 |
+| 动态模块 | 评论、弹窗、Ajax Tab、分页加载后要监听主题事件或重新初始化       |
+| 缓存压缩 | JS 合并、延迟加载和 CDN 优化可能改变执行顺序                     |
+| 报错影响 | 一个语法错误可能阻断后面的脚本                                   |
+
+复杂前端功能建议注册独立脚本文件，并使用 `wp_enqueue_script()` 管理依赖、版本和加载位置。
+
+## 头部 HTML
+
+`headcode` 由 `zib_head_code()` 输出：
+
+```php
+function zib_head_code()
+{
+    if (_pz('headcode')) {
+        echo "\n<!--HEADER_CODE_START-->\n" . _pz('headcode') . "\n<!--HEADER_CODE_END-->\n";
+    }
+}
+```
+
+适合放：
+
+| 内容           | 示例                                       |
+| -------------- | ------------------------------------------ |
+| 第三方验证     | 站长平台、域名验证 meta                    |
+| 资源提示       | `preconnect`、`dns-prefetch`、少量 preload |
+| 全站 head 脚本 | 必须提前加载的第三方 SDK                   |
+| 结构化数据     | 少量全站 JSON-LD                           |
+
+不建议在这里重复输出 SEO title、description、canonical。主题已有 [SEO Head 与 robots](/docs/api/seo-head-robots) 链路，重复输出会造成搜索引擎解析混乱。
+
+## 底部 HTML 和统计代码
+
+底部输出由 `zib_footer()` 处理：
+
+```php
+add_action('wp_footer', 'zib_footer', 98);
+function zib_footer()
+{
+    $code = '';
+    if (_pz('footcode')) {
+        $code .= "<!--FOOTER_CODE_START-->\n" . _pz('footcode') . "\n<!--FOOTER_CODE_END-->\n";
+    }
+    if (_pz('trackcode')) {
+        $code .= "<!--FOOTER_CODE_START-->\n" . _pz('trackcode') . "\n<!--FOOTER_CODE_END-->\n";
+    }
+    if (_pz('javascriptcode')) {
+        $code .= '<script type="text/javascript">' . _pz('javascriptcode') . '</script>';
+    }
+    echo $code;
+}
+```
+
+`footcode` 更适合底部 HTML、第三方浮窗容器、需要完整标签的脚本片段；`trackcode` 更适合统计代码。两者都会在 `wp_footer` 的优先级 `98` 输出，晚于大多数主题基础变量，但早于少量优先级 `99` 的脚本。
+
+如果统计平台只提供纯 JS，不带 `<script>` 标签，放到 `javascriptcode`；如果提供的是完整 HTML 片段，放到 `trackcode`。
+
+## 小工具与局部 HTML
+
+全局自定义代码会影响所有页面。局部广告、局部提示、侧栏 HTML、首页模块 HTML 更适合用小工具或模块位置。
+
+常见选择：
+
+| 需求                 | 建议入口                |
+| -------------------- | ----------------------- |
+| 全站 CSS             | `csscode` 或子主题样式  |
+| 全站统计             | `trackcode`             |
+| 第三方验证 meta      | `headcode`              |
+| 侧栏广告             | 小工具                  |
+| 首页局部 HTML        | 小工具或页面模块        |
+| 文章内容前后固定内容 | 文章页设置或文章 Hook   |
+| 复杂业务模块         | 插件、子主题或主题 Hook |
+
+如果要在文章正文前后插入内容，优先看 [文章正文与单页渲染](/docs/api/single-post-rendering) 和 [Hook 与过滤器](/docs/api/hooks)，不要把所有 HTML 都塞进全局底部。
+
+## PHP 代码放哪里
+
+后台自定义代码字段不能运行 PHP。PHP 扩展应放在可维护的位置，并通过 Hook 接入：
+
+```php
+function zib_docs_single_after_notice($post)
+{
+    if (empty($post->ID) || !is_singular('post')) {
+        return;
+    }
+
+    echo '<div class="muted-box zib-docs-notice">';
+    echo esc_html__('感谢阅读，更多内容请查看站内专题。', 'zib_language');
+    echo '</div>';
+}
+add_action('zib_posts_content_after', 'zib_docs_single_after_notice', 20, 1);
+```
+
+这类代码适合放到插件或子主题里。优点是：
+
+- 可以使用 PHP 条件判断。
+- 可以复用主题函数和 WordPress API。
+- 可以按模块拆分文件。
+- 可以用版本管理记录变更。
+- 出问题时可以停用插件或切回父主题排查。
+
+不要把 PHP 片段粘进 `headcode`、`footcode` 或 `javascriptcode`。它们只会被当成文本输出，不会作为 PHP 执行。
+
+## 条件输出
+
+需要按页面条件输出代码时，用 PHP Hook，不要在全局 JS/CSS 里硬判断所有场景。
+
+头部输出示例：
+
+```php
+function zib_docs_output_product_meta()
+{
+    if (!is_singular('shop_product')) {
+        return;
+    }
+
+    echo '<meta name="robots" content="index,follow">' . "\n";
+}
+add_action('wp_head', 'zib_docs_output_product_meta', 20);
+```
+
+底部输出示例：
+
+```php
+function zib_docs_output_footer_script()
+{
+    if (!is_page('about')) {
+        return;
+    }
+    ?>
+    <script>
+    window.zibDocsPage = 'about';
+    </script>
+    <?php
+}
+add_action('wp_footer', 'zib_docs_output_footer_script', 99);
+```
+
+样式输出示例：
+
+```php
+function zib_docs_output_single_style()
+{
+    if (!is_singular('post')) {
+        return;
+    }
+
+    echo '<style>.single-post .zib-docs-notice{margin-top:20px;}</style>';
+}
+add_action('wp_head', 'zib_docs_output_single_style', 99);
+```
+
+如果样式或脚本变多，改用 `wp_enqueue_style()` 和 `wp_enqueue_script()`。
+
+## 使用 Enqueue 管理资源
+
+独立文件更适合复杂功能：
+
+```php
+function zib_docs_enqueue_assets()
+{
+    if (!is_singular('post')) {
+        return;
+    }
+
+    wp_enqueue_style(
+        'zib-docs-single',
+        get_stylesheet_directory_uri() . '/assets/css/single.css',
+        array(),
+        '1.0.0'
+    );
+
+    wp_enqueue_script(
+        'zib-docs-single',
+        get_stylesheet_directory_uri() . '/assets/js/single.js',
+        array('jquery'),
+        '1.0.0',
+        true
+    );
+}
+add_action('wp_enqueue_scripts', 'zib_docs_enqueue_assets');
+```
+
+使用 enqueue 的好处是可以设置依赖、版本号、加载位置，并让缓存系统更容易识别资源变化。
+
+## 安全边界
+
+| 场景                      | 风险                   | 建议                                         |
+| ------------------------- | ---------------------- | -------------------------------------------- |
+| 后台字段 `sanitize=false` | 代码原样输出           | 只给可信管理员使用                           |
+| 全局 CSS                  | 误伤全站布局           | 限定 class 和页面条件                        |
+| 全局 JS                   | 一个报错影响全站交互   | 包裹作用域，先判空                           |
+| 第三方脚本                | 性能、隐私、跨域、阻塞 | 放底部，按需加载                             |
+| 统计代码重复              | 数据翻倍               | 只保留一个入口                               |
+| PHP 片段散落              | 更新和排查困难         | 放插件或子主题，记录 Hook                    |
+| 输出用户输入              | XSS                    | 使用 `esc_html()`、`esc_attr()`、`esc_url()` |
+
+后台自定义代码字段适合快速配置，不适合作为长期业务系统。长期功能应该迁移到可维护的 PHP 文件和独立资源文件。
+
+## 排查顺序
+
+自定义代码导致异常时按这个顺序查：
+
+1. 临时清空或备份后移除 `csscode`、`javascriptcode`、`headcode`、`footcode`、`trackcode`。
+2. 清理缓存和 CDN。
+3. 查看浏览器控制台第一个 JS 报错。
+4. 查看页面源代码，确认代码输出位置是否正确。
+5. 检查是否重复加载同一个统计或 SDK。
+6. 关闭 JS 合并、延迟加载和 HTML 压缩。
+7. 如果是 PHP 扩展，查看 PHP 错误日志。
+8. 按 Hook 优先级调整输出时机。
+
+常见现象：
+
+| 现象                   | 可能原因                                              |
+| ---------------------- | ----------------------------------------------------- |
+| 页面样式全乱           | 全局 CSS 选择器过宽或语法缺少括号                     |
+| 弹窗、评论、登录无反应 | 自定义 JS 报错阻断后续脚本                            |
+| 统计没有数据           | 放错字段、脚本被缓存优化延迟、第三方域名被拦截        |
+| SEO 标签重复           | `headcode` 里又输出了 description 或 canonical        |
+| 移动端异常             | CSS/JS 只按桌面结构写，没有检查底部 Tabbar 和移动菜单 |
+| 更新后代码还在         | 后台字段存在数据库里，不随主题文件更新消失            |
+
+## 开发边界
+
+- CSS 和 JavaScript 字段不需要写外层标签。
+- 头部、底部、统计字段需要完整 HTML 标签。
+- PHP 代码不要放进后台自定义代码字段。
+- 复杂功能用插件、子主题、Hook 和 enqueue 管理。
+- 统计、验证、SEO、分享 SDK 不要重复接入。
+- 动态用户页面、支付页、验证码和 Ajax 交互不要被缓存固定。
+- 任何输出到页面的用户数据都要按上下文转义。
+
+本页根据 `inc/options/admin-options.php`、`inc/functions/zib-head.php`、`inc/functions/zib-footer.php`、`inc/widgets/`、`inc/functions/zib-single.php`、`inc/functions/zib-theme.php` 以及子比官网“正确使用自定义代码示例及教程”公开文章蒸馏整理。

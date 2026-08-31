@@ -1,0 +1,536 @@
+---
+title: Zibpay VIP 与会员权益
+description: 梳理子比主题 VIP 购买、续费、升级、卡密兑换、积分兑换、支付成功回调、会员状态和权益判断链路。
+---
+
+## 模块边界
+
+VIP 是 Zibpay 里的用户资产与权限链路，不只是一个用户标签。它会影响导航栏开通按钮、用户中心会员卡片、付费内容购买权限、会员免费价、免费资源下载次数、下载限速、权限管理、推广分佣比例和后台用户资料。
+
+扩展会员能力时，不要直接改 `vip_level` 或 `vip_exp_date` 后就结束。正确做法是让用户通过会员商品、卡密、积分兑换或业务奖励进入统一的会员更新入口，并让主题原有的过期判断、权益读取和权限判断继续生效。
+
+官网的 [VIP 会员教程](https://www.zibll.com/767.html) 把会员系统拆成“会员属性、会员商品、会员特权”三层：[卡密教程](https://www.zibll.com/8663.html) 又把卡密兑换会员并入同一类资产入口。落到本地源码时，这三层分别对应后台 option、`order_type = 4` 订单和用户 meta 权益判断，而不是一个独立的会员表。
+
+核心源码：
+
+| 文件                                   | 作用                                                                              |
+| -------------------------------------- | --------------------------------------------------------------------------------- |
+| `zibpay/functions/zibpay-vip.php`      | 会员动作判断、会员卡片、购买弹窗、续费/升级商品、积分兑换入口、支付成功后更新会员 |
+| `zibpay/functions/zibpay-order.php`    | `order_type = 4` 的会员下单、卡密兑换、购买/续费/升级价格重算                     |
+| `zibpay/functions/zibpay-ajax.php`     | 积分支付下单，包含积分兑换会员                                                    |
+| `zibpay/functions/ajax.php`            | `pay_vip` 和 `vip_points_exchange_modal` 弹窗 Ajax                                |
+| `zibpay/functions/zibpay-download.php` | 会员免费资源次数、下载限速和下载次数记录                                          |
+| `inc/functions/user/user-cap.php`      | `zib_user_can()` 权限体系里的 `vip` 角色判断                                      |
+| `inc/options/admin-options.php`        | 会员开关、名称、权益、卡密兑换、积分兑换、购买/续费/升级商品配置                  |
+| `inc/options/options-module.php`       | 权限字段、会员商品字段和 Codestar 字段复用模块                                    |
+
+## 数据字段
+
+用户会员状态保存在 user meta：
+
+| 字段                | 说明                                                        |
+| ------------------- | ----------------------------------------------------------- |
+| `vip_level`         | 当前有效会员等级，常见为 `1` 或 `2`，过期后会被主题置为 `0` |
+| `vip_exp_date`      | 到期时间，普通时间格式或 `Permanent`                        |
+| `vip_level_expired` | 最近过期的会员等级，用于过期提示和历史状态                  |
+| `pay_down_number`   | 免费资源每日下载记录，会员权益会影响每日次数上限            |
+
+会员订单使用 Zibpay 订单字段：
+
+| 字段                      | 说明                                                                              |
+| ------------------------- | --------------------------------------------------------------------------------- |
+| `order_type = 4`          | 会员开通、续费、升级、兑换统一订单类型                                            |
+| `product_id`              | 会员商品标识，支付成功后会被拆解并更新会员                                        |
+| `order_data.vip_pay_type` | 会员动作类型，例如 `pay`、`renewvip`、`upgradevip`、`exchange`、`points_exchange` |
+| `order_data.card_pass_id` | 卡密兑换会员时关联的卡密 ID                                                       |
+
+`product_id` 的常见形态：
+
+| 形态                                  | 来源           |
+| ------------------------------------- | -------------- |
+| `vip_{level}_{product}_pay`           | 现金购买会员   |
+| `vip_{level}_{product}_renew`         | 续费当前会员   |
+| `vip_{level}_{product}_upgrade`       | 升级到更高会员 |
+| `vip_{level}_{time}{unit}_exchange`   | 卡密兑换会员   |
+| `vip_{level}_{product}_points_{time}` | 积分兑换会员   |
+
+不要让前端传来的 `vip_product_id` 决定最终价格。主题在 `zibpay/functions/zibpay-order.php` 里会重新读取配置、校验用户当前会员状态，再写入 `order_price` 和 `product_id`。
+
+## 配置入口
+
+会员配置集中在后台支付付费的会员区域，常用配置包括：
+
+| 配置                                         | 说明                                                     |
+| -------------------------------------------- | -------------------------------------------------------- |
+| `pay_user_vip_1_s`、`pay_user_vip_2_s`       | 开启一级、二级会员                                       |
+| `pay_user_vip_1_name`、`pay_user_vip_2_name` | 会员显示名称                                             |
+| `vip_benefit`                                | 普通用户、一级会员、二级会员的免费资源下载次数和下载限速 |
+| `pay_vip_pass_charge_s`                      | 开启卡密兑换会员                                         |
+| `pay_vip_pass_charge_only_password`          | 卡密兑换是否只输入密码                                   |
+| `pay_vip_points_exchange_s`                  | 开启积分兑换会员                                         |
+| `pay_vip_points_exchange_product`            | 积分兑换会员商品，包含积分、等级、时长和单位             |
+| `vip_opt.vip_{level}_product`                | 购买会员商品                                             |
+| `vip_opt.vip_renew`                          | 续费开关                                                 |
+| `vip_opt.vip_renew_price_type`               | 续费价格策略：折扣、立减或自定义                         |
+| `vip_opt.vip_upgrade`                        | 升级开关                                                 |
+| `vip_opt.vip_upgrade_product`                | 升级商品价格、跨越升级和永久会员升级配置                 |
+
+会员等级也会出现在权限管理里。`CFS_Module::user_role_fields()` 会把 `vip` 作为用户能力条件，`zib_is_can_roles()` 会判断当前用户会员等级是否大于等于配置要求。
+
+官网场景与本地链路的对应关系：
+
+| 官网场景                                   | 本地落点                                                                   | 二开提醒                                          |
+| ------------------------------------------ | -------------------------------------------------------------------------- | ------------------------------------------------- |
+| 开启一级、二级会员，自定义名称、简介、图标 | `pay_user_vip_{level}_s`、`pay_user_vip_{level}_name`、会员卡片相关 option | 不要只改前端文案，权限判断会继续看等级开关        |
+| 配置会员商品价格和有效期                   | `vip_opt.vip_{level}_product`                                              | 下单时服务端重算价格，执行价不能由前端决定        |
+| 购买、续费、升级会员                       | `zibpay_ajax_submit_order()` 的 `case 4`                                   | 三种动作都会写成 `vip_{level}_{product}_{action}` |
+| 付费内容会员价或会员免费                   | 文章 `posts_zibpay.vip_{level}_price` / `vip_{level}_points`               | 这是文章资源权益，不是会员商品价格                |
+| 卡密兑换会员                               | `payment_method = card_pass`、`vip_exchange` 卡密                          | 卡密先建 0 元订单，支付成功后再更新会员           |
+| 积分兑换会员                               | `points_initiate_pay` 的 `order_type = 4`                                  | 默认只允许非会员兑换，不是积分续费入口            |
+| 用户权限管理里的会员能力                   | `zib_user_can()`、`zib_is_can_roles()`                                     | 能配置成权限项的能力不要散落硬编码等级            |
+
+## 会员动作判断
+
+主题用 `zibpay_is_pay_vip_type()` 判断当前用户还能执行什么会员动作：
+
+```php
+$type = zibpay_is_pay_vip_type(get_current_user_id());
+
+if ($type['pay']) {
+    // 非会员，可购买会员。
+}
+
+if ($type['renew']) {
+    // 已是期限会员，且续费开关开启。
+}
+
+if ($type['upgrade']) {
+    // 当前等级低于二级会员，且升级开关开启。
+}
+```
+
+返回结构固定是：
+
+```php
+array(
+    'pay'     => false,
+    'renew'   => false,
+    'upgrade' => false,
+)
+```
+
+已是会员时：
+
+| 条件                                                               | 动作                       |
+| ------------------------------------------------------------------ | -------------------------- |
+| `vip_exp_date != Permanent` 且 `vip_opt.vip_renew` 开启            | 可续费当前等级             |
+| 当前等级小于 `2` 且 `vip_opt.vip_upgrade`、`pay_user_vip_2_s` 开启 | 可升级到二级会员           |
+| 当前是永久会员且可升级                                             | `upgrade` 返回 `Permanent` |
+| 当前是期限会员且可升级                                             | `upgrade` 返回 `unit`      |
+
+非会员时，主题根据 `pay_user_vip_1_s` 和 `pay_user_vip_2_s` 返回可购买等级。
+
+## 购买弹窗
+
+前端只要输出带 `pay-vip` 类名的链接，主题支付脚本会自动打开会员弹窗：
+
+```php
+function mytheme_get_pay_vip_button($level = 1)
+{
+    if (!is_user_logged_in()) {
+        return '<a class="signin-loader but jb-red radius" href="javascript:;">' . __('开通会员', 'zib_language') . '</a>';
+    }
+
+    $level = (int) $level;
+    if (!$level) {
+        $level = 1;
+    }
+
+    return '<a class="pay-vip but jb-red radius" vip-level="' . $level . '" href="javascript:;">' . __('开通会员', 'zib_language') . '</a>';
+}
+```
+
+点击后，`zibpay/assets/js/pay.js` 会请求：
+
+```txt
+admin-ajax.php?action=pay_vip&vip_level={level}
+```
+
+服务端入口是 `zibpay_pay_vip_modal()`：
+
+1. 未登录时返回登录提示。
+2. 已登录时调用 `zibpay_get_pay_uservip_modal()`。
+3. 如果用户已经是会员，自动转入 `zibpay_get_pay_userviped_content()`，展示续费或升级。
+
+普通购买表单会传：
+
+```php
+order_type = 4
+vip_product_id = payvip_{level}_{product}
+```
+
+续费表单会传：
+
+```php
+order_type = 4
+vip_product_id = renewvip_{level}_{product}
+```
+
+升级表单会传：
+
+```php
+order_type = 4
+vip_product_id = upgradevip_2_{product}
+```
+
+## 续费商品
+
+续费商品由 `zibpay_get_vip_renew_product($vip_level)` 生成。它会根据 `vip_opt.vip_renew_price_type` 使用不同价格策略：
+
+| 策略        | 说明                                                      |
+| ----------- | --------------------------------------------------------- |
+| `discount`  | 读取原购买商品，再按 `vip_renew_discount` 打折            |
+| `reduce`    | 读取原购买商品，再按 `vip_renew_reduce` 立减，最低 `0.01` |
+| `customize` | 读取 `vip_{level}_renew_product` 自定义续费商品           |
+
+续费时间单位支持 `day` 和 `month`。商品 `time = 0` 或 `Permanent` 会被视为永久会员。
+
+续费成功后的到期时间从用户当前 `vip_exp_date` 往后追加，不是从支付当天重新计算：
+
+```php
+$new_vip_exp_date = date('Y-m-d 23:59:59', strtotime("+ $pay_vip_time $unit", strtotime($user_vip_exp_date)));
+```
+
+所以自定义续费逻辑时，要先确认用户当前会员未过期且不是永久会员。
+
+## 升级商品
+
+升级商品由 `zibpay_get_vip_upgrade_product($user_id, $upgrade_type)` 生成，配置来自 `vip_opt.vip_upgrade_product`。
+
+常见升级方式：
+
+| 类型         | 说明                                              |
+| ------------ | ------------------------------------------------- |
+| 期限会员升级 | 按剩余天数乘 `unit_price` 计算差价                |
+| 永久会员升级 | 使用 `permanent_price` 等永久升级字段             |
+| 跨越升级     | `jump_s` 开启后，可以从期限会员升级为永久二级会员 |
+
+升级成功后：
+
+- 升级到期限会员时，保留原有 `vip_exp_date`。
+- 升级到永久会员时，`vip_exp_date` 写为 `Permanent`。
+- 会员等级写为目标等级。
+
+不要把升级当成一次新购买，否则会错误重置到期时间。
+
+## 卡密兑换
+
+开启 `pay_vip_pass_charge_s` 后，会员购买弹窗会允许选择卡密支付。卡密订单仍然是：
+
+```php
+order_type = 4
+payment_method = card_pass
+```
+
+服务端会：
+
+1. 校验卡号和密码，或在单密码模式下只校验密码。
+2. 调用 `zibpay_get_vip_exchange_card()` 查找 `type = vip_exchange` 的卡密。
+3. 校验卡密未使用。
+4. 设置订单价格为 `0`。
+5. 写入 `order_data.card_pass_id` 和 `order_data.vip_pay_type = exchange`。
+6. 通过 `pay_order_price_is_allow_0` 允许创建 0 元订单。
+
+卡密真正对应的会员等级和时长来自 `zibpay_get_vip_exchange_card_data()`，不要自己拼接不可信的等级和时间。
+
+## 积分兑换
+
+积分兑换入口由 `zibpay_get_vip_points_exchange_link()` 生成，只有满足这些条件才会显示：
+
+| 条件                                     | 说明                 |
+| ---------------------------------------- | -------------------- |
+| `_pz('points_s', true)`                  | 积分系统开启         |
+| `_pz('pay_vip_points_exchange_s', true)` | 积分兑换会员开启     |
+| 至少开启一个会员等级                     | 一级或二级会员可用   |
+| 当前用户不是会员                         | 已是会员时不显示兑换 |
+
+弹窗 Ajax 是：
+
+```txt
+admin-ajax.php?action=vip_points_exchange_modal
+```
+
+提交兑换后，`points_initiate_pay` 会在 `order_type = 4` 分支读取 `pay_vip_points_exchange_product`，创建积分订单：
+
+```php
+$__data['product_id'] = 'vip_' . $lists_opt[$product_id]['level'] . '_' . $product_id . '_points_' . $product_id_5;
+$__mate_order_data['vip_pay_type'] = 'points_exchange';
+```
+
+积分不足时会直接返回错误；积分足够时会扣减积分并调用 Zibpay 支付完成流程，最后仍由会员支付成功回调更新用户会员。
+
+## 订单创建
+
+会员订单统一在 `zibpay/functions/zibpay-order.php` 的 `case 4` 里创建。服务端会根据不同动作重算价格和商品：
+
+| 前端动作          | 服务端校验                                 | 写入                                  |
+| ----------------- | ------------------------------------------ | ------------------------------------- |
+| `payvip`          | 会员等级开启、商品存在                     | `vip_{level}_{product}_pay`           |
+| `renewvip`        | 续费开启、当前用户就是该等级、不是永久会员 | `vip_{level}_{product}_renew`         |
+| `upgradevip`      | 升级开启、当前用户低于目标等级             | `vip_{level}_{product}_upgrade`       |
+| `card_pass`       | 卡密兑换开启、卡密存在且未使用             | `vip_{level}_{time}_exchange`         |
+| `points_exchange` | 积分兑换开启、商品存在、用户积分足够       | `vip_{level}_{product}_points_{time}` |
+
+扩展下单按钮时，只传必要字段，不要传最终价格：
+
+```php
+function mytheme_get_vip_upgrade_form()
+{
+    if (!is_user_logged_in()) {
+        return '';
+    }
+
+    $type = zibpay_is_pay_vip_type(get_current_user_id());
+    if (!$type['upgrade']) {
+        return '';
+    }
+
+    $html = '<form>';
+    $html .= '<input type="hidden" name="order_type" value="4">';
+    $html .= '<input type="hidden" name="vip_product_id" value="upgradevip_2_1">';
+    $html .= '<input type="hidden" name="order_name" value="' . esc_attr(zibpay_get_pay_order_name(__('升级会员', 'zib_language'))) . '">';
+    $html .= zibpay_get_initiate_pay_input(4);
+    $html .= '</form>';
+
+    return $html;
+}
+```
+
+这个例子只适合在你明确知道目标商品编号存在时使用。更通用的做法是复用主题自带会员弹窗，让主题自己渲染可选商品。
+
+## 支付成功
+
+会员支付成功后会触发：
+
+```php
+add_action('payment_order_success', 'zibpay_uservip_paysuccess', 9);
+```
+
+`zibpay_uservip_paysuccess()` 只处理：
+
+```php
+$pay_order->order_type == 4
+```
+
+它会拆解 `product_id`，根据购买、续费、升级、卡密兑换或积分兑换计算新的等级和到期时间，然后调用：
+
+```php
+zibpay_update_user_vip($user_id, $data);
+```
+
+统一更新：
+
+```php
+update_user_meta($user_id, 'vip_exp_date', $data['exp_date']);
+update_user_meta($user_id, 'vip_level', $data['vip_level']);
+```
+
+如果业务需要在会员开通后追加日志或同步外部系统，挂 `payment_order_success`，并严格判断订单类型：
+
+```php
+function mytheme_record_vip_order_success($pay_order)
+{
+    if (empty($pay_order->order_type) || 4 != (int) $pay_order->order_type) {
+        return;
+    }
+
+    if (empty($pay_order->user_id) || empty($pay_order->order_num)) {
+        return;
+    }
+
+    $vip_level = (int) get_user_meta($pay_order->user_id, 'vip_level', true);
+    if (!$vip_level) {
+        return;
+    }
+
+    do_action('mytheme_vip_order_recorded', $pay_order->user_id, array(
+        'order_num' => $pay_order->order_num,
+        'vip_level' => $vip_level,
+        'exp_date'  => get_user_meta($pay_order->user_id, 'vip_exp_date', true),
+    ));
+}
+add_action('payment_order_success', 'mytheme_record_vip_order_success', 20);
+```
+
+这里刻意直接读取 `vip_level` meta，而不是继续调用 `zib_get_user_vip_level()`。原因是主题自己的 `zibpay_uservip_paysuccess()` 在更新会员前会先读取一次会员等级，`zib_get_user_vip_level()` 又带有同请求静态缓存；如果你的 Hook 在同一个 `payment_order_success` 请求里排在优先级 `9` 之后，直接调用它可能拿到更新前的缓存值。需要判断刚写入的新状态时，优先读取 `vip_level` / `vip_exp_date` meta，或者在独立请求里再走主题封装。
+
+不要在这个 Hook 里再次调用支付成功或修改订单状态，避免重复发放。
+
+支付成功时序可以按下面理解：
+
+```txt
+订单创建 case 4
+-> initiate_pay / points_initiate_pay / card_pass
+-> ZibPay::payment_order()
+-> payment_order_success
+-> zibpay_uservip_paysuccess(priority 9)
+-> zibpay_update_user_vip()
+-> 你的同步 Hook(priority > 9)
+```
+
+自定义业务如果要发放会员，优先让它进入订单成功链路；如果是签到、活动、邀请码这类非支付奖励，再直接调用 `zibpay_update_user_vip()`，并自己保存幂等记录。
+
+## 会员状态
+
+读取当前有效会员等级：
+
+```php
+$vip_level = zib_get_user_vip_level($user_id);
+```
+
+这个函数会：
+
+1. 读取 `vip_level`。
+2. 检查对应会员等级是否仍开启。
+3. 读取 `vip_exp_date`。
+4. 如果不是 `Permanent` 且已经过期，写入 `vip_level = 0`，并把原等级写入 `vip_level_expired`。
+5. 返回当前有效等级。
+
+显示到期时间文案：
+
+```php
+$text = zib_get_user_vip_exp_date_text($user_id);
+```
+
+它会返回永久会员、具体日期或会员已过期。前台展示不要自己格式化 `vip_exp_date`，避免没有处理 `Permanent` 和过期状态。
+
+## 权益影响
+
+会员权益会被多个模块读取：
+
+| 场景                 | 读取方式                                                                      |
+| -------------------- | ----------------------------------------------------------------------------- |
+| 付费内容会员价格     | `zib_get_user_vip_level()` 后读取 `vip_{level}_price` 或 `vip_{level}_points` |
+| 付费内容购买限制     | `pay_limit` 配合用户当前会员等级                                              |
+| 免费资源每日下载次数 | `zibpay_get_user_free_down_limit()`                                           |
+| 本地文件下载限速     | `zibpay_get_user_down_speed()`                                                |
+| 权限管理             | `zib_user_can()`、`zib_is_can_roles()` 的 `vip` 条件                          |
+| 用户名徽章和会员卡片 | `zibpay_get_vip_icon()`、`zibpay_get_viped_card()`                            |
+| 推广分佣比例         | 返佣模块读取推荐人的会员等级                                                  |
+
+判断某个能力是否允许会员使用，优先走主题权限系统：
+
+```php
+function mytheme_user_can_view_special_panel($user_id)
+{
+    if (!$user_id) {
+        return false;
+    }
+
+    if (zib_user_can($user_id, 'view_special_panel')) {
+        return true;
+    }
+
+    $vip_level = zib_get_user_vip_level($user_id);
+    return $vip_level && $vip_level >= 2;
+}
+```
+
+如果这个能力需要进入后台配置，应该在权限配置字段里增加能力项，而不是把等级判断散落在多个模板中。
+
+## 业务奖励会员
+
+主题内置邀请码奖励和商城赠品会调用 `zibpay_update_user_vip()`。自定义活动赠送会员也可以使用同一入口：
+
+```php
+function mytheme_give_user_vip_days($user_id, $days)
+{
+    $user_id = (int) $user_id;
+    $days    = (int) $days;
+
+    if (!$user_id || $days <= 0) {
+        return false;
+    }
+
+    if (!_pz('pay_user_vip_1_s', true)) {
+        return false;
+    }
+
+    $vip_level = zib_get_user_vip_level($user_id);
+    $base_time = current_time('Y-m-d H:i:s');
+
+    if ($vip_level) {
+        $vip_exp_date = get_user_meta($user_id, 'vip_exp_date', true);
+        if ('Permanent' === $vip_exp_date) {
+            return true;
+        }
+
+        if (strtotime($vip_exp_date) > strtotime($base_time)) {
+            $base_time = $vip_exp_date;
+        }
+    }
+
+    $data = array(
+        'vip_level' => 1,
+        'exp_date'  => date('Y-m-d 23:59:59', strtotime('+' . $days . ' day', strtotime($base_time))),
+        'type'      => __('活动奖励', 'zib_language'),
+        'desc'      => __('完成活动赠送会员', 'zib_language'),
+    );
+
+    zibpay_update_user_vip($user_id, $data);
+    return true;
+}
+```
+
+如果奖励来自订单、签到、邀请码或任务系统，建议先做幂等记录，确认同一事件没有发放过，再调用会员更新。
+
+## Ajax 示例
+
+给前台做一个领取短期会员的 Ajax 时，要保留登录、nonce、幂等和响应格式：
+
+```php
+function mytheme_ajax_receive_vip_reward()
+{
+    if (!is_user_logged_in()) {
+        zib_send_json_error(__('请先登录', 'zib_language'));
+    }
+
+    $user_id = get_current_user_id();
+
+    if (!wp_verify_nonce($_REQUEST['_wpnonce'], 'mytheme_receive_vip_reward')) {
+        zib_send_json_error(__('安全验证失败，请刷新页面后重试', 'zib_language'));
+    }
+
+    if (zib_get_user_meta($user_id, 'mytheme_vip_reward_received', true)) {
+        zib_send_json_error(__('您已经领取过奖励', 'zib_language'));
+    }
+
+    $ok = mytheme_give_user_vip_days($user_id, 7);
+    if (!$ok) {
+        zib_send_json_error(__('奖励暂时不可领取', 'zib_language'));
+    }
+
+    zib_update_user_meta($user_id, 'mytheme_vip_reward_received', current_time('Y-m-d H:i:s'));
+
+    zib_send_json_success(array(
+        'msg' => __('领取成功', 'zib_language'),
+    ));
+}
+add_action('wp_ajax_mytheme_receive_vip_reward', 'mytheme_ajax_receive_vip_reward');
+```
+
+这里使用 `zib_update_user_meta()` 记录领取状态，是为了和主题用户 meta 封装保持一致。会员本身仍交给 `zibpay_update_user_vip()`。
+
+## 风险清单
+
+- 不直接信任前端传来的 `vip_product_id`、等级、价格或时长。
+- 不直接改 `vip_level` 后跳过 `vip_exp_date`。
+- 不直接改 `vip_exp_date` 后跳过过期判断。
+- 不把升级当成重新购买，避免错误重置期限。
+- 不给永久会员继续续费。
+- 不绕过 `order_type = 4` 创建会员支付订单。
+- 不在 `payment_order_success` 里重复处理同一订单。
+- 不在同一个支付成功请求里，把已经静态缓存过的 `zib_get_user_vip_level()` 当作唯一的新会员状态来源。
+- 不把积分兑换会员开放给已是会员的用户，主题默认不支持积分续费或升级。
+- 不让缓存命中会员弹窗、支付页、用户中心和下载路由这类动态页面。
+- 不在模板里散落大量会员等级硬编码，能走 `zib_user_can()` 的场景优先走权限系统。

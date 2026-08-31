@@ -1,0 +1,371 @@
+---
+title: 商城参数与继承配置
+description: 梳理子比主题商城商品参数模板、product_config.params、商品分类统一配置、zib_shop_get_product_in_turn_config 继承读取和商品详情页展示边界。
+---
+
+子比主题商城里常说的“商品参数”有两层含义：一层是商品详情页展示的参数表，例如规格、材质、尺寸；另一层是商品、分类、主题设置之间的统一配置继承，例如服务保障、运费、售后、推广返佣、详情页 Tab、详情页布局等。
+
+扩展时要先分清这两件事。`product_config.params` 主要用于商品详情页展示，默认模板来自主题设置；继承配置则由 `zib_shop_get_product_in_turn_config()` 或对应业务函数按“商品 -> 商品分类 -> 主题设置”读取。
+
+相关源码：
+
+| 文件                                                 | 作用                                                           |
+| ---------------------------------------------------- | -------------------------------------------------------------- |
+| `inc/functions/shop/admin/options/admin-option.php`  | 主题设置里的商城商品参数模板和全局配置                         |
+| `inc/functions/shop/admin/options/meta-option.php`   | 商品编辑页 `product_config.params` 字段                        |
+| `inc/functions/shop/admin/options/term-option.php`   | 商品分类统一参数配置                                           |
+| `inc/functions/shop/admin/options/option-module.php` | 服务、售后、运费、返佣、Tab、布局等复用字段模块                |
+| `inc/functions/shop/inc/product.php`                 | `zib_shop_get_product_in_turn_config()` 和多种商品配置读取函数 |
+| `inc/functions/shop/inc/cat.php`                     | 商品分类配置读取、父级分类递归查找                             |
+| `inc/functions/shop/inc/vue.php`                     | 商品详情页 Vue 数据里的 `params`、`service` 等字段             |
+| `inc/functions/shop/inc/single.php`                  | 商品详情页参数、服务、Tab、布局和底部内容渲染                  |
+
+## 两类参数
+
+| 类型           | 存储位置                                               | 读取方式                                     | 用途                               |
+| -------------- | ------------------------------------------------------ | -------------------------------------------- | ---------------------------------- |
+| 商品展示参数   | `product_config.params`                                | `zib_shop_get_product_config($id, 'params')` | 商品详情页参数条和参数弹窗         |
+| 默认参数模板   | `_pz('shop_product_params_default')`                   | 作为商品编辑字段默认值                       | 新建商品时预填参数项               |
+| 分类统一配置   | `shop_cat_config` term meta                            | `zib_shop_get_product_cat_config()`          | 分类下商品统一继承配置             |
+| 全局商城配置   | 主题设置 `_pz('shop_*')`                               | `_pz()` 或继承函数                           | 全站商品默认配置                   |
+| 继承型商品配置 | `product_config` / `shop_cat_config` / `_pz('shop_*')` | `zib_shop_get_product_in_turn_config()`      | 服务、返佣、布局、背景、部分开关等 |
+
+`params` 不等于所有继承配置。商品展示参数会进入 Vue 数据和详情页展示；继承配置通常会继续参与发货、售后、运费、返佣或页面布局。
+
+## 商品参数模板
+
+后台主题设置里有 `shop_product_params_default`：
+
+```php
+_pz('shop_product_params_default', array());
+```
+
+它在商品编辑页作为 `params` 字段的默认值：
+
+```php
+'id'      => 'params',
+'default' => _pz('shop_product_params_default', array()),
+```
+
+也就是说，这个模板主要解决“每次新建商品时预填一组参数项”。商品保存后，实际展示仍以当前商品的 `product_config.params` 为准。后续修改全局模板，不会自动覆盖已经保存过的商品参数。
+
+适合放进模板的内容：
+
+| 参数名   | 示例                         |
+| -------- | ---------------------------- |
+| 规格     | 标准版、专业版、实体套装     |
+| 材质     | 电子资料、纸质资料、金属、棉 |
+| 尺寸     | 10cm、A4、均码               |
+| 有效期   | 永久、30 天、1 年            |
+| 交付方式 | 自动发货、快递发货、人工交付 |
+
+不适合放进 `params` 的内容：
+
+| 内容     | 原因                                     |
+| -------- | ---------------------------------------- |
+| 真实库存 | 库存有独立字段和自动发货覆盖逻辑         |
+| 售后规则 | 售后有商品、分类、全局继承和虚拟商品修正 |
+| 运费金额 | 运费由运费模块和订单确认链路计算         |
+| 优惠金额 | 优惠由优惠活动和优惠码链路计算           |
+| 发货内容 | 自动发货内容属于交付数据，不应公开展示   |
+
+## 详情页展示参数
+
+商品详情页 Vue 数据会过滤 `params`，只有同时存在 `name` 和 `value` 的项才会输出：
+
+```php
+$params = array();
+if ($_configs['params'] && is_array($_configs['params'])) {
+    $params = array_filter($_configs['params'], function ($value) {
+        return $value['name'] && $value['value'];
+    });
+}
+```
+
+最终进入：
+
+```php
+'params' => $params,
+```
+
+详情页会在 `product-params-box` 中展示参数条，点击后由前端 `paramsModal(params)` 打开参数弹窗。这里是展示层能力，不负责下单校验。
+
+读取商品展示参数可以这样写：
+
+```php
+function zib_child_get_product_params($product_id)
+{
+    $product = get_post($product_id);
+    if (!$product || $product->post_type !== 'shop_product') {
+        return array();
+    }
+
+    $params = zib_shop_get_product_config($product_id, 'params', array());
+    if (!$params || !is_array($params)) {
+        return array();
+    }
+
+    return array_filter($params, function ($item) {
+        return !empty($item['name']) && !empty($item['value']);
+    });
+}
+```
+
+如果要在商品卡片、海报或自定义模块里展示参数，建议先限制数量和长度，不要把完整参数表塞进列表页。
+
+```php
+function zib_child_get_product_param_text($product_id, $limit = 3)
+{
+    $params = zib_child_get_product_params($product_id);
+    if (!$params) {
+        return '';
+    }
+
+    $texts = array();
+    foreach ($params as $param) {
+        $texts[] = sanitize_text_field($param['name']) . '：' . sanitize_text_field($param['value']);
+        if (count($texts) >= $limit) {
+            break;
+        }
+    }
+
+    return implode(' / ', $texts);
+}
+```
+
+## 分类统一配置
+
+商品分类配置存储在 `shop_cat_config` term meta。分类后台会创建“商品统一参数配置”，包含这些模块：
+
+| 配置           | 字段模块                                      |
+| -------------- | --------------------------------------------- |
+| 限购           | `zib_shop_csf_module::limit_buy('cat')`       |
+| 运费           | `zib_shop_csf_module::shipping_fee('cat')`    |
+| 免登录购买     | `zib_shop_csf_module::guest_buy('cat')`       |
+| 邮箱填写       | `zib_shop_csf_module::email_fill('cat')`      |
+| 售后政策       | `zib_shop_csf_module::after_sale('cat')`      |
+| 推广返佣       | `zib_shop_csf_module::rebate('cat')`          |
+| 服务保障       | `zib_shop_csf_module::service('cat')`         |
+| 商品详情 Tab   | `zib_shop_csf_module::single_tab('cat')`      |
+| 详情页底部内容 | `zib_shop_csf_module::content_after('cat')`   |
+| 内容布局       | `zib_shop_csf_module::content_layout('cat')`  |
+| 详情背景盒子   | `zib_shop_csf_module::content_show_bg('cat')` |
+
+分类读取入口是：
+
+```php
+$config = zib_shop_get_product_cat_config($product_id, 'service');
+```
+
+它会先检查商品所属的直接分类，再检查这些分类的父级分类。传入第三个参数时，会要求配置数组里对应子字段存在：
+
+```php
+$config = zib_shop_get_product_cat_config($product_id, 'single_tabs', 'type');
+```
+
+多分类商品需要注意：源码按 `get_the_terms($post, 'shop_cat')` 返回顺序依次查找，找到第一份有效配置就返回。扩展依赖分类配置时，不要假设“最深分类”或“最新分类”一定优先。
+
+## 三级继承函数
+
+通用继承函数是：
+
+```php
+function zib_shop_get_product_in_turn_config($product_id, $key, $default = '')
+{
+    $config = zib_shop_get_product_config($product_id, $key, '');
+    if (!$config) {
+        $config = zib_shop_get_product_cat_config($product_id, $key);
+    }
+    if (!$config) {
+        $config = _pz('shop_' . $key, $default);
+    }
+
+    return $config;
+}
+```
+
+读取顺序是：
+
+1. 当前商品 `product_config[$key]`。
+2. 商品分类 `shop_cat_config[$key]`，必要时递归父级分类。
+3. 主题设置 `_pz('shop_' . $key)`。
+4. 调用方传入的默认值。
+
+这个函数适合值为空就继承的配置。对于带 `type` 的复杂配置，有些业务函数会自己处理 `default`、`custom`、`off`、`disable` 等状态，不应盲目替代。
+
+## 已封装的业务读取
+
+优先使用主题已经封装好的业务函数：
+
+| 需求         | 推荐函数                                                | 说明                                       |
+| ------------ | ------------------------------------------------------- | ------------------------------------------ |
+| 服务保障     | `zib_shop_get_product_service($product_id)`             | 会过滤无名称的服务项                       |
+| 商品返佣     | `zib_shop_get_product_rebate_config($product_id)`       | 推广返佣关闭或配置关闭时返回空             |
+| 免登录购买   | `zib_shop_product_is_allow_guest_buy($product_id)`      | 只允许自动发货、非积分商品继续判断继承开关 |
+| 邮箱填写     | `zib_shop_get_product_email_fill_config($product_id)`   | 非自动发货商品直接关闭                     |
+| 运费规则     | `zib_shop_get_product_shipping_fee_config($product_id)` | 会处理积分商品、包邮、固定运费、满额包邮   |
+| 售后政策     | `zib_shop_get_product_after_sale_opt($product_id)`      | 商品、分类、全局继承后还会按虚拟商品修正   |
+| 内容布局     | `zib_shop_get_product_content_layout($product_id)`      | 用于商品详情页宽度与侧栏布局               |
+| 商品详情 Tab | `zib_shop_get_single_tabs($post)`                       | 会处理禁用、自定义、分类继承和全局默认     |
+
+示例：读取服务保障时不要自己拼三层配置：
+
+```php
+function zib_child_get_product_service_names($product_id)
+{
+    $service = zib_shop_get_product_service($product_id);
+    if (!$service) {
+        return array();
+    }
+
+    $names = array();
+    foreach ($service as $item) {
+        if (!empty($item['name'])) {
+            $names[] = sanitize_text_field($item['name']);
+        }
+    }
+
+    return $names;
+}
+```
+
+## 带状态的继承配置
+
+很多分类和商品配置不是简单数组，而是带 `type` 字段：
+
+| 状态      | 常见含义               |
+| --------- | ---------------------- |
+| 空值      | 使用上一级配置         |
+| `custom`  | 使用当前层级自定义配置 |
+| `off`     | 关闭当前能力           |
+| `on`      | 开启当前能力           |
+| `disable` | 禁用某个展示模块       |
+
+例如商品详情 Tab 的逻辑是：
+
+1. 商品 `single_tabs.type` 为 `disable`：直接不显示额外 Tab。
+2. 商品 `single_tabs.type` 为 `custom`：使用商品自己的 `tabs`。
+3. 否则读取分类 `single_tabs.type`。
+4. 分类为 `disable`：不显示。
+5. 分类为 `custom`：使用分类 `tabs`。
+6. 否则使用全局 `_pz('shop_single_tabs')`。
+
+这类配置不能只用 `zib_shop_get_product_in_turn_config()` 简单读取，因为空值、禁用、自定义都有业务含义。
+
+## 扩展一个继承配置
+
+如果你新增一个展示配置，并希望它支持“商品 -> 分类 -> 全局”的继承，可以沿用主题命名方式：
+
+| 层级         | 字段               |
+| ------------ | ------------------ |
+| 全局主题设置 | `shop_sale_notice` |
+| 分类配置     | `sale_notice`      |
+| 商品配置     | `sale_notice`      |
+
+读取函数：
+
+```php
+function zib_child_get_product_sale_notice($product_id)
+{
+    $product = get_post($product_id);
+    if (!$product || $product->post_type !== 'shop_product') {
+        return '';
+    }
+
+    $notice = zib_shop_get_product_in_turn_config($product_id, 'sale_notice', '');
+    return $notice ? wp_kses_post($notice) : '';
+}
+```
+
+挂到商品详情内容后：
+
+```php
+add_action('shop_product_page_content_after', 'zib_child_shop_sale_notice');
+function zib_child_shop_sale_notice()
+{
+    if (!is_singular('shop_product')) {
+        return;
+    }
+
+    $notice = zib_child_get_product_sale_notice(get_the_ID());
+    if (!$notice) {
+        return;
+    }
+
+    echo '<div class="zib-widget product-sale-notice">';
+    echo $notice;
+    echo '</div>';
+}
+```
+
+如果这个配置会影响交易结果，例如是否允许购买、是否收运费、是否计算返佣，不要只写一个通用读取函数，还要接入订单确认和提交订单的服务端校验。
+
+## 保存商品参数
+
+扩展后台或前台设置时，保存 `params` 仍然写回 `product_config`：
+
+```php
+function zib_child_save_product_params($product_id, $params)
+{
+    $product = get_post($product_id);
+    if (!$product || $product->post_type !== 'shop_product') {
+        return false;
+    }
+
+    if (!current_user_can('edit_post', $product_id)) {
+        return false;
+    }
+
+    $new_params = array();
+    if (is_array($params)) {
+        foreach ($params as $param) {
+            $name  = sanitize_text_field($param['name'] ?? '');
+            $value = sanitize_text_field($param['value'] ?? '');
+
+            if ($name && $value) {
+                $new_params[] = array(
+                    'name'  => $name,
+                    'value' => $value,
+                );
+            }
+        }
+    }
+
+    zib_shop_save_product_config($product_id, 'params', $new_params);
+
+    return true;
+}
+```
+
+`params` 是公开展示信息，保存前要做文本清洗。不要允许普通用户把 HTML、脚本、联系方式、售后承诺或发货密钥直接写进商品参数。
+
+## 前台设置边界
+
+商品详情页前台设置里已有两个字段会写回 `product_config`：
+
+```php
+$update_post_meta = array('content_layout', 'content_show_bg');
+```
+
+它们通过 `zib_frontend_set_save` 保存，用于商品详情页布局和背景盒子。这里说明主题已经允许少量页面展示配置前台保存，但这不等于可以把所有商品发布字段都开放给前台。
+
+如果要新增前台可编辑的商品参数，至少要补：
+
+| 检查       | 说明                           |
+| ---------- | ------------------------------ |
+| 权限       | 当前用户必须能编辑该商品       |
+| nonce      | 不能只依赖前端按钮隐藏         |
+| 字段白名单 | 只允许保存预期字段             |
+| 类型清洗   | 文本、数字、数组分别处理       |
+| 审核策略   | 公开展示字段建议保留审核或限权 |
+| 缓存刷新   | 修改展示字段后清理相关缓存     |
+
+## 常见误区
+
+- 不要把 `shop_product_params_default` 当成所有商品的实时继承来源。
+- 不要把 `params` 当成库存、运费、优惠、售后或发货规则。
+- 不要在多分类商品里假设某一个分类必然优先，源码会按 term 返回顺序查找。
+- 不要用 `zib_shop_get_product_in_turn_config()` 替代所有业务函数，带状态的配置要看具体业务逻辑。
+- 不要把分类统一配置写到商品 meta 里复制一份，否则后续分类调整无法生效。
+- 不要把详情页展示参数输出到订单、支付或发货校验里当可信依据。
+- 不要在前台开放商品参数保存时跳过权限、nonce、白名单和清洗。

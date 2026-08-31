@@ -1,0 +1,332 @@
+---
+title: 顶部多功能组件与广告位
+description: 蒸馏子比主题顶部多功能组件、首屏幻灯片、搜索叠加、图标卡片、文章插入内容、广告位和模块投放扩展方式。
+---
+
+## 模块边界
+
+子比主题里的顶部多功能组件不是单纯幻灯片。它由顶部背景、图片或视频、搜索模块、图标卡片、导航栏文字颜色、显示范围、页面独立配置共同组成。广告位也不是一个单独表，而是分布在文章内容插入、小工具侧栏、页面专属模块、顶部组件 HTML 和 Hook 输出中。
+
+| 能力                     | 主要源码                                                                              |
+| ------------------------ | ------------------------------------------------------------------------------------- |
+| 顶部多功能组件渲染       | `inc/functions/zib-header.php`                                                        |
+| 全局顶部组件设置         | `inc/options/admin-options.php`                                                       |
+| 页面独立顶部组件设置     | `inc/options/metabox-options.php`                                                     |
+| 幻灯片字段组             | `inc/options/options-module.php` 的 `CFS_Module::add_slider()`、`CFS_Module::slide()` |
+| 文章前后插入内容         | `inc/functions/zib-single.php`                                                        |
+| 页面、首页、侧栏广告模块 | `inc/widgets` 与页面专属小工具容器                                                    |
+
+扩展这类位置时先判断是“首屏组件”、“文章内容广告”、“页面模块广告”还是“侧栏广告”。不同位置的缓存、移动端宽度、登录态和脚本加载方式都不同，不要统一塞进一个 `the_content` 过滤器里。
+
+## 顶部组件显示判断
+
+`zib_header_slide_is_show()` 会判断顶部组件是否显示。它综合全局设置、页面类型、移动端条件和论坛页面类型：
+
+```php
+function zib_header_slide_is_show()
+{
+    $show_type = _pz('header_slider_show_type');
+
+    if ('only_pc' == $show_type && wp_is_mobile()) {
+        return false;
+    }
+
+    if ('only_sm' == $show_type && !wp_is_mobile()) {
+        return false;
+    }
+
+    $header_slider_show = (array) _pz('header_slider_show');
+    // home、single、page、cat、tag、topics、forum_home、forum_plate、forum_post
+}
+```
+
+页面独立配置优先在 `zib_header_slide()` 里读取：
+
+```php
+if (is_page()) {
+    $page_config = get_post_meta(get_the_ID(), 'page_config', true);
+    if (!empty($page_config['header_slider_show'])) {
+        $args = array(
+            'header_slider'               => $page_config['header_slider'],
+            'header_slider_option'        => $page_config['header_slider_option'],
+            'header_slider_show_type'     => $page_config['header_slider_show_type'],
+            'header_slider_nav_color'     => $page_config['header_slider_nav_color'] ?? '',
+            'is_mobile'                   => wp_is_mobile(),
+            'header_slider_search_s'      => $page_config['header_slider_search_s'],
+            'header_slider_card_s'        => $page_config['header_slider_card_s'],
+            'header_slider_search_option' => $page_config['header_slider_search_option'],
+            'header_slider_card_option'   => $page_config['header_slider_card_option'],
+        );
+    }
+}
+```
+
+所以要让某个页面有独立首屏，不需要复制 `header.php`。优先使用页面配置 `page_config` 里的顶部组件字段；需要批量控制时，再从主题设置 `_pz('header_slider_*')` 入手。
+
+## 背景与幻灯片字段
+
+背景项目来自 `CFS_Module::add_slider()`，每个项目至少应有图片或视频：
+
+| 字段               | 作用                                            |
+| ------------------ | ----------------------------------------------- |
+| `background`       | 图片背景，移动端也依赖它                        |
+| `background_video` | 视频背景，PC 端优先，移动端多数浏览器不显示视频 |
+| `hide`             | 单个背景项目的 PC/移动端隐藏规则                |
+| `link`             | 整张背景的跳转链接                              |
+| `image_layer`      | 叠加图层，可配合视差、缩放、透明度              |
+| `text`             | 标题、描述、文字位置和文字大小                  |
+
+显示设置来自 `CFS_Module::slide()`：
+
+| 字段                    | 作用                                         |
+| ----------------------- | -------------------------------------------- |
+| `direction`             | 横向或纵向切换                               |
+| `loop`                  | 循环切换                                     |
+| `button`                | 翻页按钮                                     |
+| `pagination`            | 指示器                                       |
+| `effect`                | `slide`、`fade`、`cube`、`coverflow`、`flip` |
+| `scale_height`、`scale` | 按比例自动高度                               |
+| `pc_height`、`m_height` | PC 和移动端固定高度                          |
+| `autoplay`、`interval`  | 自动播放与间隔                               |
+
+渲染时主题会把配置合并到 `zib_new_slider()`：
+
+```php
+$header_slider_option['slides'] = $header_slider;
+$header_slider_option['class']  = 'slide-index slide-header';
+
+zib_new_slider($header_slider_option);
+```
+
+扩展时不要直接手写 Swiper 初始化。子比主题已有 `zib_new_slider()` 统一处理懒加载、视频、切换效果、分页按钮、移动端高度和主题样式。
+
+## 叠加搜索模块
+
+顶部搜索模块由 `header_slider_search_s` 控制 PC/移动端显示，配置在 `header_slider_search_option`：
+
+```php
+if (zib_m_pc_is_show($args['header_slider_search_s'])) {
+    $search_args = array(
+        'class'          => '',
+        'show_keywords'  => false,
+        'show_history'   => false,
+        'show_posts'     => false,
+        'show_input_cat' => false,
+        'more_cats'      => false,
+        'in_cat'         => false,
+        'show_type'      => false,
+        'in_type'        => '',
+        'in_user'        => '',
+    );
+
+    $search_html = zib_get_search_box(wp_parse_args($header_slider_search_option, $search_args));
+}
+```
+
+可用配置包括热门关键词、分类搜索、允许更多分类、搜索类型切换、默认搜索类型、上方 HTML 和下方 HTML。移动端会强制关闭热门关键词：
+
+```php
+if ($is_mobile) {
+    $header_slider_search_option['show_keywords'] = false;
+}
+```
+
+如果要在搜索框上下方加文案、按钮或小广告，优先使用 `before_html`、`after_html`。这些字段允许 HTML，但要控制高度，避免在移动端盖住搜索框或卡片区。
+
+## 叠加图标卡片
+
+卡片模块由 `header_slider_card_s` 和 `header_slider_card_option` 控制。渲染过程会复用主题图标卡片函数：
+
+```php
+foreach ($header_slider_card_option['cards'] as $card) {
+    $card['class'] = $header_slider_card_option['show_widget_bg'] ? 'padding-10' : 'zib-widget';
+    $card['icon_class'] .= $header_slider_card_option['icon_radius4'] ? ' radius4' : '';
+
+    $slider_card_html .= zib_icon_cover_card($card);
+}
+```
+
+卡片字段：
+
+| 字段                     | 作用                                     |
+| ------------------------ | ---------------------------------------- |
+| `show_widget_bg`         | 整组卡片使用一个背景，或每张卡片单独背景 |
+| `icon_radius4`           | 图标使用方形圆角                         |
+| `cards[].title`          | 卡片标题，可包含主题徽章 HTML            |
+| `cards[].desc`           | 简介                                     |
+| `cards[].icon`           | 主题内置图标或 Font Awesome              |
+| `cards[].customize_icon` | 自定义图标代码                           |
+| `cards[].icon_class`     | 主题颜色类                               |
+| `cards[].link`           | 跳转链接                                 |
+
+这类卡片适合做“下载入口、会员入口、文档入口、活动入口”。如果要投放广告，保持卡片结构即可，不要在标题里塞复杂表单或外部脚本。
+
+## 导航颜色和模糊效果
+
+顶部组件启用时，导航文字可能压在浅色背景上。主题提供 `header_slider_nav_color`：
+
+```php
+if ($args['header_slider_nav_color'] && $args['header_slider_nav_color'] !== '#ffffff') {
+    echo '<style>
+   body.nav-fixed:not(.body-scroll):not(.mobile-navbar-show) .header.show-slide {
+    --header-color:' . $args['header_slider_nav_color'] . ';
+   }
+   </style>';
+}
+```
+
+搜索和卡片支持高斯模糊：
+
+```php
+zib_m_pc_is_show(_pz('header_slider_filter_blur'))
+```
+
+模糊效果比较吃浏览器性能，移动端首屏慎用。如果背景图本身已经复杂，优先调暗遮罩、文字颜色和模块背景，而不是叠很多层透明模糊。
+
+## 文章插入内容
+
+文章内容广告最直接的主题设置是 `post_front_content` 和 `post_after_content`。它们在 `zib_single_box_content()` 中输出：
+
+```php
+function zib_single_box_content()
+{
+    global $post;
+    ?>
+    <div class="article-content">
+        <?php zib_single_content_header(); ?>
+        <?php echo _pz('post_front_content'); ?>
+        <div class="theme-box wp-posts-content">
+            <?php
+            do_action('zib_posts_content_before', $post);
+            the_content();
+            do_action('zib_posts_content_after', $post);
+            echo _pz('post_after_content');
+            ?>
+        </div>
+        <?php zib_single_content_footer($post); ?>
+    </div>
+    <?php
+}
+```
+
+| 位置                        | 适合内容                                     |
+| --------------------------- | -------------------------------------------- |
+| `post_front_content`        | 文章正文上方说明、公告、顶部广告             |
+| `zib_posts_content_before`  | 需要按文章、分类、用户权限动态判断的内容     |
+| `zib_posts_content_after`   | 正文结束后但仍在内容盒子里的推荐、广告、提示 |
+| `post_after_content`        | 全局正文尾部广告或说明                       |
+| `zib_article_content_after` | 文章标签、版权、THE END 前后的二开内容       |
+
+如果只是全站固定广告，使用后台设置即可。如果需要按分类、文章类型、登录态或付费状态控制，使用 Hook。
+
+## 按分类投放广告
+
+示例：只给指定分类下的文章正文前插入一段广告位。这里保留子比主题的写法，函数命名清晰，数组使用 `array()`。
+
+```php
+function zib_docs_posts_content_before_ad($post)
+{
+    if (!$post || $post->post_type !== 'post') {
+        return;
+    }
+
+    if (!has_category(array(12, 18), $post)) {
+        return;
+    }
+
+    if (is_user_logged_in() && current_user_can('manage_options')) {
+        return;
+    }
+
+    echo '<div class="zib-widget box-body mb20">';
+    echo '<a class="display-block text-center" href="' . esc_url(home_url('/go/ad')) . '" rel="nofollow sponsored">';
+    echo '<img class="radius8 fit-cover" src="' . esc_url(get_stylesheet_directory_uri() . '/assets/ad/example.jpg') . '" alt="' . esc_attr__('推荐内容', 'zib_language') . '">';
+    echo '</a>';
+    echo '</div>';
+}
+add_action('zib_posts_content_before', 'zib_docs_posts_content_before_ad', 20);
+```
+
+如果广告需要统计点击，不要把统计逻辑写在图片链接里暴露敏感参数。可以走主题外链中转、独立短链接或服务端记录接口，并给链接加 `rel="nofollow sponsored"`。
+
+## 侧栏和页面广告
+
+广告位不一定要写在正文。子比主题已经有大量容器：
+
+| 场景         | 推荐容器                                                  |
+| ------------ | --------------------------------------------------------- |
+| 全站顶部横幅 | `all_top_fluid`                                           |
+| 全站底部横幅 | `all_bottom_fluid`                                        |
+| 首页广告     | `home_top_fluid`、`home_top_content`                      |
+| 文章侧栏广告 | `single_sidebar`、`all_sidebar_top`、`all_sidebar_bottom` |
+| 页面专题广告 | `page_top_fluid_{ID}`、`page_bottom_content_{ID}`         |
+| 移动菜单广告 | `mobile_nav_fluid`                                        |
+| 前台投稿提示 | `newposts_sidebar_top`、`newposts_sidebar_bottom`         |
+
+侧栏广告优先做成小工具，因为小工具支持显示规则、移动端隐藏、导入导出和自定义器预览。不要在 `sidebar.php` 里硬编码广告 HTML，后续迁移和运营替换都会变麻烦。
+
+## 广告小工具示例
+
+```php
+function zib_docs_widget_ad($args, $instance)
+{
+    $image = !empty($instance['image']) ? $instance['image'] : '';
+    $link  = !empty($instance['link']['url']) ? $instance['link']['url'] : '';
+    $title = !empty($instance['title']) ? $instance['title'] : '';
+
+    if (!$image) {
+        return;
+    }
+
+    $target = !empty($instance['link']['target']) ? ' target="' . esc_attr($instance['link']['target']) . '"' : '';
+
+    echo '<div class="zib-widget zib-docs-ad">';
+    if ($link) {
+        echo '<a class="display-block" href="' . esc_url($link) . '"' . $target . ' rel="nofollow sponsored">';
+    }
+    echo '<img class="radius8 fit-cover" src="' . esc_url($image) . '" alt="' . esc_attr($title) . '">';
+    if ($link) {
+        echo '</a>';
+    }
+    echo '</div>';
+}
+
+function zib_docs_register_widget_ad()
+{
+    Zib_CFSwidget::create('zib_docs_widget_ad', array(
+        'title'       => __('图片广告', 'zib_language'),
+        'zib_title'   => true,
+        'zib_show'    => true,
+        'callback'    => 'zib_docs_widget_ad',
+        'description' => __('显示一个可跳转的图片广告。', 'zib_language'),
+        'fields'      => array(
+            array(
+                'title'   => __('广告图', 'zib_language'),
+                'id'      => 'image',
+                'type'    => 'upload',
+                'library' => 'image',
+                'preview' => true,
+            ),
+            array(
+                'title' => __('跳转链接', 'zib_language'),
+                'id'    => 'link',
+                'type'  => 'link',
+            ),
+        ),
+    ));
+}
+add_action('after_setup_theme', 'zib_docs_register_widget_ad');
+```
+
+这个小工具可以放进任意侧栏。需要按文章分类、页面类型进一步控制时，再加 `is_show_filter` 或在渲染函数里判断 `$args['id']`。
+
+## 风险清单
+
+- 不要在顶部组件里放会阻塞首屏的第三方脚本。
+- 不要依赖视频背景作为唯一内容，移动端应有图片兜底。
+- 不要用 CSS 隐藏整块顶部组件来控制显示，应该改显示范围或页面配置。
+- 不要把用户专属内容、订单状态、余额、邀请码等放进可缓存的广告 HTML。
+- 不要在文章插入内容里输出未闭合标签，正文布局会连带损坏。
+- 不要在 `the_content` 过滤器里无条件拼广告，容易影响商品详情、论坛帖子、摘要和 REST 输出。
+- 不要把广告图片写成站外不稳定热链，首屏和正文广告都依赖图片可用性。
+- 不要忘记移动端宽度，横幅广告、小工具广告和顶部卡片都要有降级布局。

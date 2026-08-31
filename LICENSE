@@ -1,0 +1,58 @@
+Zibll Docs - Dual License Notice
+
+This repository uses separate licenses for documentation and source code.
+
+1. Documentation content (CC0 1.0 Universal)
+
+Original documentation maintained by this project is dedicated to the public
+domain under CC0 1.0 Universal. This applies to:
+
+- content/docs/
+- generated documentation indexes and Markdown derived from content/docs/
+- generated documentation data bundled with zibll-docs-mcp
+
+Official legal code:
+https://creativecommons.org/publicdomain/zero/1.0/
+
+CC0 only covers original expression contributed to this project. It does not
+grant rights to third-party source code, trademarks, logos, screenshots, or
+other material that contributors do not own.
+
+2. Source code (MIT License)
+
+MIT License
+
+Copyright (c) 2026 Zibll Docs contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+This MIT license applies to the application, components, libraries, scripts,
+workflows, Worker, MCP server implementation, Codex plugins, tests, and
+configuration files, except for material explicitly covered above or owned by
+a third party.
+
+3. Excluded material
+
+The commercial Zibll theme, child themes, plugins, and other local reference
+source under the ignored `主题插件子主题/` directory are not part of this
+repository and are not licensed by this notice.
+
+Zibll and other product names, trademarks, logos, and brand assets remain the
+property of their respective owners. Their inclusion for identification or
+linking does not grant trademark rights.

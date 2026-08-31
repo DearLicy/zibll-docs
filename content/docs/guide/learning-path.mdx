@@ -1,0 +1,341 @@
+---
+title: 学习路线
+description: 按源码认知、配置、内容、用户、商城、论坛、优化和二次开发顺序阅读子比主题开发文档。
+---
+
+子比主题功能很多，不适合从某个单点功能开始随机阅读。更稳的方式是先建立源码、配置和数据流的整体认知，再按网站类型补齐内容、用户、商城、论坛和二次开发能力。
+
+这页不是官网文章列表的搬运，而是把官网阅读指引映射到本站已经沉淀的开发文档：每一步都对应可继续深入的文档页。
+
+## 阅读前准备
+
+准备好子比主题、子主题和插件源码，并明确这次要修改的是配置、模板、Hook、Ajax 还是独立插件。准备阅读支付、商城、会员和积分链路时，再记录对应的主题版本和插件版本。
+
+## 第一阶段：建立源码认知
+
+先理解主题目录、加载顺序、数据模型和常见问题定位方式。这个阶段不要急着复制代码，先确认功能真正由哪个模块负责。
+
+<Cards>
+  <Card
+    title="源码结构"
+    description="了解主题目录、入口加载链和功能模块的位置。"
+    href="/docs/source-structure"
+  />
+  <Card
+    title="加载顺序"
+    description="确认主题、前后台模块、Hook 和插件代码的加载时机。"
+    href="/docs/api/loading"
+  />
+  <Card
+    title="数据模型"
+    description="理解文章、用户、Meta、论坛、商城和订单数据的组织方式。"
+    href="/docs/api/data-models"
+  />
+  <Card
+    title="常见问题"
+    description="从错误原文、Network 请求、日志和源码入口开始定位问题。"
+    href="/docs/faq"
+  />
+</Cards>
+
+这个阶段的完成标准：能从一个前台现象定位到对应的主题目录、入口函数、数据字段和下一步验证方式。
+
+## 第二阶段：完成基础外观和导航
+
+网站能跑起来后，再配置 Logo、主题色、背景、导航、菜单、文章列表和基础 SEO。
+
+<Cards>
+  <Card
+    title="主题常用设置"
+    description="按配置域理解 Logo、SEO、懒加载、搜索、邮件、自定义代码和主题视觉。"
+    href="/docs/guide/site-settings"
+  />
+  <Card
+    title="站点框架与导航"
+    description="扩展页头、顶部导航、移动菜单、右侧浮动按钮和手机底部 Tabbar。"
+    href="/docs/api/site-frame-navigation"
+  />
+  <Card
+    title="菜单徽章与高级子菜单"
+    description="拆解菜单项图标、徽章、高级子菜单、图文卡片和多栏目链接。"
+    href="/docs/api/menu-badges-advanced-submenus"
+  />
+  <Card
+    title="主题样式、背景与模式切换"
+    description="梳理主题色、背景图、布局宽度、导航页脚颜色和日夜间模式。"
+    href="/docs/api/theme-style-appearance"
+  />
+  <Card
+    title="SEO Head 与 robots"
+    description="梳理 title、keywords、description、canonical、noindex 和 head 清理。"
+    href="/docs/api/seo-head-robots"
+  />
+</Cards>
+
+建议先按后台配置完成一次，再回到源码文档理解配置字段如何落地到前台。这样以后改样式、加菜单或做子主题覆盖时，不会绕过主题自己的配置系统。
+
+## 第三阶段：搭建页面、模块和首页
+
+当基础外观稳定后，再处理首页、页面布局、模块、小工具、广告位、友情链接和内容列表。
+
+<Cards>
+  <Card
+    title="顶部多功能组件与广告位"
+    description="蒸馏顶部幻灯片、视频背景、搜索叠加、图标卡片和广告位。"
+    href="/docs/api/top-components-ads"
+  />
+  <Card
+    title="主题小工具与侧栏"
+    description="扩展小工具注册、页面容器、侧栏位置、显示规则和 Ajax 小工具加载。"
+    href="/docs/api/widgets-sidebars"
+  />
+  <Card
+    title="普通页面与前台设置"
+    description="扩展普通页面模板、页面头部样式、页面专属小工具和前台设置弹窗。"
+    href="/docs/api/pages-frontend-settings"
+  />
+  <Card
+    title="首页与归档列表"
+    description="扩展首页 Tab、分类/标签/专题封面、筛选菜单、排序查询和 Ajax 分页。"
+    href="/docs/api/archive-post-lists"
+  />
+  <Card
+    title="外链重定向与网址导航"
+    description="扩展 go.php 外链中转、网址导航、用户网址和友情链接模块。"
+    href="/docs/api/external-links-redirect"
+  />
+</Cards>
+
+这个阶段的重点是先复用主题已有模块能力。只有当现有 Hook、短代码、小工具和页面设置都满足不了需求时，再考虑模板覆盖。
+
+## 第四阶段：掌握文章、媒体和编辑器
+
+内容站、资源站、教程站都应该先把文章发布、正文模块、图片、视频、目录树和投稿链路跑通。
+
+<Cards>
+  <Card
+    title="文章正文与单页渲染"
+    description="扩展文章页框架、顶部封面、正文 Hook、目录、高度限制和版权。"
+    href="/docs/api/single-post-rendering"
+  />
+  <Card
+    title="古腾堡块与正文模块"
+    description="梳理编辑器区块、短代码桥接、正文保存结构和前台渲染依赖。"
+    href="/docs/api/gutenberg-blocks"
+  />
+  <Card
+    title="媒体上传"
+    description="说明前台上传、分片上传、媒体库隔离、附件归属和特色媒体编辑。"
+    href="/docs/api/media-upload"
+  />
+  <Card
+    title="图片灯箱与媒体"
+    description="整理图片灯箱、懒加载、媒体输出和 CDN 图片异常排查。"
+    href="/docs/guide/media-lightbox"
+  />
+  <Card
+    title="视频资源与播放器"
+    description="梳理视频封面、DPlayer、剧集切换、iframe 嵌入和付费视频链路。"
+    href="/docs/api/video-resources-player"
+  />
+  <Card
+    title="前台投稿与编辑"
+    description="梳理投稿页、草稿、审核、付费内容、特色封面和删除文章。"
+    href="/docs/api/frontend-posting"
+  />
+</Cards>
+
+如果要新增正文能力，优先判断它属于古腾堡块、短代码、文章 meta、模板 Hook 还是前台投稿字段。不同入口的数据保存和渲染方式完全不同。
+
+## 第五阶段：配置账户、用户和互动
+
+登录注册、验证码、找回密码、绑定邮箱手机、第三方登录、用户资料、签到、等级、消息和评论互动会互相影响。建议先配置邮件，再配置登录注册。
+
+<Cards>
+  <Card
+    title="账户与验证码"
+    description="配置 SMTP、登录注册、找回密码、绑定邮箱手机和人机验证。"
+    href="/docs/guide/account-verification"
+  />
+  <Card
+    title="用户系统"
+    description="扩展登录、注册、资料、绑定、签到、等级、认证和用户中心。"
+    href="/docs/api/user-system"
+  />
+  <Card
+    title="作者主页与用户中心"
+    description="扩展作者主页 Tab、用户中心抽屉 Tab、账户安全和当前用户 Ajax 数据。"
+    href="/docs/api/author-user-pages"
+  />
+  <Card
+    title="用户成长与权限体系"
+    description="扩展签到、等级经验、认证、徽章、邀请码、用户能力和禁封申诉。"
+    href="/docs/api/user-growth-permissions"
+  />
+  <Card
+    title="评论与互动"
+    description="梳理评论提交、审核、置顶、点赞、收藏、关注、举报和消息联动。"
+    href="/docs/api/comments-interactions"
+  />
+  <Card
+    title="消息通知"
+    description="扩展站内消息、私信、微信模板消息和业务通知。"
+    href="/docs/api/messages"
+  />
+</Cards>
+
+这个阶段最容易出问题的是缓存。登录态、验证码、用户中心、消息数、Ajax 响应都不能被当成普通静态页面缓存。
+
+## 第六阶段：按业务选择商城、付费和资产
+
+不是每个站点都需要商城。博客和资讯站可以先跳过这一阶段；资源下载、会员资源站、知识付费和实物商品站再继续。
+
+<Cards>
+  <Card
+    title="商城模块"
+    description="扩展 shop_product、购物车、商品页、售后、物流和店铺能力。"
+    href="/docs/api/shop"
+  />
+  <Card
+    title="商城商品发布字段"
+    description="梳理规格选项、库存、发货类型、售后继承、前台 Vue 数据和保存边界。"
+    href="/docs/api/shop-product-fields"
+  />
+  <Card
+    title="商城购物车与确认下单"
+    description="梳理购物车数据、确认弹窗、服务端重算、Zibpay 创建和支付发起链路。"
+    href="/docs/api/shop-cart-checkout"
+  />
+  <Card
+    title="商城发货、售后与优惠"
+    description="梳理订单付款后的发货、物流、售后状态机、退款、商品优惠和优惠码。"
+    href="/docs/api/shop-shipping-after-sale"
+  />
+  <Card
+    title="Zibpay 扩展"
+    description="扩展订单、支付、下载权限、余额、积分、VIP、分佣和提现。"
+    href="/docs/api/zibpay"
+  />
+  <Card
+    title="用户资产、积分与余额"
+    description="梳理积分、余额、转账、充值、购买积分、免费积分发放和后台调整。"
+    href="/docs/api/user-assets-points-balance"
+  />
+</Cards>
+
+支付、订单和资产不要直接改数据库字段。扩展时先找 Zibpay 订单创建、支付回调、权限判断、下载校验、余额积分变更和消息通知的现有入口。
+
+## 第七阶段：需要社区时再配置论坛
+
+论坛、圈子、板块权限、发帖限制、阅读限制、帖子排序和版主体系适合社区型站点。普通内容站可以晚一点再读。
+
+<Cards>
+  <Card
+    title="论坛模块"
+    description="扩展 plate、forum_post、话题、标签、版主和帖子流程。"
+    href="/docs/api/bbs"
+  />
+  <Card
+    title="论坛排序与推荐指数"
+    description="拆解帖子排序选项、推荐分计算、动态时间权重和评分联动。"
+    href="/docs/api/bbs-sorting-recommendation"
+  />
+  <Card
+    title="论坛小工具与侧栏"
+    description="整理论坛侧栏注册、版块小工具、帖子列表、话题列表和 Ajax 加载。"
+    href="/docs/api/bbs-widgets"
+  />
+  <Card
+    title="前台投稿与编辑"
+    description="论坛发帖、投稿、草稿、审核、特色媒体和删除内容的入口。"
+    href="/docs/api/frontend-posting"
+  />
+</Cards>
+
+论坛功能和用户权限、消息通知、积分等级、内容审核都有交叉。新增论坛扩展时，先确认当前站点是否开启论坛模块，再判断帖子、板块、话题和普通文章的差异。
+
+## 第八阶段：上线后优化和扩展
+
+网站进入运营阶段后，再处理搜索、翻译、内容审核、分享、微信、百度提交和自定义开发。
+
+<Cards>
+  <Card
+    title="搜索体系"
+    description="梳理搜索页、搜索弹窗、类型 Tab、筛选、排序、关键词、搜索历史和 Meilisearch。"
+    href="/docs/api/search-system"
+  />
+  <Card
+    title="多语言智能翻译与 JS 国际化"
+    description="梳理前后台语言分离、前台智能翻译、术语配置和动态内容监听。"
+    href="/docs/api/multilingual-translation-i18n"
+  />
+  <Card
+    title="内容审核与发布安全"
+    description="梳理 API 内容审核、投稿评论私信审核、图片审核、论坛审核和人工审核。"
+    href="/docs/api/content-audit-security"
+  />
+  <Card
+    title="分享、海报与微信分享"
+    description="扩展分享平台、移动端分享弹窗、海报生成和微信 JS-SDK 分享。"
+    href="/docs/api/share-posters-wechat"
+  />
+  <Card
+    title="SEO 与百度资源提交"
+    description="梳理百度自动推送、普通收录、快速收录、提交结果缓存和重试边界。"
+    href="/docs/api/seo-baidu-submission"
+  />
+  <Card
+    title="插件制作指南"
+    description="制作可独立安装、停用和复用的子比主题扩展插件。"
+    href="/docs/guide/plugin-making"
+  />
+  <Card
+    title="子主题制作指南"
+    description="制作承载站点样式、模板覆盖和主题级配置的子主题。"
+    href="/docs/guide/subtheme-making"
+  />
+</Cards>
+
+这个阶段的原则是：能用配置解决的先用配置，能用 Hook 解决的不要改核心模板，能做成插件的业务能力不要塞进子主题。
+
+## 按网站类型阅读
+
+| 网站类型     | 优先阅读                                                               |
+| ------------ | ---------------------------------------------------------------------- |
+| 博客、资讯站 | 主题常用设置、站点框架与导航、首页与归档列表、文章正文、SEO、分享      |
+| 教程文档站   | 文章正文、古腾堡块、目录树、图片灯箱、搜索体系、SEO、百度提交          |
+| 资源下载站   | 用户系统、Zibpay、付费下载、媒体上传、用户资产、内容审核               |
+| 会员资源站   | 登录注册、用户成长、VIP 会员、积分余额、付费内容、消息通知             |
+| 实物商城     | 商城模块、商品字段、购物车、发货售后、优惠码、商城用户中心             |
+| 社区论坛     | 用户系统、论坛模块、论坛排序、论坛小工具、消息通知、内容审核           |
+| 定制开发项目 | 源码结构、Codestar Framework、主题扩展、Hook、Ajax、模板覆盖、插件制作 |
+
+## 开发者阅读顺序
+
+如果你的目标是做二次开发，而不是只配置站点，建议按这个顺序：
+
+1. [源码结构](/docs/source-structure)：知道主题目录和模块位置。
+2. [加载顺序](/docs/api/loading)：知道文件什么时候加载。
+3. [数据模型](/docs/api/data-models)：理解文章、用户、论坛、商城、订单和 meta。
+4. [主题函数](/docs/api/functions)：先复用主题已有函数。
+5. [Hook 与过滤器](/docs/api/hooks)：用 Action 和 Filter 做无侵入扩展。
+6. [Ajax 动作](/docs/api/ajax)：理解 nonce、权限、返回格式和缓存边界。
+7. [Codestar Framework](/docs/codestar-framework)：扩展后台设置、Meta、小工具和自定义字段。
+8. [模板覆盖](/docs/api/templates)：最后再考虑覆盖模板。
+
+示例代码尽量保持子比主题风格：命名函数、`array()`、WordPress Hook、Ajax action、`_pz()`、`zib_get_*_meta()`、`zib_update_*_meta()`、`zib_send_json_success()` 和 `zib_send_json_error()`。
+
+## 遇到问题怎么回到路线
+
+| 现象           | 回到哪一步                                              |
+| -------------- | ------------------------------------------------------- |
+| 页面打不开     | 第一阶段，检查 DNS、站点绑定、HTTPS、伪静态             |
+| 样式或导航不对 | 第二阶段，检查主题设置、菜单、背景、明暗模式            |
+| 首页不会搭     | 第三阶段，检查模块、小工具、页面设置、归档列表          |
+| 文章展示异常   | 第四阶段，检查文章模板、正文 Hook、古腾堡块、媒体       |
+| 登录注册失败   | 第五阶段，检查 SMTP、验证码、人机验证、Ajax、缓存       |
+| 支付或订单异常 | 第六阶段，检查 Zibpay、回调、HTTPS、缓存、订单状态      |
+| 论坛权限异常   | 第七阶段，检查板块、帖子、用户权限和发帖限制            |
+| 想做功能扩展   | 第八阶段，先找 Hook、Ajax、短代码、模板和 Codestar 入口 |
+
+本页吸收了子比官网“教程阅读指引及建议学习顺序”公开文章，并结合本站已蒸馏的部署、配置、主题扩展、Codestar Framework、商城、论坛、用户和 AI 功能文档整理。

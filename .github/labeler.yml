@@ -1,0 +1,43 @@
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'content/docs/**'
+          - 'README.md'
+          - 'CONTRIBUTING.md'
+          - 'GOVERNANCE.md'
+          - 'SUPPORT.md'
+
+frontend:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'app/**'
+          - 'components/**'
+          - 'lib/**'
+          - 'public/assets/**'
+
+mcp:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'packages/zibll-docs-mcp/**'
+          - 'scripts/generate-mcp-data.mjs'
+          - 'scripts/check-mcp.mjs'
+
+codex-plugin:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.agents/**'
+          - 'plugins/**'
+
+community:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/ISSUE_TEMPLATE/**'
+          - '.github/DISCUSSION_TEMPLATE/**'
+          - 'data/friends.json'
+          - 'workers/**'
+
+github-actions:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/workflows/**'
+          - '.github/dependabot.yml'

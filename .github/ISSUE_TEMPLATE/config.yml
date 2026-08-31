@@ -1,0 +1,23 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 阅读开发文档
+    url: https://dearlicy.github.io/zibll-docs/docs
+    about: 先搜索文档和 MCP 资源，确认问题是否已有说明。
+  - name: 查看 GitHub 社区指南
+    url: https://dearlicy.github.io/zibll-docs/docs/community/github-community
+    about: 了解 Issue、Discussions、Pull Request 和自动化处理方式。
+  - name: 进入 GitHub Discussions
+    url: https://github.com/DearLicy/zibll-docs/discussions
+    about: 讨论架构方案、源码研究和案例分享，不用于提交可复现故障。
+  - name: 查看仓库发布记录
+    url: https://github.com/DearLicy/zibll-docs/releases
+    about: 查看文档站、MCP 包和社区自动化的版本记录。
+  - name: 参与社区协作
+    url: https://dearlicy.github.io/zibll-docs/docs/community
+    about: 了解反馈、贡献、交流群和友情链接申请流程。
+  - name: 私下报告安全问题
+    url: https://github.com/DearLicy/zibll-docs/security/advisories/new
+    about: 不要在公开 Issue 中发布密钥、Cookie、密码或未修复漏洞细节。
+  - name: 查看公告
+    url: https://www.zibll.top/forum-post/51202.html
+    about: 了解项目迁移和社区维护背景。

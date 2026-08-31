@@ -1,0 +1,1082 @@
+---
+title: 商城模块
+description: 扩展子比主题商城商品、购物车、商品分类、优惠、售后、物流、订单联动、商品页和商城小工具。
+---
+
+## 模块入口
+
+商城模块入口是 `inc/functions/shop/shop.php`。它先注册基础类和初始化类：
+
+```php
+define('ZIB_SHOP_ASSETS_URI', ZIB_TEMPLATE_DIRECTORY_URI . '/inc/functions/shop/assets');
+define('ZIB_SHOP_REQUIRE_URI', '/inc/functions/shop/');
+
+zib_require(array(
+    'inc/public',
+    'inc/class.setup',
+    'inc/class.init',
+), false, ZIB_SHOP_REQUIRE_URI);
+
+function zib_shop_instance()
+{
+    $GLOBALS['zib_shop'] = zib_shop::instance();
+}
+add_action('after_setup_theme', 'zib_shop_instance');
+```
+
+商城前台能力由主题设置控制：
+
+```php
+if (_pz('shop_s')) {
+    zib_require(array(
+        'inc/functions',
+        'widgets/widgets',
+        'action/action',
+    ), false, ZIB_SHOP_REQUIRE_URI);
+
+    do_action('zib_shop_init');
+}
+```
+
+扩展商城时先判断 `_pz('shop_s')`。商城关闭时，主题不会加载商城前台函数、动作和小工具。
+
+## 目录地图
+
+| 目录                                    | 作用                                                                                                                         |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `inc/functions/shop/inc/class.init.php` | 注册商品 post type、分类法、重写规则、查询和模板路由                                                                         |
+| `inc/functions/shop/inc/functions.php`  | 商城公共函数、搜索接入、分享海报                                                                                             |
+| `inc/functions/shop/inc/product.php`    | 商品信息、商品卡片、销量、购买统计缓存                                                                                       |
+| `inc/functions/shop/inc/cart.php`       | 购物车按钮和购物车数据                                                                                                       |
+| `inc/functions/shop/inc/pay.php`        | 商城订单与 Zibpay 的创建、关闭、退款、支付成功联动                                                                           |
+| `inc/functions/shop/inc/order.php`      | 用户订单展示、订单详情和收货地址修改入口；用户中心与通知链路见 [商城用户中心与消息通知](/docs/api/shop-user-center-messages) |
+| `inc/functions/shop/inc/after-sale.php` | 售后申请、处理和记录                                                                                                         |
+| `inc/functions/shop/inc/shipping.php`   | 发货、物流、自动发货内容                                                                                                     |
+| `inc/functions/shop/inc/comment.php`    | 商品评价和评分统计                                                                                                           |
+| `inc/functions/shop/action/action.php`  | 商城前台 Ajax 动作，包含联系商家弹窗、订单地址修改、评价、售后和购物车交互                                                   |
+| `inc/functions/shop/admin/*`            | 商城后台设置、商品 Meta、分类 Meta、发货和售后管理；后台列表与排查见 [商城后台与订单排查](/docs/api/shop-admin-diagnostics)  |
+| `inc/functions/shop/page/*`             | 商品页、购物车页、分类页、优惠页、标签页                                                                                     |
+
+## 数据模型
+
+商城核心对象由 `inc/functions/shop/inc/class.init.php` 注册：
+
+| 类型            | 注册方式                                                         | 说明     |
+| --------------- | ---------------------------------------------------------------- | -------- |
+| `shop_product`  | `register_post_type()`                                           | 商品     |
+| `shop_cat`      | `register_taxonomy('shop_cat', array('shop_product'), ...)`      | 商品分类 |
+| `shop_discount` | `register_taxonomy('shop_discount', array('shop_product'), ...)` | 优惠活动 |
+| `shop_tag`      | `register_taxonomy('shop_tag', array('shop_product'), ...)`      | 商品标签 |
+
+商品配置和分类配置由 Codestar 提供：
+
+| 配置                    | 文件                                                | 保存位置                      |
+| ----------------------- | --------------------------------------------------- | ----------------------------- |
+| 商品 Meta               | `inc/functions/shop/admin/options/meta-option.php`  | `product_config` 等 post meta |
+| 商品分类/标签/优惠 Meta | `inc/functions/shop/admin/options/term-option.php`  | term meta                     |
+| 商城全局设置            | `inc/functions/shop/admin/options/admin-option.php` | `zibll_options`               |
+
+## 商城首页与分类入口
+
+子比主题的商城首页不是一个单独的 `shop_home` post type。后台“商城首页链接”字段保存为 `shop_home_url`，用于面包屑、导航和商城入口跳转；页面本身通常是一个普通页面，再通过页面专属小工具容器、商城小工具和短代码组装出来。
+
+后台配置入口在 `admin/options/admin-option.php`：
+
+```php
+array(
+    'title'       => __('商城首页链接', 'zib_language'),
+    'id'          => 'shop_home_url',
+    'default'     => '',
+    'type'        => 'text',
+    'placeholder' => 'https://',
+)
+```
+
+因此创建商城首页的推荐路径是：
+
+| 步骤             | 说明                                                                       |
+| ---------------- | -------------------------------------------------------------------------- |
+| 新建普通页面     | 页面标题可以叫商城、产品中心或资源商城，正文可留空                         |
+| 开启页面模块容器 | 使用页面专属 `page_top_fluid_{ID}`、`page_top_content_{ID}` 等位置承载模块 |
+| 添加商城小工具   | 使用 `[商城]商品列表`、`[商城]多栏目商品列表`、`[商城]单行商品列表` 等模块 |
+| 配置商城首页链接 | 把该页面 URL 写入 `shop_home_url`，供面包屑和商城入口使用                  |
+| 配置商品分类     | 分类页、标签页和优惠页仍走主题内置 taxonomy 归档，不需要为每个分类新建页面 |
+
+商城系统的能力边界可以这样理解：
+
+| 层级      | 主要对象                                   | 入口                                                                        |
+| --------- | ------------------------------------------ | --------------------------------------------------------------------------- |
+| 首页/频道 | 普通页面、小工具、短代码                   | 页面容器、`Zib_CFSwidget`、`[productbox]`                                   |
+| 商品归档  | `shop_cat`、`shop_tag`、`shop_discount`    | taxonomy 路由、`shop_list_opt`、Ajax 分页                                   |
+| 商品详情  | `shop_product`                             | `page/product.php`、`shop_product_page_header`、`shop_product_page_content` |
+| 交易链路  | 购物车、地址、订单、优惠、发货、售后、评价 | `action/action.php`、`inc/pay.php`、用户中心                                |
+
+不要把商城首页做成硬编码模板。使用普通页面加模块更符合主题设计：页面可以导入导出模块，分类页仍保留原生 taxonomy 查询、排序、筛选、分页和搜索能力。
+
+### 商品列表配置
+
+全局商品列表配置保存在 `shop_list_opt`，会影响分类页、搜索页和用户页的默认列表样式：
+
+| 字段                | 作用                                |
+| ------------------- | ----------------------------------- |
+| `orderby`           | 默认排序方式                        |
+| `count`             | 单页商品数量                        |
+| `paginate`          | `ajax` 追加加载或 `number` 数字分页 |
+| `ias_s` / `ias_max` | Ajax 翻页自动加载开关和自动加载页数 |
+| `list_style`        | 商品卡片 UI 配置                    |
+
+分类、标签和优惠活动主查询会读取这组配置。入口在 `inc/functions/shop/inc/class.init.php::main_post_query()`：
+
+```php
+if ($query->is_main_query() && (is_tax('shop_cat') || is_tax('shop_discount') || is_tax('shop_tag'))) {
+    $shop_list_opt  = _pz('shop_list_opt');
+    $posts_per_page = $shop_list_opt['count'] ?? 12;
+    $orderby        = $shop_list_opt['orderby'] ?? '';
+
+    $query->set('post_type', 'shop_product');
+    $query->set('posts_per_page', $posts_per_page);
+}
+```
+
+排序字段并不是直接塞进 SQL。主题会先判断它是不是数值型 meta、字符串 meta，最后才当作 WordPress 原生 `orderby`：
+
+```php
+$orderby_keys      = zib_get_query_mate_orderby_keys();
+$mate_orderbys     = $orderby_keys['value'];
+$mate_orderbys_num = $orderby_keys['value_num'];
+
+if (in_array($orderby, $mate_orderbys_num)) {
+    $query->set('orderby', 'meta_value_num');
+    $query->set('meta_key', $orderby);
+} elseif (in_array($orderby, $mate_orderbys)) {
+    $query->set('orderby', 'meta_value');
+    $query->set('meta_key', $orderby);
+} else {
+    $query->set('orderby', $orderby);
+}
+```
+
+商城排序选项由 `zib_shop_csf_module::product_orderby_options()` 提供：
+
+| 值               | 含义                  |
+| ---------------- | --------------------- |
+| `modified`       | 更新时间              |
+| `date`           | 发布时间              |
+| `views`          | 浏览量，数值型 meta   |
+| `comment_count`  | 评论量                |
+| `favorite_count` | 收藏数量，数值型 meta |
+| `zibpay_price`   | 售价，数值型 meta     |
+| `score`          | 评分，数值型 meta     |
+| `sales_volume`   | 销量，数值型 meta     |
+| `rand`           | 随机                  |
+
+如果要新增排序字段，优先通过 `query_mate_orderby_keys` 把自己的 meta key 加到 `value_num` 或 `value`，再加入对应的后台选项。不要在模板里手写 `ORDER BY`。
+
+分类页还会输出面包屑、同级分类、子分类和排序条。链接上带有 `ajax-replace="true"`、`route="1"` 和 `ajax-next`，所以前端会走主题 Ajax 替换，而不是整页刷新：
+
+```php
+<a ajax-replace="true" route="1" class="ajax-next" href="...">分类名称</a>
+```
+
+分类页筛选逻辑在 `inc/functions/shop/page/cat.php::zib_shop_get_cat_filter()`，它会按当前分类查：
+
+| 场景                     | 输出                                                  |
+| ------------------------ | ----------------------------------------------------- |
+| 当前分类有子分类         | 顶部显示同级分类 Tab，下方显示“全部 + 子分类”         |
+| 当前分类无子分类但有父级 | 顶部显示父级的同级分类，下方显示“全部 + 当前同级分类” |
+| 一级分类且无子分类       | 只显示一级分类 Tab                                    |
+
+排序条由 `zib_shop_get_the_trem_orderby_lists()` 读取当前 `order` 和 `orderby` 后生成。`shop_discount` 和 `shop_tag` 页面没有层级筛选，但同样输出排序条，并把排序块标记为：
+
+```php
+win-ajax-replace="orderby"
+```
+
+主列表输出在 `zib_shop_get_main_product_lists()`。它会用 `shop_list_opt.list_style` 合并分类级样式，然后输出商品卡片、分页和加载占位：
+
+```php
+$shop_list_opt = _pz('shop_list_opt');
+$default       = $shop_list_opt['list_style'] ?? array();
+$card_args     = array_merge($default, $card_args);
+
+while (have_posts()) {
+    the_post();
+    $lists .= zib_shop_get_product_list_card($card_args);
+}
+
+$lists .= zib_shop_get_paginate($wp_query->found_posts);
+$lists .= '<div class="post_ajax_loader" style="display:none;">' . zib_shop_get_lists_card_placeholder($card_args) . '</div>';
+```
+
+扩展分类页筛选时，保留这些协议：
+
+| 协议                           | 作用                          |
+| ------------------------------ | ----------------------------- |
+| `.ajaxpager.product-lists-row` | Ajax 替换和追加列表的目标容器 |
+| `.ajax-item-header`            | Ajax 列表头部区域             |
+| `.ajax-next`                   | 主题前端接管链接              |
+| `ajax-replace="true"`          | 使用局部替换而不是整页跳转    |
+| `route="1"` / `route-title`    | 路由标题和浏览器地址同步      |
+| `.post_ajax_loader`            | 下一页加载时的商品骨架屏      |
+
+不要把商品分类、优惠活动、标签页改成独立 REST 拉取后整块重绘。主题的 URL、分页、搜索、排序、标题和局部替换已经通过这些属性串起来，重写后很容易出现浏览器后退、标题、分页或目录状态不同步。
+
+### 归档页共用 Term 能力
+
+分类、标签、优惠活动的共用函数在 `inc/functions/shop/inc/term.php`。这层不是后台字段定义，而是前台归档页和前台设置用到的辅助能力。
+
+| 函数                                       | 用途                                                                |
+| ------------------------------------------ | ------------------------------------------------------------------- |
+| `zib_shop_get_the_trem_orderby_lists()`    | 从当前查询和 `shop_list_opt.orderby` 生成排序按钮                   |
+| `zib_shop_get_term_header_more_btn()`      | 输出归档页右上角更多按钮，目前主要是搜索                            |
+| `zib_shop_get_term_search_btn()`           | 生成限定当前 term 的商品搜索按钮                                    |
+| `zib_shop_get_taxonomy_name()`             | 把 `shop_cat`、`shop_tag`、`shop_discount` 转成分类、标签、优惠活动 |
+| `zib_shop_get_term_config()`               | 读取 `{taxonomy}_config` term meta                                  |
+| `zib_shop_term_frontend_set_input_array()` | 前台设置弹窗追加可编辑字段                                          |
+| `zib_shop_term_frontend_set_save()`        | 保存前台设置字段到 term meta                                        |
+
+归档页右上角搜索按钮最终走主题搜索弹窗：
+
+```php
+$args = array(
+    'class'       => $class,
+    'trem'        => $term->term_id,
+    'trem_name'   => zib_str_cut($title, 0, 8),
+    'type'        => 'product',
+    'placeholder' => __('在', 'zib_language') . zib_shop_get_taxonomy_name($term->taxonomy) . '[' . $title . ']中搜索商品',
+);
+
+return zib_get_search_link($args);
+```
+
+这里源码参数名是 `trem`。二开时不要随手改成 `term`，除非同时确认前端搜索脚本和搜索请求读取的参数名已经一起改掉。
+
+前台设置会按 taxonomy 追加不同字段：
+
+| Taxonomy        | 字段               | 说明                                             |
+| --------------- | ------------------ | ------------------------------------------------ |
+| `shop_cat`      | `list_style_style` | 分类页列表样式，支持默认、竖向大卡片、横向小卡片 |
+| `shop_discount` | `small_badge`      | 优惠活动小标签                                   |
+| `shop_discount` | `priority`         | 优惠活动优先级                                   |
+| `shop_discount` | `is_important`     | 重点活动，商品金额位置着重显示                   |
+| `shop_tag`      | `priority`         | 标签优先级                                       |
+| `shop_tag`      | `is_important`     | 重点标签，重要位置着重显示                       |
+
+保存时只处理这几个 key：
+
+```php
+$keys = array('list_style_style', 'small_badge', 'priority', 'is_important');
+foreach ($keys as $key) {
+    if (isset($_POST[$key])) {
+        $config[$key] = $_POST[$key];
+    }
+}
+
+update_term_meta($object_data->term_id, $taxonomy . '_config', $config);
+```
+
+如果要新增前台可编辑的 term 字段，应同时补输入项和保存白名单。只在输入数组里加字段，不加保存 key，前台设置看起来能改，刷新后仍会丢失。
+
+### 优惠活动归档页
+
+优惠活动页使用 `shop_discount` taxonomy，对应页面文件是 `inc/functions/shop/page/dis.php`。它不是单纯输出商品列表，而是先用 `zib_shop_get_dis_header($dis_id)` 渲染活动头部，再进入同一套商品列表：
+
+```php
+function zib_shop_dis_page_content()
+{
+    global $wp_query;
+    $cat_id = $wp_query->get_queried_object_id();
+    $header = zib_shop_get_dis_header($cat_id);
+
+    $html = '<div class="shop-term-main mb20"><div class="ajaxpager product-lists-row">';
+    $html .= $header;
+    $html .= zib_shop_get_main_product_lists();
+    $html .= '</div></div>';
+
+    echo $html;
+}
+add_action('shop_dis_page_content', 'zib_shop_dis_page_content');
+```
+
+活动头部读取的是 `zib_shop_get_discount_data($dis)`，会把优惠政策转换成用户可读信息：
+
+| 数据                             | 展示                           |
+| -------------------------------- | ------------------------------ |
+| `small_badge`                    | 角标，和活动名相同则不重复显示 |
+| `discount_type=reduction`        | `立减{reduction_amount}`       |
+| `discount_type=discount`         | `{discount_amount}折`          |
+| term 描述                        | `.page-desc` 活动说明          |
+| `price_limit` + `discount_scope` | 单价、商品、店铺、跨店满额可用 |
+| `user_limit`                     | VIP、VIP2、认证用户可用        |
+| `time_limit_config.countdown`    | “活动仅剩”倒计时               |
+| `gift_config`                    | “赠送”赠品摘要                 |
+| `discount_error`                 | 未开始、已结束或配置错误提示   |
+
+配置错误的提示只对超级管理员显示：
+
+```php
+if ($dis_data['discount_error'] === 'config_error' && is_super_admin()) {
+    $error = sprintf(__('配置错误：%s', 'zib_language'), $dis_data['discount_error_msg']);
+}
+```
+
+因此不要在前台给普通用户输出后台配置细节。普通用户只需要看到活动是否可用、门槛和商品列表；管理员才需要看到配置错误原因。
+
+优惠活动的实际数据不是直接读取 term meta 后原样使用。主题会先通过 `zib_shop_get_discount_data()` 合并 term 基础信息和 `shop_discount_config`，再调用 `zib_shop_get_discount_policy()` 做有效性判断：
+
+```php
+$product_discount_config = zib_shop_get_discount_config($discount->term_id) ?: array();
+$data = array_merge(array(
+    'id'             => $discount->term_id,
+    'name'           => $discount->name,
+    'small_badge'    => !empty($product_discount_config['small_badge']) ? $product_discount_config['small_badge'] : $discount->name,
+    'desc'           => $discount->description,
+    'link'           => get_term_link($discount),
+    'price_limit'    => $product_discount_config['price_limit'] ?? 0,
+    'user_limit'     => $product_discount_config['user_limit'] ?? 0,
+    'time_limit'     => $product_discount_config['time_limit'] ?? 0,
+    'priority'       => $product_discount_config['priority'] ?? 50,
+    'discount_scope' => $product_discount_config['discount_scope'] ?? 'item',
+), zib_shop_get_discount_policy($product_discount_config));
+```
+
+`zib_shop_get_discount_policy()` 会先判断 `discount_type`，再校验每种策略：
+
+| 策略           | 校验                                                       |
+| -------------- | ---------------------------------------------------------- |
+| `reduction`    | `reduction_amount` 必须大于 `0`                            |
+| `discount`     | `discount_amount` 必须在 `0.01` 到 `9.99` 之间             |
+| `gift`         | `gift_config` 过滤后至少要有一个有效赠品                   |
+| `time_limit`   | 未开始返回 `time_limit_start`，已结束返回 `time_limit_end` |
+| `is_important` | 写入 `important_class`，供商品价格区域突出显示             |
+
+商品读取优惠活动时使用 `zib_shop_get_product_discount($post_id, $is_valid)`。默认只返回有效活动；如果要做后台排查或活动预览，才传 `false` 拿到包含未开始、已结束和配置错误在内的全部活动。返回结果会走 `zib_shop_discount_sort()`，先按 `priority` 升序，再按 term ID 升序，所以数值越小越靠前。
+
+```php
+usort($discounts, function ($a, $b) {
+    $priority_a = isset($a['priority']) ? intval($a['priority']) : 0;
+    $priority_b = isset($b['priority']) ? intval($b['priority']) : 0;
+
+    if ($priority_a !== $priority_b) {
+        return $priority_a - $priority_b;
+    }
+
+    return intval($a['id'] ?? 0) - intval($b['id'] ?? 0);
+});
+```
+
+商品页的重点活动只取第一个有效的 `is_important` 活动。运营上如果给同一商品挂多个重点活动，前台不会都作为主价格氛围展示；其余活动仍可在优惠卡片、结算明细或活动归档里展示。
+
+后台优惠活动列表也复用同一份解析结果。`discount_columns()` 会追加“活动、限制、优先级”列，`discount_custom_column()` 会把小标签、重点标记、配置错误、立减、折扣、赠品摘要和限制条件展示出来。后台看到的错误和前台看到的活动状态来自同一套数据，不要另写一套后台列计算逻辑。
+
+结算计算时，优惠命中分两步：先检查金额门槛和用户限制，再计算优惠金额。作用范围 `discount_scope` 决定满额和分摊方式：
+
+| `discount_scope` | 满额判断     | 立减分摊                               |
+| ---------------- | ------------ | -------------------------------------- |
+| `item`           | 当前规格单价 | 立减金额乘购买数量                     |
+| `product`        | 当前商品总额 | 按当前规格数量占商品总数量比例分摊     |
+| `author`         | 当前商家总额 | 按当前规格数量占商家商品总数量比例分摊 |
+| `order`          | 整单总额     | 按当前规格数量占整单总数量比例分摊     |
+
+折扣类优惠会直接按当前已优惠后的价格继续打折；立减金额不会超过当前价格。也就是说多个优惠会按排序结果依次作用，后一个优惠面对的是前一个优惠处理后的价格。二开结算页时不要只在前端改展示价格，最终订单里的 `discount_hit`、`prices.total_discount`、`gift_data` 和支付金额都依赖这套计算链路。
+
+优惠活动页的排序条仍然走 `zib_shop_get_the_trem_orderby_lists()`，并保留局部替换标记：
+
+```php
+win-ajax-replace="orderby"
+```
+
+活动页底部仍由 `zib_shop_get_main_product_lists()` 输出商品卡片和分页。二开活动页头部时，适合追加运营说明、规则链接或活动客服入口；不要把 `shop_discount_config` 里的政策改写到页面模板里，否则确认下单和活动展示会出现两套规则。
+
+### 商城小工具
+
+商城首页最常用的小工具在 `widgets/widgets-product.php`：
+
+| 小工具         | id                                         | 适用场景                         |
+| -------------- | ------------------------------------------ | -------------------------------- |
+| 商品列表       | `zib_shop_widget_ui_product_lists`         | 首页分区、分类推荐、优惠商品区   |
+| 单行商品列表   | `zib_shop_widget_ui_oneline_product_lists` | 横向滚动展示、首屏推荐           |
+| 多栏目商品列表 | `zib_shop_widget_ui_tab_product`           | 热门推荐、最新上架、销量榜等 Tab |
+
+这些小工具都支持按 `shop_cat`、`shop_discount`、`shop_tag` 筛选，并通过 `zib_query_orderby_filter()` 统一处理排序。筛选字段的含义：
+
+| 字段          | 作用                                        |
+| ------------- | ------------------------------------------- |
+| `exclude_cat` | 排除分类，优先级高于 `include_cat`          |
+| `include_cat` | 仅包含分类，只有未设置 `exclude_cat` 时生效 |
+| `include_dis` | 仅包含指定优惠活动                          |
+| `include_tag` | 仅包含指定特色标签                          |
+| `orderby`     | 排序方式                                    |
+| `count`       | 每次查询数量                                |
+| `paginate`    | `ajax` 追加、`number` 数字分页或不分页      |
+| `list_style`  | 商品卡片样式                                |
+
+商品列表小工具第一次渲染时不直接查询商品，而是输出 `zib_get_ias_ajaxpager()` 占位，让前端通过 `ajax_widget_ui` 拉取保存的小工具实例：
+
+```php
+$ias_args = array(
+    'type'   => 'ias',
+    'class'  => 'product-lists-row',
+    'loader' => zib_shop_get_lists_card_placeholder($list_style),
+    'query'  => array(
+        'action' => 'ajax_widget_ui',
+        'id'     => $id_base,
+        'index'  => $index,
+    ),
+);
+```
+
+Ajax 回调 `zib_shop_widget_ui_product_lists_ajax($instance)` 才会读取实例里的筛选条件，组装 `tax_query`：
+
+```php
+if (!empty($instance['exclude_cat'])) {
+    $tax_query[] = array(
+        'taxonomy' => 'shop_cat',
+        'field'    => 'term_id',
+        'terms'    => $instance['exclude_cat'],
+        'operator' => 'NOT IN',
+    );
+} elseif (!empty($instance['include_cat'])) {
+    $tax_query[] = array(
+        'taxonomy' => 'shop_cat',
+        'field'    => 'term_id',
+        'terms'    => $instance['include_cat'],
+    );
+}
+```
+
+然后构建商品查询：
+
+```php
+$query_args = array(
+    'ignore_sticky_posts' => 1,
+    'post_type'           => 'shop_product',
+    'post_status'         => 'publish',
+    'tax_query'           => $tax_query,
+    'posts_per_page'      => $count,
+);
+
+$query_args = zib_query_orderby_filter($orderby, $query_args);
+```
+
+如果 `paginate` 为空，会设置 `no_found_rows=true`，减少不需要总数的查询；如果开启 `ajax` 或 `number`，才会查询 `found_posts` 并输出 `.ajax-pag`。这也是为什么自定义小工具不要无条件分页，首页多模块同时查询时成本会明显增加。
+
+多栏目商品列表的非首个 Tab 会输出隐藏触发器：
+
+```php
+<span class="post_ajax_trigger hide">
+    <a class="ajax_load ajax-next ajax-open" no-scroll="true"></a>
+</span>
+```
+
+所以新增商城类 Tab 模块时，不需要重写前端 Ajax Tab。保持 `data-ajax`、`.post_ajax_trigger`、`.ajax-next` 和 `.ajaxpager` 即可。
+
+`[商城]单行商品列表` 不走 Ajax 懒加载，它会直接查询商品并输出 Swiper 结构：
+
+```php
+<div class="swiper-container swiper-scroll mb20">
+    <div class="swiper-wrapper swiper-wrapper-product-lists">
+        ...
+    </div>
+    <div class="swiper-button-prev"></div>
+    <div class="swiper-button-next"></div>
+</div>
+```
+
+因此单行商品列表适合首屏少量推荐，不适合大量商品分页。需要分页、Tab 或懒加载时，应使用商品列表或多栏目商品列表。
+
+### 商品短代码
+
+正文或模块内容里可以插入单个商品卡片：
+
+```txt
+[productbox id="123"]
+```
+
+短代码会检查 `_pz('shop_s')`，再读取商品和全局列表样式，强制用小卡片展示：
+
+```php
+$card_args               = $shop_list_opt['list_style'] ?? array();
+$card_args['style']      = 'small';
+$card_args['show_price'] = 1;
+$card_args['show_desc']  = 0;
+```
+
+短代码适合在文章、专题页或产品说明中插入商品入口。不要把短代码当作下单接口，它只负责展示商品卡片；价格、优惠、库存和订单仍由商品详情、购物车和下单链路服务端计算。
+
+## 搜索与用户中心
+
+商城开启后会把商品加入主题搜索：
+
+```php
+add_filter('search_types', 'zib_shop_search_types_filter');
+add_filter('search_main_tabs_array', 'zib_shop_search_main_tabs_array_filter');
+add_filter('main_search_tab_content_product', 'zib_shop_get_search_product', 10);
+```
+
+商城也会接入用户中心：
+
+```php
+add_filter('user_center_page_sidebar', 'zib_shop_user_center_page_sidebar_order');
+add_filter('user_ctnter_main_tabs_array', 'zib_shop_user_ctnter_main_tabs_array_filter_order', 20);
+add_filter('user_page_order_tabs', 'zib_shop_user_order_tabs');
+add_filter('user_order_list_card', 'zib_shop_user_order_list_card', 10, 3);
+add_filter('user_order_details_modal', 'zib_shop_user_order_details_modal', 10, 3);
+```
+
+新增用户中心商城功能时，要跟随用户中心现有 Tab、订单卡片、详情弹窗和权限判断，不要新建一套孤立入口。
+
+## 商品页面模板 Hook
+
+商品页在 `inc/functions/shop/page/product.php` 中触发：
+
+```php
+do_action('shop_locate_template');
+do_action('shop_locate_template_' . $page_type);
+do_action('shop_' . $page_type . '_page_header');
+do_action('shop_' . $page_type . '_page_content');
+```
+
+默认商品页内容挂载在：
+
+```php
+add_action('shop_product_page_header', 'zib_shop_single_header');
+add_action('shop_product_page_content', 'zib_shop_single_content');
+```
+
+商品正文后还有：
+
+```php
+do_action('shop_product_page_content_after');
+```
+
+追加购买说明或售后说明可以这样写：
+
+```php
+add_action('shop_product_page_content_after', 'zib_docs_shop_product_after_sale_notice', 20);
+
+function zib_docs_shop_product_after_sale_notice()
+{
+    if (!is_singular('shop_product')) {
+        return;
+    }
+
+    echo '<div class="muted-box mt20">' . esc_html__('下单前请确认商品规格和收货信息。', 'zib_language') . '</div>';
+}
+```
+
+## 商品详情页布局
+
+商品详情页不是一个静态模板文件拼完的页面，而是 `page/product.php` 触发 Hook，`inc/single.php` 挂载头部、内容区、移动端按钮、评价和小工具位置。
+
+页面入口会先根据布局重写 `body_class`：
+
+```php
+function zib_shop_product_body_class($classes)
+{
+    $content_layout = zib_shop_get_product_content_layout();
+    if ($content_layout === 'side') {
+        $classes[] = 'site-layout-2';
+    } else {
+        $classes[] = 'site-layout-1';
+    }
+
+    $classes[] = 'content-layout-' . $content_layout;
+    $classes[] = 'shop';
+    return $classes;
+}
+```
+
+三种布局值的行为如下：
+
+| 值     | 页面结构                                                                          | 适用场景                                   |
+| ------ | --------------------------------------------------------------------------------- | ------------------------------------------ |
+| `full` | 详情 Tab 全宽显示，相关推荐和 `shop_product_page_content_after` 放回 `.container` | 商品介绍主要由大图、长图、模块化区块构成   |
+| `box`  | 内容区包在 `.container > .content-wrap > .content-layout` 内，无侧栏              | 常规商品详情，正文宽度需要保持可读         |
+| `side` | 内容区同 `box`，额外输出 `.sidebar` 和 `shop_product_sidebar`                     | 需要右侧目录、店铺说明、热门商品或补充模块 |
+
+布局配置按“商品 > 分类 > 主题设置”依次继承：
+
+```php
+function zib_shop_get_product_in_turn_config($product_id, $key, $default = '')
+{
+    $config = zib_shop_get_product_config($product_id, $key, '');
+    if (!$config) {
+        $config = zib_shop_get_product_cat_config($product_id, $key);
+    }
+    if (!$config) {
+        $config = _pz('shop_' . $key, $default);
+    }
+
+    return $config;
+}
+```
+
+`zib_shop_get_product_cat_config()` 会先读当前商品分类，再向父级分类查找。扩展配置时不要只读 `_pz('shop_content_layout')`，否则会绕过商品和分类级覆盖。
+
+### 头部购买区
+
+商品页头部挂在 `shop_product_page_header`：
+
+```php
+add_action('shop_product_page_header', 'zib_shop_single_header');
+```
+
+默认头部结构是：
+
+| 区块     | 函数                                      | 说明                                                                      |
+| -------- | ----------------------------------------- | ------------------------------------------------------------------------- |
+| 面包屑   | `zib_shop_get_breadcrumbs()`              | PC 端按首页、商城首页、商品分类、商品名称输出                             |
+| 商品封面 | `zib_shop_get_product_cover($post)`       | 读取 `cover_images`、`cover_videos`、选项图片并交给 `zib_new_slider()`    |
+| 商品选项 | `zib_shop_get_product_detail($post)`      | 输出 Vue 挂载点，包含标题、简介、标签、价格、优惠、规格、服务、数量和按钮 |
+| 移动评价 | `zib_shop_single_mobile_comment_drawer()` | 移动端把评价做成抽屉入口，避免详情页首屏过长                              |
+
+封面轮播会把商品封面图转成 `slides`，如果没有封面图，会回退到商品缩略图或主题占位图。配置了选项图片时，主题还会把选项图片追加到轮播，并写入 `product-opt-index`，用于规格切换时联动封面。
+
+### 商品封面图片与视频
+
+商品封面字段在 `inc/functions/shop/admin/options/meta-option.php` 的 `product_config` 里。图片和视频不是同一个字段：
+
+| 字段           | 类型       | 说明                                                   |
+| -------------- | ---------- | ------------------------------------------------------ |
+| `cover_images` | `gallery`  | 商品封面图片，保存附件 ID 列表                         |
+| `cover_videos` | `repeater` | 商品封面视频，每项只有 `url`，可上传视频或填写视频地址 |
+| `main_image`   | `upload`   | 自定义商品主图，不等同于轮播封面列表                   |
+
+后台字段说明里有一个关键约束：封面视频会和封面图片同步显示，顺序保持一致，所以必须先设置图片封面，并且图片数量要大于等于视频数量。前台 `zib_shop_get_product_cover()` 正是按图片索引去取同位置视频：
+
+```php
+$cover_images = explode(',', ($product_configs['cover_images'] ?? ''));
+$cover_videos = $product_configs['cover_videos'] ?? array();
+
+foreach ($cover_images as $index => $cover_id) {
+    $img_url = zib_get_attachment_image_src((int) $cover_id, 'full');
+    if (!empty($img_url[0])) {
+        $slides[] = array(
+            'video'      => $cover_videos[$index]['url'] ?? '',
+            'background' => $img_url[0],
+        );
+    }
+}
+```
+
+如果没有有效封面图片，主题会回退到商品缩略图或主题占位图，同时只尝试使用 `cover_videos[0].url`：
+
+```php
+$slides = array(
+    array(
+        'background' => zib_shop_get_product_thumbnail_url($post, 'full') ?: ZIB_TEMPLATE_DIRECTORY_URI . '/img/thumbnail.svg',
+        'video'      => $cover_videos[0]['url'] ?? '',
+    ),
+);
+```
+
+随后规格选项图片会继续追加到同一个轮播，并写入 `product-opt-index`：
+
+```php
+$slides[] = array(
+    'background' => $opt_value['image'],
+    'attr'       => 'product-opt-index="' . $opt_key . '_' . $opt_value_key . '"',
+);
+```
+
+因此扩展商品封面视频时，不要把商品视频写到文章的 `featured_video`，也不要写到 Zibpay 付费视频的 `posts_zibpay.video_url`。商品封面视频只服务商品详情页头部轮播；付费播放、购买权限、剧集内容仍应走 Zibpay 付费视频链路。
+
+如果要通过代码补充商品封面视频，应保持 `product_config.cover_videos` 的 repeater 结构：
+
+```php
+function zib_docs_shop_append_cover_video($product_id, $video_url)
+{
+    $product_id = (int) $product_id;
+    if (!$product_id || !$video_url) {
+        return false;
+    }
+
+    $config = zib_shop_get_product_config($product_id);
+    $config['cover_videos'] = $config['cover_videos'] ?? array();
+    $config['cover_videos'][] = array(
+        'url' => esc_url_raw($video_url),
+    );
+
+    zib_shop_save_product_config($product_id, null, $config);
+
+    return true;
+}
+```
+
+这个示例只追加封面视频，不创建订单权限，也不改变商品主图。实际使用时还要确保 `cover_images` 至少有同位置图片作为封面兜底。
+
+### 内容区与 Tab
+
+内容区挂在 `shop_product_page_content`：
+
+```php
+add_action('shop_product_page_content', 'zib_shop_single_content');
+```
+
+默认内容先生成“详情”Tab，再按条件追加“评价”和自定义 Tab：
+
+| Tab       | 来源                                | 说明                                             |
+| --------- | ----------------------------------- | ------------------------------------------------ |
+| `article` | `zib_shop_single_content_article()` | 商品正文，经过 `the_content`，支持分页和正文模块 |
+| `comment` | `zib_shop_single_content_comment()` | PC 端显示，移动端转为评价抽屉                    |
+| `tab-*`   | `zib_shop_get_single_tabs()`        | 商品、分类或主题设置里的自定义栏目               |
+
+自定义 Tab 的继承顺序同样是商品、分类、主题设置。商品设置为 `disable` 会关闭自定义 Tab；设置为 `custom` 会只使用当前商品的栏目；分类设置也可以覆盖主题默认栏目。
+
+源码会把自定义 Tab 内容套进：
+
+```php
+'<div class="zib-widget article product-article"><div class="wp-posts-content">' . $content . '</div></div>'
+```
+
+所以 Tab 内容可以使用正文短代码和古腾堡输出，但不要在里面再包整套页面容器。适合放“安装须知”“规格说明”“授权范围”“售后规则”“常见问题”等补充说明。
+
+### 商品页模块位置
+
+商城小工具注册在 `inc/functions/shop/widgets/widgets.php`。商品详情页有三个位置：
+
+| Sidebar id                  | 后台名称                      | 输出位置                                    |
+| --------------------------- | ----------------------------- | ------------------------------------------- |
+| `shop_product_top_fluid`    | `[商城]商品详情页-上方全宽度` | 商品详情内容上方，适合公告、横幅、组合模块  |
+| `shop_product_sidebar`      | `[商城]商品详情页-侧边栏`     | 仅 `side` 布局下输出，适合窄模块            |
+| `shop_product_bottom_fluid` | `[商城]商品详情页-底部全宽度` | 商品页最底部，适合推荐、保障、FAQ、专题模块 |
+
+内容区输出顺序是：
+
+```php
+dynamic_sidebar('shop_product_top_fluid');
+
+// content tabs + related + shop_product_page_content_after
+
+dynamic_sidebar('shop_product_bottom_fluid');
+```
+
+用模块搭建产品详情页时，优先把主视觉、卖点、对比、FAQ、评价摘要、服务保障这些展示区放进 `shop_product_top_fluid` 或 `shop_product_bottom_fluid`；商品正文只保留真正属于当前商品的详情内容。这样模块可以通过小工具导入导出复用，商品正文仍能随商品单独维护。
+
+如果选择 `side`，侧栏只在电脑端显示，源码注册说明也明确侧栏位置较小。不要把宽封面、横向轮播、复杂组合模块塞进 `shop_product_sidebar`，它更适合商品目录、卖家联系、热门商品、服务说明、标签云等窄内容。
+
+### 背景盒子与正文承载
+
+商品正文外层由 `content_show_bg` 控制：
+
+| 值    | 输出类名                             | 建议                                           |
+| ----- | ------------------------------------ | ---------------------------------------------- |
+| `on`  | `article product-article zib-widget` | 正文是文字说明、表格、短内容，或页面是侧栏布局 |
+| `off` | `product-article-full mb20`          | 正文主要是长图、视觉模块或自定义大段排版       |
+
+这个配置也按商品、分类、主题设置继承，并可通过前台设置保存到 `product_config`：
+
+```php
+add_action('zib_frontend_set_save', 'zib_shop_single_frontend_set_save', 10, 2);
+```
+
+扩展前台设置时，跟随 `zib_frontend_set_input_array` 和 `zib_frontend_set_save` 的模式，把可编辑字段写回 `product_config`，不要另建一个和商品配置脱节的 meta。
+
+### 商品评价与评分统计
+
+商城评价不是普通文章评论入口。它复用 WordPress comment 表存储内容，但入口、状态、评分和订单关系都由商城模块接管：
+
+| 文件                                       | 负责                                             |
+| ------------------------------------------ | ------------------------------------------------ |
+| `inc/functions/shop/action/action.php`     | 打开评价弹窗、提交评价 Ajax                      |
+| `inc/functions/shop/inc/comment.php`       | 评价状态、自动好评、创建评论、评分统计、缓存清理 |
+| `inc/functions/shop/template/comments.php` | 商品详情页评价头部、筛选、列表和商家回复         |
+| `inc/functions/shop/inc/product.php`       | 商品 `score_data` 增量评分                       |
+| `inc/functions/shop/inc/shipping.php`      | 确认收货后初始化评价状态                         |
+| `inc/functions/shop/inc/after-sale.php`    | 售后期间锁定或恢复评价状态                       |
+
+订单评价状态写在 Zibpay 订单 meta `comment_status`：
+
+| 值   | 含义           | 触发点                                       |
+| ---- | -------------- | -------------------------------------------- |
+| `-1` | 商品未开启评价 | 确认收货时商品评价开关为关闭                 |
+| `0`  | 待评价         | 确认收货后初始化，或售后结束恢复             |
+| `1`  | 已评价         | 用户提交评价，或超过评价时效自动好评         |
+| `2`  | 售后中无法评价 | 待评价订单申请售后，或退款退货后不再允许评价 |
+
+确认收货统一走 `zib_shop_order_receive_confirm()`，它会写入 `order_data.shipping_data.receive_time`，然后调用：
+
+```php
+zib_shop_init_order_comment_status($order);
+```
+
+评价时效由 `_pz('shop_comment_max_day', 15)` 控制。`zib_shop_get_order_comment_status()` 读取到 `comment_status === 0` 时，会继续检查 `zib_shop_get_order_comment_over_time()`；如果已超过确认收货后的可评价天数，会调用 `zib_shop_order_auto_comment()` 自动创建 5 分好评并返回已评价状态。快递订单会同时写入 `shipping=5`，虚拟或无需物流订单只写商品和服务评分。
+
+用户点击评价按钮时，订单页通过 `zib_shop_get_order_comment_link()` 打开 `order_comment_modal`：
+
+```php
+add_action('wp_ajax_order_comment_modal', 'zib_shop_ajax_comment_modal');
+add_action('wp_ajax_shop_order_comment', 'zib_shop_order_comment');
+```
+
+提交评价时必须保留这些校验：
+
+1. `zib_ajax_verify_nonce()` 验证 `shop_order_comment`。
+2. 当前用户必须是订单所属用户。
+3. 订单必须是商城订单，且商品评价开关未关闭。
+4. `comment_status` 必须仍为 `0`。
+5. 商品评分和服务评分必填；快递订单还要校验物流评分。
+6. 图片上传走主题上传链路，数量受 `_pz('shop_comment_img_num', 6)` 控制。
+
+统一落库函数是 `zib_shop_order_comment_handle()`。它会允许同一商品下重复 comment，因为同一用户可以购买多次；同时会强制本次评价直接审核通过：
+
+```php
+add_filter('duplicate_comment_id', '__return_false');
+add_filter('pre_comment_approved', function () {
+    return 1;
+});
+```
+
+评价成功后会写这些 comment meta：
+
+| Meta             | 内容                                                                           |
+| ---------------- | ------------------------------------------------------------------------------ |
+| `score`          | 本次评价平均分，用于评论查询筛选                                               |
+| `score_data`     | `product`、`service`、`shipping`、`average`、`has_image`、`is_auto`、`img_ids` |
+| `shop_has_image` | 有图评价标记，只有有图时写入                                                   |
+| `order_data`     | 购买规格 `options_active_name`、数量 `count`、订单 ID                          |
+
+商品本身会维护两份评分数据：
+
+| Meta         | 内容                                                   |
+| ------------ | ------------------------------------------------------ |
+| `score_data` | 商品综合评分、分项评分、评价总数、好评/中差评/有图数量 |
+| `score`      | 综合评分的扁平值，后台列表和排序更容易读取             |
+
+评分增量由 `zib_shop_update_product_score()` 完成。新增评价时按旧平均分和旧数量重新计算 `average`、`product`、`service`、`shipping`，并把 `average >= 3.5` 归入好评，否则归入中/差评。评论审核、删除或状态变化时，`transition_comment_status` 会触发 `zib_shop_update_product_score_counts()` 反向增减统计；如果没有评价了，商品 `score_data` 会恢复为 `false`。
+
+评价数量不是直接使用 WordPress comment_count。`zib_shop_get_comment_count()` 只统计商品下一级、已审核评论，并把结果缓存到 `shop_comment_count`。创建评价、评论状态变化时都会删除这个缓存。
+
+评价列表头部由 `zib_shop_comment_header()` 输出，前台筛选参数如下：
+
+| 参数       | 值                 | 说明                                  |
+| ---------- | ------------------ | ------------------------------------- |
+| `ctype`    | `image`            | 只看有图评价，查询 `shop_has_image=1` |
+| `ctype`    | `good`             | 只看 `score >= 3.5` 的评价            |
+| `ctype`    | `bad`              | 只看 `score < 3.5` 的评价             |
+| `corderby` | `comment_date_gmt` | 最新评价                              |
+| `corderby` | `comment_like`     | 最热评价                              |
+
+评价头部带有 `win-ajax-replace="shop-comment-header"`，筛选和翻页时会替换评分摘要、筛选数量和排序按钮。商品评论模板还会关闭普通评论的置顶、编辑和回复按钮；如果某条子评论的 `user_id` 等于商品作者 ID，则渲染为“商家回复”。
+
+移动端评价不放在 Tab 内。`zib_shop_single_mobile_comment_drawer()` 会筛选评分不低于 3.5、正文长度大于 3 的最新评价，最多展示 3 条精选摘要，并把完整评价列表放进抽屉；PC 端则通过 `zib_shop_single_comment_is_show_tab()` 把评价作为商品详情 Tab。
+
+二开商品评价时，优先复用订单评价链路，不要自己 `wp_insert_comment()` 后只写一条评论。否则订单按钮、售后锁定、商品评分、好评数量、有图数量、自动好评和评论缓存都会脱节。
+
+### 商品详情相关推荐
+
+商品详情页底部相关推荐由全局开关 `_pz('shop_single_related_s', true)` 控制，参数保存在 `_pz('shop_single_related_opt')`：
+
+| 配置         | 默认                     | 说明                                     |
+| ------------ | ------------------------ | ---------------------------------------- |
+| `title`      | `推荐`                   | 推荐区标题                               |
+| `type`       | `cat`、`discount`、`tag` | 关联分类、活动、标签                     |
+| `orderby`    | `views`                  | 使用商城列表排序选项                     |
+| `count`      | `12`                     | 每页或一次加载数量                       |
+| `paginate`   | 空                       | 可选 `ajax` 追加翻页或 `number` 数字翻页 |
+| `list_style` | 空                       | 商品卡片样式配置                         |
+
+页面首次输出只放 Ajax 容器：
+
+```php
+$ias_args = array(
+    'type'   => 'ias',
+    'class'  => 'product-lists-row',
+    'loader' => zib_shop_get_lists_card_placeholder($related_config['list_style']),
+    'query'  => array(
+        'action'  => 'shop_single_related',
+        'post_id' => $product_id,
+    ),
+);
+
+zib_get_ias_ajaxpager($ias_args);
+```
+
+真正的查询在 `zib_shop_ajax_single_related()`。它会读取当前商品的 `shop_cat`、`shop_discount`、`shop_tag`，按启用的关联类型组装 `tax_query`，关系为 `OR`，并排除当前商品：
+
+```php
+$query_args = array(
+    'ignore_sticky_posts' => 1,
+    'post_type'           => 'shop_product',
+    'post_status'         => 'publish',
+    'tax_query'           => $tax_query,
+    'posts_per_page'      => $count,
+    'post__not_in'        => array($post_id),
+);
+```
+
+排序继续交给 `zib_query_orderby_filter($orderby, $query_args)`，卡片输出继续使用 `zib_shop_get_product_list_card($list_card_args)`。如果开启 Ajax 翻页，返回内容会追加 `zib_get_ajax_next_paginate()`；数字翻页则使用 `zib_get_ajax_number_paginate()`；不翻页时仍会输出隐藏分页节点，方便前端列表组件保持一致结构。
+
+扩展相关推荐时，建议只调整 `shop_single_related_opt` 或在查询前后挂过滤逻辑。不要把推荐商品硬编码进正文 Tab，否则商品分类、活动标签、列表样式、分页和占位加载都会和主题原有列表系统脱节。
+
+### 扩展示例
+
+在商品详情 Tab 后追加一个轻量模块，可以使用 `shop_product_page_content_after`。示例保持主题的命名函数、`array()` 和转义风格：
+
+```php
+add_action('shop_product_page_content_after', 'zib_docs_shop_product_extra_service', 30);
+
+function zib_docs_shop_product_extra_service()
+{
+    if (!is_singular('shop_product')) {
+        return;
+    }
+
+    $service = zib_shop_get_product_in_turn_config(get_the_ID(), 'service', array());
+    if (empty($service) || !is_array($service)) {
+        return;
+    }
+
+    echo '<div class="zib-widget product-extra-service">';
+    echo '<div class="title-theme">' . esc_html__('服务说明', 'zib_language') . '</div>';
+    echo '<div class="muted-color">';
+    foreach ($service as $item) {
+        if (empty($item['name'])) {
+            continue;
+        }
+        echo '<span class="badg badg-sm mr6 mb6">' . esc_html($item['name']) . '</span>';
+    }
+    echo '</div>';
+    echo '</div>';
+}
+```
+
+这类扩展只读主题已经计算好的商品继承配置，不参与价格、库存和订单创建。如果要改变购买条件，应接入购物车、下单或库存校验链路，而不是只在页面上隐藏按钮。
+
+## 前台 Ajax 动作
+
+商城前台动作集中在 `inc/functions/shop/action/action.php`：
+
+| Action                     | 回调                                    | 说明               |
+| -------------------------- | --------------------------------------- | ------------------ |
+| `cart_add`                 | `zib_shop_ajax_cart_add`                | 加入购物车         |
+| `update_cart`              | `zib_shop_ajax_update_cart`             | 更新购物车         |
+| `shop_single_related`      | `zib_shop_ajax_single_related`          | 商品详情页相关推荐 |
+| `shop_confirm_modal`       | `zib_shop_ajax_shop_confirm_modal`      | 下单确认弹窗       |
+| `shop_submit_order`        | `zib_shop_ajax_submit_order`            | 提交商城订单       |
+| `shop_get_user_addresses`  | `zib_shop_ajax_get_user_addresses`      | 获取收货地址       |
+| `shop_save_user_address`   | `zib_shop_ajax_save_user_address`       | 保存收货地址       |
+| `shop_delete_user_address` | `zib_shop_ajax_delete_user_address`     | 删除收货地址       |
+| `order_comment_modal`      | `zib_shop_ajax_comment_modal`           | 评价弹窗           |
+| `shop_order_comment`       | `zib_shop_order_comment`                | 提交评价           |
+| `shipping_express_data`    | `zib_shop_ajax_shipping_express_data`   | 查询物流           |
+| `order_receive_confirm`    | `zib_shop_ajax_order_receive_confirm`   | 确认收货           |
+| `order_modify_address`     | `zib_shop_ajax_order_modify_address`    | 修改收货地址       |
+| `modify_address_apply`     | `zib_shop_ajax_modify_address_apply`    | 申请修改地址       |
+| `order_after_sale_apply`   | `zib_shop_ajax_order_after_sale_apply`  | 申请售后           |
+| `order_after_sale_cancel`  | `zib_shop_ajax_order_after_sale_cancel` | 取消售后           |
+| `favorite_product`         | `zib_shop_ajax_favorite_product`        | 收藏商品           |
+| `author_shop_product`      | `zib_shop_ajax_user_shop_product`       | 作者主页商品列表   |
+| `author_contact_modal`     | `zib_shop_ajax_author_contact_modal`    | 联系卖家弹窗       |
+
+这些动作会同时关心商品状态、订单状态、当前用户、订单归属、售后时效和 nonce。不要绕过它们直接写订单 meta。
+
+## 后台发货与售后动作
+
+后台管理动作在 `inc/functions/shop/admin/actions/ajax.php`：
+
+| Action                                  | 回调                                                  | 说明         |
+| --------------------------------------- | ----------------------------------------------------- | ------------ |
+| `admin_shipping_submit`                 | `zib_shop_ajax_admin_shipping_submit`                 | 单个订单发货 |
+| `admin_batch_shipping_submit`           | `zib_shop_ajax_admin_batch_shipping_submit`           | 批量发货     |
+| `admin_after_sale_handle_submit`        | `zib_shop_ajax_admin_after_sale_handle_submit`        | 处理售后     |
+| `admin_after_sale_refund_return_handle` | `zib_shop_ajax_admin_after_sale_refund_return_handle` | 处理退货退款 |
+| `after_sale_express_data`               | `zib_shop_ajax_after_sale_express_data`               | 查询售后物流 |
+
+后台动作要保留管理员权限、nonce、订单状态校验和操作记录。涉及退款、退货、发货时要和 Zibpay 订单状态同步。
+
+## 与 Zibpay 的联动
+
+商城购买最终会进入 Zibpay 订单流程。`inc/functions/shop/inc/pay.php` 挂了这些关键 Hook：
+
+```php
+add_filter('zibpay_is_allow_balance_pay', 'zib_shop_is_allow_balance_pay_filter', 10, 2);
+add_filter('zibpay_is_allow_card_pass_pay', 'zib_shop_is_allow_card_pass_pay_filter', 10, 2);
+add_action('order_created', 'zib_shop_order_created', 10, 1);
+add_action('order_closed', 'zib_shop_order_closed', 10, 1);
+add_action('order_refunded', 'zib_shop_order_closed', 10, 1);
+add_action('payment_order_success', 'zib_shop_order_payment_success', 10, 2);
+```
+
+注意：本地源码这里注册了 `accepted_args=2`，但 Zibpay 核心触发 `payment_order_success` 时实际只传 `do_action('payment_order_success', $order)`。商城回调 `zib_shop_order_payment_success($order)` 也只接收一个订单对象。
+
+边界很清楚：
+
+| 层级       | 负责                                               |
+| ---------- | -------------------------------------------------- |
+| 商城层     | 商品、购物车、收货地址、发货、售后、评价           |
+| Zibpay 层  | 创建订单、支付、关闭、退款、余额、积分、会员、分佣 |
+| 支付渠道层 | 发起支付、回调验签、金额校验、订单状态通知         |
+
+新增商城能力时，不要自己拼支付回调和资产变动。需要发放权益或关闭订单时，应接入 Zibpay 的订单状态流程。
+
+商城提交订单的 Ajax 是 `shop_submit_order`。源码会重新计算购物车、商品价格、优惠、收货地址、支付方式和应付金额，然后调用 `zibpay::add_payment()` 与 `zibpay::add_order()`。所以扩展商城下单时，正确位置是：
+
+| 需求                     | 建议入口                                           |
+| ------------------------ | -------------------------------------------------- |
+| 下单前补充字段           | 下单确认弹窗或提交前的服务端校验                   |
+| 改变商品可购买条件       | 商品状态、库存、权限和购买限制相关 filter          |
+| 支付成功后发放权益       | `payment_order_success`                            |
+| 订单创建后写业务 meta    | `order_created` 或订单创建前的服务端数据组装       |
+| 用户中心展示订单扩展信息 | `user_order_list_card`、`user_order_details_modal` |
+
+不要从前端提交 `pay_price`、`order_price`、`post_author` 后直接落库。前端只能提交用户选择，价格、优惠、订单归属和支付数据必须由服务端重新计算。
+
+购物车地址管理、确认下单优惠徽章、优惠明细弹窗和服务端下单校验见 [商城购物车与确认下单](/docs/api/shop-cart-checkout)。商家主页并不是独立店铺系统，而是复用作者主页商品 Tab；相关入口见 [作者主页与用户中心](/docs/api/author-user-pages)。
+
+## 缓存与统计
+
+商品购买、关闭、退款会清理用户已购商品数量缓存：
+
+```php
+add_action('order_created', 'zib_shop_get_user_bought_product_count_cache_del');
+add_action('order_closed', 'zib_shop_get_user_bought_product_count_cache_del');
+add_action('order_refunded', 'zib_shop_get_user_bought_product_count_cache_del');
+```
+
+商品 Meta 变化会触发：
+
+```php
+add_action('updated_post_meta', 'zib_shop_update_postmeta_add_action', 99, 4);
+add_action('added_post_meta', 'zib_shop_update_postmeta_add_action', 99, 4);
+```
+
+评价状态变化会更新商品评分统计：
+
+```php
+add_action('transition_comment_status', 'zib_shop_update_product_score_counts', 10, 3);
+```
+
+收藏商品后会触发：
+
+```php
+do_action('shop_favorite_product', $id, $user_id);
+```
+
+示例：商品收藏后写入轻量日志：
+
+```php
+add_action('shop_favorite_product', 'zib_docs_shop_favorite_log', 10, 2);
+
+function zib_docs_shop_favorite_log($product_id, $user_id)
+{
+    $product_id = (int) $product_id;
+    $user_id    = (int) $user_id;
+
+    if (!$product_id || !$user_id || get_post_type($product_id) !== 'shop_product') {
+        return;
+    }
+
+    update_user_meta($user_id, '_docs_last_favorite_product', $product_id);
+}
+```
+
+## 风险边界
+
+- 不要从前端提交价格、库存、优惠后直接创建订单。
+- 不要把收货地址、售后申请、评价提交只放前端校验。
+- 不要绕过 `shop_submit_order`、`order_created`、`payment_order_success` 这些状态链路。
+- 商品页、购物车、订单页、售后页不应被全页缓存固定。
+- 发货、售后、退款、确认收货要与订单状态联动，并保留操作记录。
+- 商品投稿、商品编辑、后台商品管理要区分普通用户、作者和管理员权限。

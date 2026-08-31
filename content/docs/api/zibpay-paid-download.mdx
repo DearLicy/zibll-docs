@@ -1,0 +1,530 @@
+---
+title: Zibpay 付费下载与资源权限
+description: 梳理子比主题付费资源字段、购买盒子、收银台、订单校验、下载路由、免费次数限制、下载日志和扩展 Hook。
+---
+
+## 模块边界
+
+付费下载不是普通附件下载。子比主题会把资源信息、付费配置、购买权限、订单状态、VIP 免费、积分购买、游客订单 Cookie、下载次数限制、下载日志和本地文件输出串成一条 Zibpay 链路。
+
+涉及下载资源时，不要直接把真实文件链接输出给未授权用户，也不要只用前端隐藏按钮。正确做法是让用户先经过 `zibpay_is_paid()` 权限判断，再进入 `pay-download` 下载路由。
+
+官网的 [付费下载教程](https://www.zibll.com/46796.html) 把这个功能定位为知识付费资源场景：执行价、会员价、会员专属、免登录购买、订单时效、每日免费次数、多下载地址、网盘识别、超限后单独购买、远程文件转本地、下载限速和下载记录都会一起出现。文档里的本地链路按这些站长配置项反查源码，避免把它写成普通附件下载。
+
+核心源码：
+
+| 文件                                   | 作用                                                               |
+| -------------------------------------- | ------------------------------------------------------------------ |
+| `zibpay/functions.php`                 | 注册 `pay-download` 路由、`payshow` 短代码和下载模板加载           |
+| `zibpay/download.php`                  | 下载请求校验、权限判断、下载次数限制、本地文件输出或远程跳转       |
+| `zibpay/functions/zibpay-download.php` | 下载按钮、资源数组、免费次数、下载速度、下载日志、远程资源转本地   |
+| `zibpay/functions/zibpay-post.php`     | 付费内容盒子、已购买盒子、收银台入口、演示地址、资源属性和销量展示 |
+| `zibpay/functions/zibpay-order.php`    | 付费资源下单、价格重算、优惠码、推广折扣、分佣和订单创建           |
+| `zibpay/functions/zibpay-ajax.php`     | 发起支付、积分支付、支付轮询                                       |
+| `zibpay/functions/ajax.php`            | `pay_cashier_modal` 收银台弹窗                                     |
+| `zibpay/functions/admin/admin.php`     | `posts_zibpay` 付费字段、下载资源字段、下载记录后台入口            |
+
+官网功能与本地落点：
+
+| 官网功能                 | 本地字段或入口                                                | 二开边界                                          |
+| ------------------------ | ------------------------------------------------------------- | ------------------------------------------------- |
+| 执行价、会员价、会员免费 | `pay_price`、`vip_{level}_price`、`vip_{level}_points`        | 下单和权限判断都会服务端重算                      |
+| 会员专属资源             | `pay_limit` 与会员等级判断                                    | 未满足权限时应引导开通会员，不要暴露下载地址      |
+| 免登录购买               | `pay_no_logged_in`、游客订单 Cookie                           | Cookie 只是找回订单的索引，仍需订单已支付         |
+| 订单时效                 | `order_expired_s`、`order_expired_opt`                        | 已支付订单也可能按文章配置过期                    |
+| 免费资源每日次数         | `vip_benefit.pay_download_limit*`、`pay_down_number`          | 下载模板每次重新检查，不只前端提示                |
+| 多下载地址和网盘信息     | `pay_download` group 或旧版多行文本                           | 输出按钮用 `pay-download` 路由，不输出原始 `link` |
+| 超限后单独购买           | `download_limit_over_price`、`price_type=download_limit_over` | 这是重新下单价格，不是绕过次数限制                |
+| 远程转本地和限速         | `down_remote_to_local_*`、`zibpay_get_user_down_speed()`      | 本地输出才会限速，远程跳转无法隐藏对方最终链路    |
+| 下载记录                 | `zibpay_download_before`、`pay_down_log`                      | 审计日志不要公开真实文件 URL                      |
+
+## 资源字段
+
+文章付费配置保存在 post meta：
+
+```php
+posts_zibpay
+```
+
+后台字段由 `CSF::createMetabox('posts_zibpay', ...)` 注册，只作用于 `post`。常见字段：
+
+| 字段                           | 说明                                      |
+| ------------------------------ | ----------------------------------------- |
+| `pay_type`                     | 付费类型，`2` 表示付费下载                |
+| `pay_modo`                     | 支付类型，`0` 表示现金，`points` 表示积分 |
+| `pay_limit`                    | 购买权限，控制是否仅会员可买              |
+| `pay_price`                    | 现金执行价                                |
+| `points_price`                 | 积分执行价                                |
+| `vip_1_price`、`vip_2_price`   | VIP 现金价格，填 `0` 可作为会员免费       |
+| `vip_1_points`、`vip_2_points` | VIP 积分价格，填 `0` 可作为会员免费       |
+| `download_limit_over_price`    | 免费资源每日次数超限后的购买价格          |
+| `pay_download`                 | 资源下载列表                              |
+| `attributes`                   | 资源属性，例如版本、大小、格式            |
+| `demo_link`                    | 演示地址                                  |
+| `pay_title`                    | 商品标题                                  |
+| `pay_doc`                      | 商品简介                                  |
+| `pay_details`                  | 商品详情                                  |
+| `pay_extra_hide`               | 付费后额外展示内容                        |
+
+`pay_download` 是 group 字段。每条资源支持：
+
+| 字段       | 说明                                   |
+| ---------- | -------------------------------------- |
+| `link`     | 下载地址，可上传本地文件或填写远程链接 |
+| `more`     | 按钮旁附加内容，例如提取码、解压密码   |
+| `copy_key` | 点击复制的名称                         |
+| `copy_val` | 点击复制的内容                         |
+| `icon`     | 自定义按钮图标                         |
+| `name`     | 自定义按钮文案                         |
+| `class`    | 自定义按钮颜色                         |
+
+旧版本可能把 `pay_download` 存为多行文本。主题会用 `zibpay_get_post_down_array()` 兼容解析：
+
+```txt
+下载地址|按钮名称|备注|按钮颜色
+```
+
+扩展字段时要继续写入 `posts_zibpay` 这一组配置。不要另建一个资源 meta 后只改前端展示，否则下载模板和订单流程读不到同一份资源。
+
+## 付费类型
+
+文章类付费类型：
+
+| 类型 | 说明              |
+| ---- | ----------------- |
+| `1`  | 付费阅读          |
+| `2`  | 付费资源/付费下载 |
+| `5`  | 付费图片          |
+| `6`  | 付费视频          |
+
+支付类型：
+
+| 类型     | 说明                                          |
+| -------- | --------------------------------------------- |
+| `0`      | 现金商品，走 Zibpay payment/order 和支付渠道  |
+| `points` | 积分商品，走 `points_initiate_pay` 和积分扣减 |
+
+判断是否积分商品：
+
+```php
+$is_points = zibpay_post_is_points_modo($pay_mate, $post_id);
+```
+
+扩展列表筛选、卡片角标或查询条件时，可以读取主题同步保存的：
+
+```php
+zibpay_type
+zibpay_modo
+```
+
+它们来自 `posts_zibpay` 的必要挂载，只适合做查询辅助，真实权限仍然要回到 `posts_zibpay` 和订单状态判断。
+
+## 购买盒子
+
+文章页会在主题设置的付费盒子位置挂载：
+
+```php
+add_action($pay_box_position, 'zibpay_posts_pay_content', 1);
+```
+
+`zibpay_posts_pay_content()` 的流程：
+
+1. 读取当前文章 `posts_zibpay`。
+2. `pay_type` 为空或 `no` 时不输出。
+3. 先用 `zib_get_post_allow_view_data($post)` 判断文章基础阅读权限。
+4. 调用 `zibpay_is_paid($post->ID)` 判断当前用户是否可看。
+5. 已购买或免费时输出 `zibpay_posts_paid_box()`。
+6. 未购买时输出 `zibpay_posts_pay_box()`。
+
+可替换的过滤器：
+
+```php
+apply_filters('zibpay_posts_paid_box', '', $pay_mate, $post_id);
+apply_filters('zibpay_posts_pay_box', '', $pay_mate, $post_id);
+```
+
+如果只是调整展示样式，优先挂这两个 Filter。不要复制整段 `zibpay_posts_pay_content()`，否则容易漏掉文章权限、已购买判断和免费会员判断。
+
+## 权限判断
+
+付费资源最终权限入口：
+
+```php
+$paid = zibpay_is_paid($post_id);
+```
+
+它返回 `false` 或一组已授权数据。常见 `paid_type`：
+
+| `paid_type` | 来源                                 |
+| ----------- | ------------------------------------ |
+| `paid`      | 当前用户或游客 Cookie 找到已支付订单 |
+| `free`      | 商品价格为 `0`                       |
+| `vip1_free` | VIP1 价格为 `0`                      |
+| `vip2_free` | VIP2 价格为 `0`                      |
+| `trial`     | 试用能力                             |
+
+判断顺序：
+
+1. 登录用户按用户 ID 查询已支付订单。
+2. 未登录且允许游客购买时，按 `zibpay_{post_id}` Cookie 查询订单。
+3. 查询到的游客订单必须是 `status = 1`。
+4. 校验游客订单 Cookie 的 token。
+5. 判断现金商品或积分商品是否价格为 `0`。
+6. 判断当前 VIP 等级是否可免费。
+
+游客订单 Cookie 的保留天数来自：
+
+```php
+_pz('pay_cookie_day', 15)
+```
+
+并可通过过滤器调整：
+
+```php
+apply_filters('tourists_pay_cookie_days', _pz('pay_cookie_day', 15), $post_id);
+```
+
+是否允许游客购买可通过：
+
+```php
+apply_filters('tourists_pay_is_allow', (!$user_id && _pz('pay_no_logged_in', true)), $post_id);
+```
+
+游客购买的 Cookie 有两层：
+
+| Cookie                    | 内容                     | 校验方式                                                                             |
+| ------------------------- | ------------------------ | ------------------------------------------------------------------------------------ |
+| `zibpay_{post_id}`        | 该文章最近一次游客订单号 | `zibpay_get_post_paid_data_by_order_num()` 反查 `post_id`、`order_num`、`status = 1` |
+| `zibpay_token_{order_id}` | 订单校验 token           | 由订单 ID、文章 ID、订单号、订单金额、IP 生成 `md5` 后比较                           |
+
+这两个 Cookie 在 `order_created` 后就会写入，方便游客继续支付和支付后找回订单；它们本身不是“已支付凭证”。真正授权仍然要等订单被 `ZibPay::payment_order()` 更新为成功，再由 `zibpay_is_paid()` 查询到 `status = 1`。
+
+下载模板里还提供权限结果过滤器：
+
+```php
+apply_filters('pay_download_paid_data', zibpay_is_paid($post_id), $post_id);
+```
+
+这个过滤器适合补充额外授权来源，例如活动赠送或企业授权。返回值必须保持主题能识别的 `paid_type` 结构，不要直接跳过后续下载校验。
+
+## 下单流程
+
+未购买时，购买按钮由：
+
+```php
+zibpay_get_post_cashier_link($post_id);
+```
+
+生成 `RefreshModal` 链接，打开：
+
+```php
+action = pay_cashier_modal
+```
+
+弹窗服务端入口：
+
+```php
+add_action('wp_ajax_pay_cashier_modal', 'zibpay_ajax_pay_cashier_modal');
+add_action('wp_ajax_nopriv_pay_cashier_modal', 'zibpay_ajax_pay_cashier_modal');
+```
+
+弹窗会校验：
+
+1. 文章是否存在。
+2. `posts_zibpay.pay_type` 是否有效。
+3. 积分商品必须登录。
+4. 会员专享资源必须满足 `pay_limit`。
+5. 最后按支付类型输出现金或积分收银台。
+
+现金商品下单时，`zibpay_ajax_submit_order()` 会处理 `order_type = 2`：
+
+```php
+$pay_mate = get_post_meta($post_id, 'posts_zibpay', true);
+$__data['order_type']  = $pay_mate['pay_type'];
+$__data['order_price'] = round((float) $pay_mate['pay_price'], 2);
+```
+
+它会重新读取服务端价格、VIP 价格、推广折扣、优惠码、分佣和创作分成。前端传来的价格不可信。
+
+游客购买时序：
+
+```txt
+nopriv submit_order
+-> 创建 payment/order(status=0)
+-> order_created 写入 zibpay_{post_id}、zibpay_token_{order_id}、zibpay_wait_pay_ids
+-> initiate_pay / check_pay / 支付回调
+-> ZibPay::payment_order()
+-> 业务订单 status=1
+-> zibpay_is_paid() 通过 Cookie 反查已支付订单
+-> pay-download 模板二次校验 nonce、权限、次数、资源 ID
+```
+
+因此不要在下载请求里“顺便补单成功”，也不要因为浏览器里有 `zibpay_{post_id}` 就直接输出资源。订单成功、Cookie 校验、文章时效、免费次数和资源索引必须全部通过。
+
+免费资源每日次数超限后，如果 `download_limit_over_price` 大于 `0`，主题会用：
+
+```php
+zibpay_get_post_cashier_link($post_id, 'but jb-red mt20', __('立即购买', 'zib_language'), array(
+    'price_type' => 'download_limit_over',
+));
+```
+
+下单时再把价格切换到：
+
+```php
+$pay_mate['download_limit_over_price']
+```
+
+## 下载路由
+
+下载链接由：
+
+```php
+$url = zib_pay_get_download_url($post_id);
+```
+
+生成。开启固定链接时格式类似：
+
+```txt
+/pay-download/{post_id}?key={nonce}&down_id={index}
+```
+
+不开启固定链接时格式类似：
+
+```txt
+/?pay_download={post_id}&key={nonce}&down_id={index}
+```
+
+相关注册：
+
+| 入口                               | 作用                                              |
+| ---------------------------------- | ------------------------------------------------- |
+| `zib_pay_download_rewrite_rules()` | 添加 `pay-download/([0-9]+)` rewrite              |
+| `zib_pay_download_query_vars()`    | 注册 `pay_download` query var                     |
+| `zib_pay_download_load_template()` | 在 `template_redirect` 加载 `zibpay/download.php` |
+
+下载模板会校验：
+
+1. 必须有 `post_id` 和 `down_id`。
+2. 如果开启 `_pz('pay_type_option', true, 'down_verify_nonce')`，必须通过 `wp_verify_nonce($_GET['key'], 'pay_down')`。
+3. 必须通过 `zibpay_is_paid()` 或 `pay_download_paid_data`。
+4. 免费资源在 `pay_free_logged_show` 开启时必须登录。
+5. 免费资源必须未超过每日下载次数。
+6. `down_id` 必须存在于 `zibpay_get_post_down_array($post_id)`。
+
+所以自定义下载按钮时，只能生成主题下载 URL，不要把 `pay_download.link` 直接放到公开页面。
+
+## 下载输出
+
+下载模板拿到资源链接后会判断是否为本站本地文件：
+
+```php
+$home_url = home_url('/');
+if (stripos($file_url, $home_url) === 0) {
+    $file_url_local = ABSPATH . rtrim(str_replace($home_url, '', $file_url));
+}
+```
+
+本地文件存在时，走：
+
+```php
+zib_download_local_file($file_local, $file_local_filename, $download_rate);
+```
+
+下载速度来自：
+
+```php
+zibpay_get_user_down_speed($user_id);
+```
+
+它会按普通用户或 VIP 等级读取：
+
+```php
+_pz('vip_benefit', 0, 'pay_download_speed')
+_pz('vip_benefit', 0, 'pay_download_speed_vip_1')
+_pz('vip_benefit', 0, 'pay_download_speed_vip_2')
+```
+
+远程文件默认直接跳转。如果开启“远程文件转本地下载”，`zibpay_download_remote_to_local()` 会挂到：
+
+```php
+add_filter('zibpay_download_file_local', 'zibpay_download_remote_to_local', 10, 2);
+```
+
+它会按配置检查：
+
+| 配置                        | 说明                   |
+| --------------------------- | ---------------------- |
+| `down_remote_to_local_s`    | 是否开启远程转本地     |
+| `down_remote_to_local_size` | 允许转存的最大文件大小 |
+| `down_remote_to_local_ext`  | 允许转存的文件后缀     |
+
+符合条件时，远程文件会下载到 `ZIB_TEMP_DIR`，文件名包含 `_paydown_`，再按本地文件输出。临时目录由主题上传体系定期清理。
+
+## 免费次数和日志
+
+免费资源每日下载次数：
+
+| 函数                                       | 作用                                    |
+| ------------------------------------------ | --------------------------------------- |
+| `zibpay_get_user_free_downloaded_number()` | 读取用户当天已下载免费资源数量          |
+| `zibpay_get_user_free_down_limit()`        | 读取普通用户或 VIP 每日免费资源下载上限 |
+| `zibpay_is_user_free_down_limit()`         | 判断是否超限                            |
+| `zibpay_updata_pay_down_mate()`            | 下载前记录次数和日志                    |
+
+下载前 Hook：
+
+```php
+do_action('zibpay_download_before', $post_id, $down_id, $paid, $file_url, $file_local);
+```
+
+主题默认监听：
+
+```php
+add_action('zibpay_download_before', 'zibpay_updata_pay_down_mate', 10, 3);
+```
+
+记录内容：
+
+| 位置      | meta key          | 说明                       |
+| --------- | ----------------- | -------------------------- |
+| user meta | `pay_down_number` | 按日期记录免费资源下载次数 |
+| user meta | `pay_down_log`    | 用户下载日志               |
+| post meta | `pay_down_log`    | 文章资源下载日志           |
+
+日志保留条数来自：
+
+```php
+_pz('pay_type_option', 0, 'down_user_log')
+_pz('pay_type_option', 0, 'down_post_log')
+```
+
+后台下载记录入口使用：
+
+```php
+zibpay_get_paydown_log_admin_link($type, $id);
+```
+
+## 示例：生成安全下载按钮
+
+```php
+function zib_docs_get_paid_download_button($post_id, $down_id = 0)
+{
+    $post_id = (int) $post_id;
+    $down_id = (int) $down_id;
+
+    if (!$post_id || !function_exists('zib_pay_get_download_url')) {
+        return '';
+    }
+
+    $paid = function_exists('zibpay_is_paid') ? zibpay_is_paid($post_id) : false;
+    if (!$paid) {
+        return '';
+    }
+
+    $down = function_exists('zibpay_get_post_down_array') ? zibpay_get_post_down_array($post_id) : array();
+    if (empty($down[$down_id]['link'])) {
+        return '';
+    }
+
+    $url = add_query_arg(array(
+        'down_id' => $down_id,
+    ), zib_pay_get_download_url($post_id));
+
+    return '<a target="_blank" href="' . esc_url($url) . '" class="but jb-blue"><i class="fa fa-download mr6" aria-hidden="true"></i>' . esc_html__('资源下载', 'zib_language') . '</a>';
+}
+```
+
+这个示例仍然只输出 `pay-download` 路由，不输出真实资源链接。真正下载时，主题模板还会再次校验 nonce、权限、次数和资源 ID。
+
+## 示例：监听下载并写审计
+
+```php
+add_action('zibpay_download_before', 'zib_docs_log_paid_download', 20, 5);
+
+function zib_docs_log_paid_download($post_id, $down_id, $paid, $file_url, $file_local)
+{
+    $user_id = get_current_user_id();
+    if (!$post_id || empty($paid['paid_type'])) {
+        return;
+    }
+
+    $log = array(
+        'user_id'   => $user_id,
+        'post_id'   => (int) $post_id,
+        'down_id'   => (int) $down_id,
+        'paid_type' => $paid['paid_type'],
+        'order_num' => !empty($paid['order_num']) ? $paid['order_num'] : '',
+        'time'      => current_time('mysql'),
+    );
+
+    update_post_meta((int) $post_id, 'docs_last_download_audit', $log);
+}
+```
+
+不要在这个 Hook 里把 `$file_url` 原样发到公开通知、日志页面或前端接口。远程链接可能包含临时签名、本地路径映射或网盘提取信息。
+
+## 示例：补充企业授权
+
+```php
+add_filter('pay_download_paid_data', 'zib_docs_company_download_paid_data', 20, 2);
+
+function zib_docs_company_download_paid_data($paid, $post_id)
+{
+    if ($paid) {
+        return $paid;
+    }
+
+    $user_id = get_current_user_id();
+    if (!$user_id) {
+        return $paid;
+    }
+
+    $company_posts = zib_get_user_meta($user_id, 'company_paid_posts', true);
+    if (!is_array($company_posts) || !in_array((int) $post_id, $company_posts, true)) {
+        return $paid;
+    }
+
+    return array(
+        'paid_type' => 'paid',
+        'order_num' => 'company_' . $user_id . '_' . (int) $post_id,
+    );
+}
+```
+
+这类扩展只补充“授权结果”，仍然保留下载模板里的 `down_id`、nonce、次数限制和日志记录。
+
+## 示例：调整游客订单 Cookie 天数
+
+```php
+add_filter('tourists_pay_cookie_days', 'zib_docs_tourists_pay_cookie_days', 10, 2);
+
+function zib_docs_tourists_pay_cookie_days($days, $post_id)
+{
+    $pay_mate = get_post_meta($post_id, 'posts_zibpay', true);
+    if (!empty($pay_mate['pay_type']) && (int) $pay_mate['pay_type'] === 2) {
+        return 7;
+    }
+
+    return $days;
+}
+```
+
+游客订单依赖浏览器 Cookie，不适合承载长期授权、跨设备授权或企业授权。需要长期权限时，应要求登录购买或把授权写入用户体系。
+
+## 风险清单
+
+| 不要这样做                                     | 推荐做法                                                          |
+| ---------------------------------------------- | ----------------------------------------------------------------- |
+| 未授权时直接输出 `pay_download.link`           | 输出 `zib_pay_get_download_url()` 生成的下载路由                  |
+| 只靠前端隐藏下载按钮                           | 下载模板里用 `zibpay_is_paid()` 重算权限                          |
+| 把 `zibpay_{post_id}` 当作已支付凭证           | 反查 `status = 1` 订单，并校验 `zibpay_token_{order_id}`          |
+| 自己拼价格提交支付                             | 让 `zibpay_ajax_submit_order()` 从 `posts_zibpay` 读取价格        |
+| 给免费资源绕过登录和次数限制                   | 保留 `pay_free_logged_show` 与 `zibpay_is_user_free_down_limit()` |
+| 把本地文件路径、临时文件路径返回前端           | 让 `zib_download_local_file()` 输出文件                           |
+| 在日志里公开远程下载原始 URL                   | 只记录必要的用户、文章、资源 ID 和订单号                          |
+| 自建下载路由绕过 `zibpay_download_before`      | 复用主题下载路由和 Hook                                           |
+| 用 `download_file` 附件 Ajax 发付费资源        | 付费资源走 Zibpay 下载权限链路                                    |
+| 在 `pay_download_paid_data` 里无条件返回已购买 | 至少绑定用户、文章、订单或外部授权记录，并保留下载模板后续校验    |
+
+付费下载的关键不是“按钮能点”，而是每次下载都能在服务端重新证明：用户是谁、资源是哪一条、权限从哪里来、是否超限、是否要记录日志，以及最终输出的是本地文件还是远程跳转。

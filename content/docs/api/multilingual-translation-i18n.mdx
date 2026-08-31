@@ -1,0 +1,468 @@
+---
+title: 多语言智能翻译与 JS 国际化
+description: 梳理子比主题前后台语言分离、前台智能翻译、翻译按钮、术语配置、动态内容监听和 JS 文案国际化扩展边界。
+---
+
+## 模块边界
+
+子比主题的多语言能力分成三层，开发时不要混在一起：
+
+| 层级             | 负责内容                                            | 典型入口                                                |
+| ---------------- | --------------------------------------------------- | ------------------------------------------------------- |
+| WordPress 语言包 | PHP 文案、后台设置、主题模板里的 `__()` 文案        | `.mo` 语言包、`switch_to_locale()`                      |
+| JS 文案国际化    | 前台、后台、TinyMCE、小工具、古腾堡脚本里的提示文案 | `inc/functions/zib-js-i18n.php`                         |
+| 前台网页机器翻译 | 用户切换语言后翻译页面正文、菜单、模块和动态内容    | `translate.js`、`translate_init()`、`.translate-button` |
+
+“前后台不同语言”依赖 WordPress/主题语言包；“多语言智能翻译”依赖主题内置的 `translate.js` 接入；`window._win.i18n` 只是给主题脚本读文案。三者可以一起使用，但不能互相替代。
+
+## 核心文件
+
+| 文件                             | 作用                                                                 |
+| -------------------------------- | -------------------------------------------------------------------- |
+| `inc/options/admin-options.php`  | 注册“多语言翻译”后台设置、语言按钮、术语、忽略词、服务通道和翻译范围 |
+| `inc/options/options-module.php` | 后台设置提示和官网教程入口                                           |
+| `inc/functions/zib-js-i18n.php`  | 前台、后台、TinyMCE、小工具、古腾堡 JS 文案集中定义和过滤器          |
+| `inc/functions/zib-footer.php`   | 输出 `window._win.i18n` 与 `window._win.translate_config`            |
+| `inc/functions/zib-header.php`   | 输出顶部和移动端语言切换按钮                                         |
+| `inc/functions/zib-theme.php`    | 注册前台脚本，输出 TinyMCE 全局配置                                  |
+| `js/loader.js`                   | 注册 `translate` 模块路径                                            |
+| `js/main.js`                     | `translate_init()` 初始化机器翻译，绑定 `.translate-button` 切换事件 |
+| `js/libs/translate.js`           | 主题内置的网页自动翻译库                                             |
+
+## 后台配置字段
+
+多语言设置位于主题后台基础设置下的“多语言翻译”。核心字段如下：
+
+| 配置项                                     | 含义                                                                 |
+| ------------------------------------------ | -------------------------------------------------------------------- |
+| `locale_split_s`                           | 是否启用前后台不同语言                                               |
+| `locale_frontend`                          | 前台语言，依赖主题语言包                                             |
+| `locale_admin`                             | 后台语言，依赖主题语言包                                             |
+| `translate_s`                              | 是否启用前台智能翻译和多语言切换                                     |
+| `translate_buttons`                        | 前台可切换语言列表，每项包含 `text`、`icon`、`language`              |
+| `translate_config.auto_discriminate_local` | 用户首次访问时按 IP 或浏览器环境尝试自动切换语言                     |
+| `translate_config.local`                   | 当前站点前台原始语言                                                 |
+| `translate_config.nomenclature`            | 自定义翻译术语                                                       |
+| `translate_config.ignore_text`             | 忽略翻译的固定词汇                                                   |
+| `translate_config.service_use`             | 翻译服务通道，源码支持 `client.edge`、`translate.service`、`giteeAI` |
+| `translate_config.range`                   | 限定哪些原始语种会被翻译                                             |
+| `translate_config.loading`                 | 翻译请求时是否显示过渡提示                                           |
+| `translate_config.service_url`             | 自定义翻译服务接口域名，支持多个域名                                 |
+
+这些配置只影响主题已经接入的翻译流程。新增页面、弹窗、Ajax 内容或自定义模块时，还要确认它们的 DOM 是否适合被机器翻译，以及是否需要加忽略规则。
+
+## 前后台不同语言
+
+`locale_split_s` 开启后，主题允许前台和后台使用不同语言。后台语言和前台语言都来自 WordPress 可用语言列表：
+
+```php
+array(
+    'id'      => 'locale_split_s',
+    'type'    => 'switcher',
+    'default' => false,
+)
+```
+
+后台字段说明里已经提示：所选语言依赖主题语言包。也就是说，前后台不同语言不是机器翻译，它只会切换 WordPress 和主题可翻译文案。没有对应语言包时，新增语言不会自动翻译 PHP 模板文案。
+
+前后台语言分离还会影响少量后台 JS 文案。主题在 `zib_get_admin_js_i18n_strings_to_frontend()` 中临时切换到前台语言，再把部分文案写回后台 JS 文案数组：
+
+```php
+function zib_get_admin_js_i18n_strings_to_frontend($strings)
+{
+    if (!_pz('locale_split_s') || !function_exists('switch_to_locale')) {
+        return $strings;
+    }
+
+    $frontend_locale = _pz('locale_frontend', 'en_US');
+    if (!$frontend_locale) {
+        return $strings;
+    }
+
+    switch_to_locale($frontend_locale);
+    $strings['csf_extract_code_label'] = __('提取码：', 'zib_language');
+    $strings['csf_extract_code']       = __('提取码', 'zib_language');
+    restore_current_locale();
+
+    return $strings;
+}
+add_filter('zib_admin_js_i18n_strings', 'zib_get_admin_js_i18n_strings_to_frontend', 99);
+```
+
+扩展后台脚本文案时，如果你的文案会显示给前台用户，也要考虑前后台语言分离后的语言来源。
+
+## JS 文案国际化
+
+前台 JS 文案集中在 `zib_get_js_i18n_strings()`，最终注入到 `window._win.i18n`：
+
+```php
+function zib_get_js_i18n_strings()
+{
+    $strings = array(
+        'load_more'      => __('加载更多', 'zib_language'),
+        'loading'        => __('加载中...', 'zib_language'),
+        'network_error_retry' => __('网络错误，请稍后重试', 'zib_language'),
+    );
+
+    return apply_filters('zib_js_i18n_strings', $strings);
+}
+```
+
+后台 JS 文案集中在 `zib_get_admin_js_i18n_strings()`，最终走 `zib_admin_js_i18n_strings` 过滤器。除此之外，主题还为不同编辑器场景提供独立文案函数：
+
+| 函数                               | 主要使用场景              |
+| ---------------------------------- | ------------------------- |
+| `zib_get_js_i18n_strings()`        | 前台 `main.js` 和通用交互 |
+| `zib_get_admin_js_i18n_strings()`  | 主题后台、CSF、管理页脚本 |
+| `zib_get_mce_i18n_strings()`       | TinyMCE 编辑器配置        |
+| `zib_get_widget_js_i18n_strings()` | CSF 小工具脚本            |
+| `zib_get_gutenberg_i18n_strings()` | 古腾堡区块扩展            |
+
+新增前端脚本文案时，优先追加到过滤器，不要在多个 JS 文件里写死同一段中文：
+
+```php
+function zib_docs_extend_frontend_i18n($strings)
+{
+    $strings['docs_save_success'] = __('保存成功', 'zib_language');
+    $strings['docs_save_failed']  = __('保存失败，请稍后重试', 'zib_language');
+
+    return $strings;
+}
+add_filter('zib_js_i18n_strings', 'zib_docs_extend_frontend_i18n');
+```
+
+前台脚本读取时使用主题已有的 i18n 辅助函数或从 `_win.i18n` 取值：
+
+```js
+var text = zib__('docs_save_success');
+```
+
+如果当前脚本运行时机早于 `window._win` 输出，需要调整加载位置或做存在性判断，而不是复制一份文案常量。
+
+## 配置下发
+
+`zib_win_var()` 在 `wp_footer` 输出全局变量。这里会先预置空的 `translate_config`，同时下发前台 JS 文案：
+
+```php
+window._win = {
+    ajax_url: '<?php echo esc_url(set_url_scheme(admin_url('admin-ajax.php'))); ?>',
+    translate_config: '',
+    i18n: <?php echo wp_json_encode(zib_get_js_i18n_strings(), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>,
+}
+```
+
+随后 `zib_translate_config_footer()` 再根据后台开关输出翻译配置：
+
+```php
+function zib_translate_config_footer()
+{
+    $translate_options = array();
+    if (_pz('translate_s', false)) {
+        $translate_options      = _pz('translate_config', array());
+        $translate_options['s'] = true;
+
+        if (!empty($translate_options['service_url'])) {
+            $translate_options['service_url'] = preg_split("/,|，|\s|\n/", $translate_options['service_url']);
+        }
+
+        if (!empty($translate_options['ignore_text'])) {
+            $translate_options['ignore_text'] = preg_split("/,|，|\s|\n/", $translate_options['ignore_text']);
+        }
+    }
+
+    echo '<script type="text/javascript">window._win.translate_config = ' . json_encode($translate_options) . ';</script>';
+}
+add_action('wp_footer', 'zib_translate_config_footer');
+```
+
+注意 `service_url` 和 `ignore_text` 会按中文逗号、英文逗号、空格、换行拆成数组。开发自定义配置时要保持这个格式，否则前端 `translate.request.setHost()` 和 `translate.ignore.text` 可能拿到错误类型。
+
+## 翻译按钮
+
+顶部和移动端按钮由 `zib_get_translate_language_btn()` 输出。它读取：
+
+```php
+_pz('translate_s');
+_pz('translate_buttons', array());
+```
+
+每个语言项会渲染为：
+
+```html
+<a
+  href="javascript:;"
+  class="translate-button translate-ignore ac flex"
+  data-language="english"
+  >English</a
+>
+```
+
+这三个点不能丢：
+
+| 结构               | 作用                                                 |
+| ------------------ | ---------------------------------------------------- |
+| `translate-button` | 前端点击事件选择器                                   |
+| `translate-ignore` | 避免按钮文字自身被翻译后影响识别                     |
+| `data-language`    | 传给 `translate.changeLanguage(language)` 的目标语言 |
+
+自定义语言入口时可以改外层样式，但要保留按钮协议：
+
+```php
+function zib_docs_translate_button($language, $text)
+{
+    return '<a href="javascript:;" class="translate-button translate-ignore" data-language="' . esc_attr($language) . '">' . esc_html($text) . '</a>';
+}
+```
+
+如果按钮放在 Ajax 弹窗、用户中心抽屉或移动菜单里，也不需要重新绑定事件。主题使用事件委托监听 `_win.bd` 下的 `.translate-button`，动态插入的按钮也能响应。
+
+## 前端初始化流程
+
+`js/loader.js` 注册了翻译库路径：
+
+```js
+'translate': 'libs/translate.min',
+```
+
+`js/main.js` 的 `translate_init()` 会在主题主流程中执行。开启 `translate_s` 后，它通过 `tbquire(['translate'])` 懒加载翻译库：
+
+```js
+function translate_init() {
+  var translate_config = _win.translate_config;
+  if (translate_config.s) {
+    tbquire(['translate'], function () {
+      translate.selectLanguageTag.show = false;
+      translate.language.setLocal(
+        translate_config.local || 'chinese_simplified',
+      );
+      translate.service.use(translate_config.service_use || 'client.edge');
+      translate.listener.start();
+      translate.execute();
+    });
+  }
+}
+```
+
+完整流程包含：
+
+| 步骤             | 主题行为                                                                     |
+| ---------------- | ---------------------------------------------------------------------------- | --- | ---------------------- |
+| 隐藏默认选择器   | `translate.selectLanguageTag.show = false`，使用主题自己的下拉按钮           |
+| 设置本地语言     | `translate.language.setLocal(translate_config.local                          |     | 'chinese_simplified')` |
+| 设置服务域名     | `translate.request.setHost(translate_config.service_url)`                    |
+| 设置忽略词       | `translate.ignore.text = translate_config.ignore_text`                       |
+| 添加自定义术语   | 循环 `translate_config.nomenclature`，调用 `translate.nomenclature.append()` |
+| 自动识别用户语言 | `translate.setAutoDiscriminateLocalLanguage()`                               |
+| 限定翻译语种     | `translate.language.translateLanguagesRange = translate_config.range`        |
+| 显示翻译过渡     | `translate.progress.api.startUITip()`                                        |
+| 标记切换状态     | 通过生命周期回调给当前语言按钮加 `active`                                    |
+| 保护菜单宽度     | PC 顶部菜单在翻译前写入最大宽度，减少翻译后挤压                              |
+| 忽略指定节点     | 默认忽略 `.translate-ignore` 和 `svg`                                        |
+| 启动动态监听     | `translate.listener.start()` 监听后续 DOM 变化                               |
+| 执行翻译         | `translate.execute()`                                                        |
+
+语言切换事件非常短：
+
+```js
+_win.bd.on('click', '.translate-button', function () {
+  var language = $(this).attr('data-language');
+  translate && translate.changeLanguage(language);
+});
+```
+
+所以扩展时要把精力放在配置、DOM 边界和忽略规则上，不要重复造一套切换逻辑。
+
+## 自定义术语
+
+后台 `translate_config.nomenclature` 每项包含 `from`、`to`、`value`。主题会逐项追加：
+
+```js
+if (value && to) {
+  translate.nomenclature.append(from, to, value);
+}
+```
+
+术语内容通常按行写：
+
+```txt
+子比=zibll
+积分=points
+余额=balance
+```
+
+适合写进术语的内容：
+
+| 适合                               | 不适合                  |
+| ---------------------------------- | ----------------------- |
+| 品牌名、产品名、固定模块名         | 大段文章正文            |
+| 用户等级、积分、余额等固定业务词   | 经常变化的用户输入      |
+| 支付、订单、下载等需要一致表达的词 | 密码、验证码、密钥、URL |
+
+术语是前台翻译层的修正，不会改变数据库里的原始内容，也不会改变 WordPress 语言包。
+
+## 忽略翻译
+
+主题默认忽略：
+
+```js
+translate.ignore.class.push('translate-ignore');
+translate.ignore.tag.push('svg');
+```
+
+这些区域建议加 `translate-ignore`：
+
+| 场景                             | 原因                                 |
+| -------------------------------- | ------------------------------------ |
+| 验证码、邀请码、提取码           | 翻译后会导致用户无法复制或校验       |
+| 订单号、支付金额、余额、积分数值 | 翻译后可能影响金额或单位识别         |
+| 代码块、短代码、命令行           | 翻译会破坏可复制内容                 |
+| URL、回调地址、API Key           | 翻译没有意义且有安全风险             |
+| SVG 图标和图标字体               | 主题已默认忽略 SVG，图标文字也应谨慎 |
+| 支付弹窗和下载凭证               | 动态内容需要保持原样                 |
+
+HTML 示例：
+
+```html
+<code class="translate-ignore"
+  >[hidecontent type="logged"]...[/hidecontent]</code
+>
+```
+
+PHP 输出示例：
+
+```php
+function zib_docs_order_number($order_num)
+{
+    return '<span class="translate-ignore">' . esc_html($order_num) . '</span>';
+}
+```
+
+如果是自定义 JS 组件，也可以在组件初始化后追加忽略 class：
+
+```js
+if (window.translate) {
+  translate.ignore.class.push('docs-code');
+}
+```
+
+## 动态内容与 Ajax
+
+主题启用了：
+
+```js
+translate.listener.start();
+```
+
+这意味着 Ajax 新增的评论、弹窗、列表、私信、支付框等 DOM 变化有机会被自动翻译。但这不是“所有动态内容都无成本自动正确”的意思。
+
+开发动态模块时要注意：
+
+| 场景                  | 建议                                                   |
+| --------------------- | ------------------------------------------------------ |
+| Ajax 列表分页         | 避免每次加载都插入大量未分组文本，必要时减少可翻译范围 |
+| 弹窗和抽屉            | 弹窗打开时检查关键按钮和金额是否被误翻译               |
+| 私信和评论            | 用户输入内容可能包含代码、链接、昵称，必要时局部忽略   |
+| 支付和下载            | 订单号、金额、支付方式、凭证必须忽略                   |
+| Vue 或 React 局部渲染 | 避免框架反复还原文本后触发重复翻译                     |
+| 缓存页面              | 不要把某个用户的已翻译 DOM 缓存成公共 HTML             |
+
+如果某个模块翻译后 UI 撑开，优先调整容器宽度、换行和忽略规则；不要为了某个局部问题直接关闭全站翻译。
+
+## 搜索、审核与用户输入边界
+
+机器翻译运行在前台 DOM 层，不会改变数据库内容，也不会替代内容审核。下面这些入口经常同时出现 Ajax、用户输入和动态翻译，需要单独验收：
+
+| 场景                    | 翻译层会看到什么                          | 建议                                                                                  |
+| ----------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------- |
+| 搜索页 Ajax 结果        | Tab、筛选、文章标题、摘要、热门词和历史词 | 搜索词本身通常保持原文；关键词按钮和筛选项翻译后要检查 URL 参数是否仍正确             |
+| 评论和私信              | 用户输入内容、昵称、链接、代码片段        | 不要把用户私密内容强行送第三方翻译服务；必要时对消息正文加局部忽略                    |
+| 投稿和论坛帖子          | 标题、正文、分类名、待审核提示            | 翻译只影响展示，发布状态仍由审核和权限决定                                            |
+| 支付、订单、下载        | 金额、订单号、卡密、提取码、下载 URL      | 必须加 `translate-ignore`，避免复制、支付或校验失败                                   |
+| 后台前台混合弹窗        | 后台 JS 文案、前台用户可见文案            | 前后台语言分离时，确认文案来自 `zib_js_i18n_strings` 还是 `zib_admin_js_i18n_strings` |
+| 自定义 Vue / React 组件 | 组件反复重绘后的 DOM 文本                 | 避免框架重绘和 `MutationObserver` 互相触发造成重复翻译或闪烁                          |
+
+内容审核应在保存前处理原始文本，不能审核翻译后的 DOM。比如投稿、评论、私信和论坛帖子保存时走 `ZibAudit`；用户切换语言后看到的译文，只是浏览器端展示结果，不应再写回正文、评论或私信数据库。
+
+## 自定义前台脚本接入
+
+新增脚本要同时处理“脚本文案”和“页面翻译”两件事。
+
+服务端注入文案：
+
+```php
+function zib_docs_enqueue_profile_script()
+{
+    wp_enqueue_script(
+        'zib_docs_profile',
+        get_stylesheet_directory_uri() . '/assets/profile.js',
+        array('jquery'),
+        '1.0.0',
+        true
+    );
+
+    wp_localize_script('zib_docs_profile', 'zib_docs_profile', array(
+        'i18n' => array(
+            'uploading' => __('正在上传...', 'zib_language'),
+            'saved'     => __('保存成功', 'zib_language'),
+        ),
+    ));
+}
+add_action('wp_enqueue_scripts', 'zib_docs_enqueue_profile_script');
+```
+
+如果这段脚本是主题全局能力的一部分，也可以走 `zib_js_i18n_strings`，让文案统一进入 `_win.i18n`：
+
+```php
+function zib_docs_profile_i18n($strings)
+{
+    $strings['docs_profile_uploading'] = __('正在上传...', 'zib_language');
+    $strings['docs_profile_saved']     = __('保存成功', 'zib_language');
+
+    return $strings;
+}
+add_filter('zib_js_i18n_strings', 'zib_docs_profile_i18n');
+```
+
+前端使用：
+
+```js
+$('.docs-profile-save').on('click', function () {
+  var text = zib__('docs_profile_uploading');
+  $(this).text(text);
+});
+```
+
+如果组件内部有不该机器翻译的值，例如文件名、订单号、验证码，输出时同步加 `translate-ignore`。
+
+## 常见风险
+
+| 风险                   | 说明                                                     |
+| ---------------------- | -------------------------------------------------------- |
+| 把语言包当机器翻译     | `.mo` 语言包只翻译主题和插件文案，不翻译用户内容         |
+| 把机器翻译当语言包     | `translate.js` 不会让 PHP、后台字段、邮件模板天然多语言  |
+| 翻译验证码和订单号     | 会破坏校验、支付、下载和售后流程                         |
+| 语言按钮太多           | 下拉菜单变长，移动端可用性下降，首次翻译成本增加         |
+| 忽略词写成大段文本     | 会降低匹配效果，也不利于维护                             |
+| 术语滥用               | 术语适合固定词，不适合替代人工翻译全文                   |
+| Ajax 内容重复翻译      | 动态渲染频繁时可能造成性能抖动或文本来回变化             |
+| 翻译后 UI 撑开         | 不同语言长度差异大，按钮、菜单、卡片要允许换行或限制宽度 |
+| 自定义服务不可用       | `service_url` 填错会导致切换语言失败                     |
+| 敏感文本进入第三方服务 | 私密消息、订单备注、密钥、内部链接要谨慎翻译或忽略       |
+
+## 调试入口
+
+| 现象              | 优先检查                                                                 |
+| ----------------- | ------------------------------------------------------------------------ |
+| 语言按钮不显示    | `translate_s`、`translate_buttons`、顶部按钮位置、移动端菜单             |
+| 点击按钮无反应    | `.translate-button`、`data-language`、浏览器是否加载 `translate.min.js`  |
+| 页面没有翻译      | `window._win.translate_config.s`、`translate_config.local`、翻译服务通道 |
+| 自定义术语无效    | `nomenclature` 的 `from`、`to`、`value` 格式                             |
+| 忽略词无效        | `ignore_text` 是否被拆分成数组，DOM 是否包含 `translate-ignore`          |
+| Ajax 内容未翻译   | `translate.listener.start()` 是否运行，内容是否在可翻译范围              |
+| 菜单翻译后错位    | 顶部菜单宽度、语言数量、长词换行、是否需要局部忽略                       |
+| 后台语言不变      | `locale_split_s`、`locale_admin`、语言包是否存在                         |
+| 前台 PHP 文案不变 | `locale_frontend`、主题语言包、文案是否走 `__()`                         |
+
+## 参考源码
+
+本页根据 `inc/options/admin-options.php`、`inc/options/options-module.php`、`inc/functions/zib-js-i18n.php`、`inc/functions/zib-footer.php`、`inc/functions/zib-header.php`、`inc/functions/zib-theme.php`、`js/loader.js`、`js/main.js`、`js/libs/translate.js`，以及子比主题官网公开的多语言智能翻译教程蒸馏整理。

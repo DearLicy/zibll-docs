@@ -1,0 +1,145 @@
+---
+title: AI Client 调用
+description: 使用 wp_ai_client_prompt() 调用模型、设置参数、处理错误和结构化输出。
+---
+
+## 调用前检查
+
+运行站点里的真实入口是 `wp-includes/ai-client.php`。这份文档已经把相关底层行为整理出来，用户二开时通常不需要提供 `wp-includes` 源码。开发时要检查运行环境是否真的有 AI Client，而不是假设所有站点都支持。
+
+```php
+if ( ! function_exists( 'wp_ai_client_prompt' ) || ! wp_supports_ai() ) {
+    return new WP_Error(
+        'ai_client_unavailable',
+        __( 'AI Client is not available on this site.', 'zibll-ai-ext-demo' )
+    );
+}
+```
+
+如果运行环境里找不到 `wp_ai_client_prompt()`，优先确认 WordPress 版本、AI Client 是否加载、Provider 是否启用。给 AI 助手提供源码时，不需要为了这个函数额外上传完整 `wp-includes`。
+
+## 最小调用
+
+```php
+$result = wp_ai_client_prompt( '请用一句话解释这篇文章的核心内容。' )
+    ->using_temperature( 0.4 )
+    ->generate_text();
+
+if ( is_wp_error( $result ) ) {
+    return $result;
+}
+
+echo esc_html( $result );
+```
+
+`generate_text()` 返回字符串或 `WP_Error`。不要直接把模型结果写入数据库，要先清洗、裁剪、校验。
+
+## 常用链式方法
+
+| 方法                                | 作用                                     |
+| ----------------------------------- | ---------------------------------------- |
+| `using_system_instruction( $text )` | 设置系统指令                             |
+| `using_temperature( 0.4 )`          | 控制发散程度                             |
+| `using_max_tokens( 500 )`           | 限制输出长度                             |
+| `using_provider( 'openai' )`        | 指定 provider                            |
+| `using_model( '...' )`              | 指定模型                                 |
+| `using_output_schema( $schema )`    | 要求结构化输出                           |
+| `with_history( ...$messages )`      | 带历史消息                               |
+| `with_file( $file, $mime_type )`    | 追加文件、图片、URL、data URI 或本地文件 |
+| `generate_text()`                   | 直接拿文本                               |
+| `generate_text_result()`            | 拿完整结果对象，适合处理 function call   |
+
+常规文本生成：
+
+```php
+$text = wp_ai_client_prompt( $prompt )
+    ->using_system_instruction( '你是一个熟悉 WordPress 的中文编辑。' )
+    ->using_temperature( 0.3 )
+    ->using_max_tokens( 300 )
+    ->generate_text();
+```
+
+## 错误处理
+
+AI Client 常见错误：
+
+| 错误码                         | 含义                         |
+| ------------------------------ | ---------------------------- |
+| `prompt_prevented`             | 当前环境或过滤器禁止 AI 请求 |
+| `prompt_client_error`          | Provider 返回 4xx            |
+| `prompt_upstream_server_error` | Provider 返回 5xx            |
+| `prompt_unavailable`           | 没有可用 provider 或模型     |
+
+推荐统一处理：
+
+```php
+if ( is_wp_error( $text ) ) {
+    error_log( '[zibll-ai-ext] ' . $text->get_error_code() . ': ' . $text->get_error_message() );
+    return $text;
+}
+```
+
+前台或后台展示时，不要把完整 API 响应、服务器路径、API Key、请求头输出给普通用户。
+
+## 结构化 JSON 输出
+
+如果你希望模型返回稳定对象，可以使用输出 schema。
+
+```php
+$schema = array(
+    'type'                 => 'object',
+    'required'             => array( 'title', 'keywords', 'description' ),
+    'properties'           => array(
+        'title'       => array( 'type' => 'string' ),
+        'keywords'    => array(
+            'type'  => 'array',
+            'items' => array( 'type' => 'string' ),
+        ),
+        'description' => array( 'type' => 'string' ),
+    ),
+    'additionalProperties' => false,
+);
+
+$json = wp_ai_client_prompt( $prompt )
+    ->using_system_instruction( '只输出符合 JSON schema 的内容。' )
+    ->using_output_schema( $schema )
+    ->generate_text();
+```
+
+Provider 会尽量把 schema 转成对应平台的结构化输出参数。例如 OpenAI provider 会使用 Responses API 的 JSON schema 格式，Anthropic provider 会在需要结构化输出时添加对应的 beta header。
+
+但 PHP 里仍然要兜底校验：
+
+```php
+$data = json_decode( $json, true );
+
+if ( ! is_array( $data ) ) {
+    return new WP_Error( 'invalid_ai_json', __( 'AI returned invalid JSON.', 'zibll-ai-ext-demo' ) );
+}
+
+$description = sanitize_text_field( $data['description'] ?? '' );
+```
+
+## Prompt 写法建议
+
+面向站点内容生成时，prompt 建议包含：
+
+- 用户真正要做什么。
+- 输入内容来自哪里。
+- 输出语言。
+- 输出长度。
+- 是否允许编造。
+- 是否只输出结果，不输出解释。
+
+示例：
+
+```php
+$prompt = sprintf(
+    "请为下面文章生成一段 SEO 描述，长度控制在 %d 个中文字符左右，只输出描述文本。\n\n标题：%s\n\n正文：%s",
+    $length,
+    get_the_title( $post_id ),
+    wp_trim_words( $content, 300, '' )
+);
+```
+
+不要把整站配置、用户隐私、订单详情一次性塞进 prompt。能传摘要就不要传全文，能传必要字段就不要传整个对象。

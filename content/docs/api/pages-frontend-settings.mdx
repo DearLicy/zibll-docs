@@ -1,0 +1,433 @@
+---
+title: 普通页面与前台设置
+description: 扩展子比主题普通页面模板、页面头部样式、内容样式、页面专属小工具容器、前台设置弹窗、字段构建和保存 Hook。
+---
+
+## 模块边界
+
+子比主题的普通页面不是只有 `the_content()`。`page.php` 会根据页面 Meta 决定页面头部、内容容器、页面专属小工具容器、评论区和侧边栏；`zib-frontend-set.php` 则允许超级管理员在前台快速调整页面、文章、分类和专题的常用参数。
+
+| 文件                                 | 作用                                                             |
+| ------------------------------------ | ---------------------------------------------------------------- |
+| `page.php`                           | 普通页面模板、页面头部、页面内容、评论、侧栏、页面专属小工具容器 |
+| `inc/functions/zib-page.php`         | 页面头部样式、页面内容样式读取和输出                             |
+| `inc/functions/zib-frontend-set.php` | 前台设置开关、右侧浮动按钮、设置弹窗、字段构建、Ajax 保存        |
+| `inc/options/metabox-options.php`    | 页面 Meta、布局、页面内容样式、页面头部样式等后台字段            |
+| `inc/widgets/widget-index.php`       | 页面专属小工具容器注册                                           |
+
+开发页面相关功能时先区分三件事：
+
+- 页面模板结构：由 `page.php` 控制。
+- 页面显示参数：由页面 Meta 和 `zib_get_page_*` 函数读取。
+- 前台快捷设置：由 `zib_frontend_set_*` 系列函数控制。
+
+## 页面模板结构
+
+`page.php` 先读取当前页面 ID、头部样式和内容样式：
+
+```php
+$page_id         = get_queried_object_id();
+$header_style    = zib_get_page_header_style();
+$content_style   = zib_get_page_content_style();
+$container_class = 'container';
+$container_class .= $content_style ? ' page-content-' . $content_style : '';
+```
+
+页面主体结构：
+
+```php
+get_header();
+
+dynamic_sidebar('page_top_fluid_' . $page_id);
+
+echo '<main class="' . $container_class . ' page-id-' . $page_id . '">';
+echo '<div class="content-wrap"><div class="content-layout">';
+
+echo zib_get_page_header();
+dynamic_sidebar('page_top_content_' . $page_id);
+
+echo '<article class="article page-article main-bg theme-box box-body radius8 main-shadow">';
+the_content();
+wp_link_pages(...);
+echo '</article>';
+
+comments_template('/template/comments.php', true);
+dynamic_sidebar('page_bottom_content_' . $page_id);
+
+get_sidebar();
+echo '</main>';
+
+dynamic_sidebar('page_bottom_fluid_' . $page_id);
+
+get_footer();
+```
+
+页面专属侧栏只有在页面开启模块布局时才会输出。不要在所有页面无条件注册大量页面侧栏，否则后台小工具列表和前台判断都会变重。
+
+## 页面头部样式
+
+页面头部由 `zib_get_page_header()` 输出，样式来自单页 Meta `page_header_style`，为空时回落到主题设置：
+
+```php
+function zib_get_page_header_style($post_id = '')
+{
+    $header_style = zib_get_post_meta($post_id, 'page_header_style', true);
+    if ($header_style == 'not') {
+        return false;
+    }
+    if (!$header_style) {
+        $header_style = _pz('page_header_style');
+    }
+
+    return $header_style;
+}
+```
+
+支持的样式：
+
+| 值    | 输出           |
+| ----- | -------------- |
+| `not` | 不显示页面头部 |
+| `1`   | 简单居中标题   |
+| `2`   | 卡片标题       |
+| `3`   | 图文封面标题   |
+
+图文封面优先读取特色图，其次读取 `thumbnail_url`，再回落到 `page_header_cover_img`：
+
+```php
+$post_thumbnail_id = get_post_thumbnail_id($post_id);
+if ($post_thumbnail_id) {
+    $image = wp_get_attachment_image_src($post_thumbnail_id, 'full');
+    $img   = !empty($image[0]) ? $image[0] : '';
+}
+if (!$img) {
+    $img = zib_get_post_meta($post_id, 'thumbnail_url', true);
+}
+$img = $img ? $img : _pz('page_header_cover_img', ZIB_TEMPLATE_DIRECTORY_URI . '/img/user_t.jpg');
+```
+
+扩展页面头部时不要只输出标题。要同时考虑特色图、懒加载、暗黑模式、`page-mask`、页面内容样式和标题是否已经在文章卡片内输出。
+
+## 页面内容样式
+
+页面内容样式来自 `page_content_style`：
+
+```php
+function zib_get_page_content_style($post_id = '')
+{
+    $style = zib_get_post_meta($post_id, 'page_content_style', true);
+    return $style;
+}
+```
+
+前台设置里可选：
+
+| 值      | 效果               |
+| ------- | ------------------ |
+| 空      | 默认卡片背景       |
+| `not`   | 不显示页面正文内容 |
+| `nobox` | 无背景             |
+| `full`  | 全屏无背景         |
+
+`page.php` 会把内容样式追加到主容器：
+
+```php
+$container_class .= $content_style ? ' page-content-' . $content_style : '';
+```
+
+如果 `content_style == 'not'`，页面不输出 `<article>` 正文；如果 `header_style == 1`，头部会在正文卡片内输出，否则在正文卡片外输出。
+
+自定义页面模板时应保留这个判断，否则后台设置里的“不显示正文”“全屏无背景”等选项会失效。
+
+## 页面专属小工具容器
+
+页面可以通过 Meta `widgets_register` 开启页面专属小工具容器，并通过 `widgets_register_container` 选择位置：
+
+| 值               | 输出位置   |
+| ---------------- | ---------- |
+| `sidebar`        | 页面侧边栏 |
+| `top_fluid`      | 顶部全宽度 |
+| `top_content`    | 主内容上面 |
+| `bottom_content` | 主内容下面 |
+| `bottom_fluid`   | 底部全宽度 |
+
+`page.php` 会读取：
+
+```php
+if (get_post_meta($page_id, 'widgets_register', true)) {
+    $widgets_register_container = (array) get_post_meta($page_id, 'widgets_register_container', true);
+}
+```
+
+然后按位置输出：
+
+```php
+dynamic_sidebar('page_top_fluid_' . $page_id);
+dynamic_sidebar('page_top_content_' . $page_id);
+dynamic_sidebar('page_bottom_content_' . $page_id);
+dynamic_sidebar('page_bottom_fluid_' . $page_id);
+```
+
+页面专属容器适合少量重要页面。主题前台设置也提示不要开启太多，建议控制数量。给每个页面都创建容器会让模块管理和页面渲染都变复杂。
+
+## 前台设置开关
+
+前台设置只给超级管理员开放：
+
+```php
+function zib_admin_frontend_set_s()
+{
+    $is_on = true;
+    if (!_pz('admin_frontend_set', true) || !is_super_admin() || (!is_category() && !is_tag() && !is_tax() && !is_page() && !is_single())) {
+        $is_on = false;
+    }
+
+    $pid = get_queried_object_id();
+    if (!$pid) {
+        $is_on = false;
+    }
+
+    if (is_page_template('pages/postsnavs.php')) {
+        $is_on = false;
+    }
+
+    return apply_filters('frontend_set_switch', $is_on);
+}
+```
+
+可用 Filter：
+
+```php
+function zib_docs_frontend_set_switch($is_on)
+{
+    if (is_page_template('pages/custom-fullscreen.php')) {
+        return false;
+    }
+
+    return $is_on;
+}
+add_filter('frontend_set_switch', 'zib_docs_frontend_set_switch');
+```
+
+前台设置按钮挂在右侧浮动按钮：
+
+```php
+add_filter('zib_float_right', 'zib_admin_frontend_set_botton', 10, 2);
+```
+
+如果自定义页面移除了 `zib_float_right`，前台设置入口也会消失。
+
+## 前台设置弹窗
+
+弹窗在 `wp_footer` 输出：
+
+```php
+add_action('wp_footer', 'zib_frontend_set_modal', 10);
+```
+
+它会根据当前对象判断是 taxonomy 还是 post：
+
+```php
+if (is_tax() || is_category() || is_tag()) {
+    $type     = 'tax';
+    $taxonomy = get_queried_object()->taxonomy;
+} else {
+    $type      = 'post';
+    $post_type = get_post_type();
+}
+```
+
+弹窗表单包含：
+
+- 模块布局入口。
+- 后台编辑入口。
+- `wp-ajax-submit` 提交按钮。
+- `action=frontend_set_save`。
+- `type`、`taxonomy`、`post_type`、`id`。
+- `frontend_set_save` nonce。
+
+因此扩展前台设置字段时，不需要重写弹窗，只要扩展字段数组和保存 Hook。
+
+## 字段构建
+
+字段数组由 `zib_get_frontend_set_input()` 构建。文章和页面默认字段包括：
+
+| 字段                         | 作用                                      |
+| ---------------------------- | ----------------------------------------- |
+| `show_layout`                | 显示布局：跟随主题、无侧边栏、侧边栏左/右 |
+| `post_title`                 | 标题                                      |
+| `subtitle`                   | 文章副标题                                |
+| `post_format`                | 文章格式                                  |
+| `like`                       | 点赞数                                    |
+| `views`                      | 阅读数                                    |
+| `no_article-navs`            | 不显示文章目录                            |
+| `article_maxheight_xz`       | 限制文章最大高度                          |
+| `comments_open`              | 评论开关                                  |
+| `page_header_style`          | 页面标题样式                              |
+| `page_content_style`         | 页面内容样式                              |
+| `layout_max_width`           | 页面布局宽度                              |
+| `widgets_register`           | 是否创建页面小工具容器                    |
+| `widgets_register_container` | 小工具容器位置                            |
+
+分类和标签默认字段包括：
+
+| 字段               | 作用 |
+| ------------------ | ---- |
+| `term_name`        | 名称 |
+| `term_description` | 描述 |
+
+扩展字段使用：
+
+```php
+function zib_docs_frontend_set_input_array($page_input, $post_id, $type, $taxonomy, $post_type)
+{
+    if ('post' !== $type || 'page' !== $post_type) {
+        return $page_input;
+    }
+
+    $page_input[] = array(
+        'name' => __('页面备注', 'zib_language'),
+        'id'   => 'docs_page_note',
+        'std'  => zib_get_post_meta($post_id, 'docs_page_note', true),
+        'type' => 'text',
+        'desc' => __('仅用于内部维护说明', 'zib_language'),
+    );
+
+    return $page_input;
+}
+add_filter('zib_frontend_set_input_array', 'zib_docs_frontend_set_input_array', 20, 5);
+```
+
+如果需要完全自定义 HTML，也可以使用：
+
+```php
+add_filter('zib_frontend_set_input_html', 'zib_docs_frontend_set_input_html', 20, 5);
+```
+
+但优先扩展字段数组，这样可以复用 `zib_edit_input_construct()` 的结构和样式。
+
+## 支持的字段类型
+
+`zib_edit_input_construct()` 支持：
+
+| type       | 输出             |
+| ---------- | ---------------- |
+| `text`     | 文本框           |
+| `password` | 密码框           |
+| `number`   | 数字框           |
+| `textarea` | 多行文本         |
+| `select`   | 下拉选择         |
+| `radio`    | 单选             |
+| `checkbox` | 单个或多个复选框 |
+| `html`     | 自定义 HTML      |
+
+字段常用键：
+
+| 键              | 作用          |
+| --------------- | ------------- |
+| `name`          | 左侧名称      |
+| `id`            | 表单字段名    |
+| `std`           | 默认值        |
+| `desc`          | 说明文字      |
+| `options`       | 选项          |
+| `class`         | 附加类        |
+| `question`      | tooltip 说明  |
+| `settings.rows` | textarea 行数 |
+
+自定义字段名要避免和主题已有字段冲突。保存时也要只保存自己定义的字段，不要遍历 `$_POST` 全量写入 meta。
+
+## 保存流程
+
+Ajax 入口：
+
+```php
+add_action('wp_ajax_frontend_set_save', 'zib_frontend_set_save_ajax');
+```
+
+保存前会检查：
+
+- nonce。
+- `id` 是否存在。
+- 当前用户是否超级管理员。
+- `admin_frontend_set` 是否开启。
+- 当前对象是否存在。
+
+之后触发：
+
+```php
+do_action('zib_frontend_set_save', $object_data, $type);
+```
+
+主题默认保存函数会处理 taxonomy 名称和描述，也会处理 post/page 的标题、评论开关、文章格式、点赞数、阅读数、布局、页面头部、内容样式、小工具容器等字段。
+
+保存自定义字段：
+
+```php
+function zib_docs_frontend_set_save($object_data, $type)
+{
+    if ('post' !== $type || empty($object_data->ID)) {
+        return;
+    }
+
+    if (isset($_POST['docs_page_note'])) {
+        zib_update_post_meta($object_data->ID, 'docs_page_note', sanitize_text_field($_POST['docs_page_note']));
+    }
+}
+add_action('zib_frontend_set_save', 'zib_docs_frontend_set_save', 20, 2);
+```
+
+注意优先级。主题默认保存函数挂在 `10`，自定义字段可以用 `20`，让基础对象先保存成功。
+
+## 页面模板扩展建议
+
+需要新建页面模板时，建议保留主题页面协议：
+
+```php
+<?php
+/*
+Template Name: 自定义页面
+*/
+get_header();
+
+$page_id = get_queried_object_id();
+?>
+<main class="container page-id-<?php echo (int) $page_id; ?>">
+    <div class="content-wrap">
+        <div class="content-layout">
+            <?php echo zib_get_page_header(); ?>
+            <article class="article page-article main-bg theme-box box-body radius8 main-shadow">
+                <div class="wp-posts-content">
+                    <?php the_content(); ?>
+                </div>
+            </article>
+        </div>
+    </div>
+    <?php get_sidebar(); ?>
+</main>
+<?php get_footer(); ?>
+```
+
+如果模板是全屏工具页，可以主动不输出文章卡片、侧边栏、评论区或右侧浮动按钮，但要明确这是模板设计，而不是让全站页面协议失效。
+
+## 开发检查
+
+| 场景           | 应检查                                                                      |
+| -------------- | --------------------------------------------------------------------------- |
+| 页面头部       | `page_header_style`、特色图、`thumbnail_url`、默认封面图                    |
+| 页面内容样式   | `page_content_style` 是否影响容器 class 和正文输出                          |
+| 页面专属小工具 | `widgets_register` 和容器数量是否合理                                       |
+| 前台设置入口   | 是否超级管理员、是否开启 `admin_frontend_set`、是否保留右侧浮动按钮         |
+| 扩展字段       | 是否使用 `zib_frontend_set_input_array`，字段名是否冲突                     |
+| 保存字段       | 是否挂 `zib_frontend_set_save`，是否做清洗和权限判断                        |
+| 自定义模板     | 是否保留 `zib_get_page_header()`、`.wp-posts-content`、侧栏和评论的设计意图 |
+
+## 常见误区
+
+- 不要在所有页面无条件创建页面专属小工具容器。
+- 不要在自定义模板里忽略 `page_header_style` 和 `page_content_style`。
+- 不要让前台设置保存任意 `$_POST` 字段到 post meta。
+- 不要给普通用户开放 `frontend_set_save`。
+- 不要移除右侧浮动按钮后又疑惑前台设置入口消失。
+- 不要把页面模板当成纯静态 HTML；主题页面还承载侧栏、评论、模块布局和前台设置。
+
+本页根据 `page.php`、`inc/functions/zib-page.php`、`inc/functions/zib-frontend-set.php`、`inc/options/metabox-options.php`、`inc/widgets/widget-index.php` 蒸馏整理。

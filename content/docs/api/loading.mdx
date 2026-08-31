@@ -1,0 +1,257 @@
+---
+title: 加载顺序
+description: 子比主题 functions.php、inc/inc.php、zib_require、后台选项、业务模块与末尾 Hook 的加载链路。
+---
+
+## 入口链路
+
+主题根目录 `functions.php` 很薄，关键职责是加载 `inc/inc.php`，并为站点自定义文件预留位置。真正的常量、加载工具、业务模块、配置系统都在 `inc/inc.php` 中展开。
+
+核心链路：
+
+```txt
+functions.php
+└─ inc/inc.php
+   ├─ 定义主题常量
+   ├─ 定义 zib_require()
+   ├─ inc/dependent
+   ├─ inc/code/require
+   ├─ inc/code/tool
+   ├─ vendor/autoload
+   ├─ inc/class/class
+   ├─ inc/options/options
+   ├─ inc/codestar-framework/codestar-framework
+   ├─ inc/widgets/widget-class
+   ├─ inc/functions/functions
+   ├─ inc/widgets/widget-index
+   ├─ oauth/oauth
+   ├─ zibpay/functions
+   ├─ action/function
+   ├─ inc/functions/rest-api/function
+   ├─ inc/csf-framework/classes/zib-csf.class
+   └─ do_action('zib_require_end')
+```
+
+读源码时先从这个顺序判断：某个函数、类、Hook、Ajax 是否已经存在。
+
+## 本地源码校准
+
+当前 `主题插件子主题/zibll` 快照里，加载链路有几个需要特别记住的细节：
+
+| 位置                           | 当前证据                                                                                                                     | 二开判断                                                                         |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `functions.php`                | 先加载 `inc/inc.php`，然后如果存在 `func.php` 就加载                                                                         | `func.php` 适合少量站点自定义；长期功能仍建议放子主题模块或插件                  |
+| `inc/inc.php`                  | 定义 `ZIB_TEMPLATE_DIRECTORY_URI`、`ZIB_ROOT_PATH`、`ZIB_TEMP_DIR`、`THEME_VERSION`，并要求 PHP 7.0+                         | 扩展代码如果依赖这些常量，要等 `inc/inc.php` 之后                                |
+| `zib_require()`                | 支持数组递归、`require_once` 开关和目录前缀                                                                                  | 读入口文件时继续追踪它加载的子文件，不要停在入口文件名                           |
+| `do_action('zib_require_end')` | 主题核心、CSF、函数、小工具、OAuth、Zibpay、Action 和 REST 搜索加载后触发                                                    | 插件要调用 `_pz()`、`zib_send_json_error()`、Zibpay 或用户中心函数时，优先挂这里 |
+| `inc/dependent.php`            | 定义 `zib_is_admin_context()`，并通过 `zib_locale_frontend_ajax_prefixes` / `zib_locale_frontend_ajax_actions` 识别前台 Ajax | 插件新增前台 Ajax 前缀时，要把 action 加入白名单，避免多语言环境误判后台语言     |
+
+本地插件样本也验证了这个边界：`zibll-security-guard` 先在 `plugins_loaded` 准备通用防护，再在 `zib_require_end` 后注册依赖子比函数的后台设置；`zib-sponsor` 在 `plugins_loaded` 加载通用函数、API 和小工具，再在 `zib_require_end` 加载 CSF 后台设置。
+
+## `zib_require()`
+
+`zib_require()` 是主题内部批量加载 PHP 文件的工具。它支持传数组、指定目录前缀，也支持按模块继续加载子文件。
+
+典型写法：
+
+```php
+zib_require(array(
+    'inc/dependent',
+    'inc/code/require',
+    'inc/code/tool',
+));
+```
+
+带目录前缀：
+
+```php
+zib_require(array(
+    'admin-options',
+    'metabox-options',
+    'profile-options',
+    'action',
+), false, 'inc/options/');
+```
+
+读模块时不要只看文件名。很多入口文件只是继续 `zib_require()`，真正业务逻辑在下一级目录。
+
+## 前置依赖
+
+`inc/dependent.php` 很早加载，里面是主题大量基础函数：
+
+| 函数                                             | 用途                 |
+| ------------------------------------------------ | -------------------- |
+| `_pz()`                                          | 读取 `zibll_options` |
+| `_spz()`                                         | 单独更新主题设置     |
+| `zib_get_option_meta_keys()`                     | 判断聚合字段         |
+| `zib_get_user_meta()` / `zib_update_user_meta()` | 用户 meta 封装       |
+| `zib_get_post_meta()` / `zib_update_post_meta()` | post meta 封装       |
+| `zib_get_term_meta()` / `zib_update_term_meta()` | term meta 封装       |
+| `zib_is_admin_context()`                         | 判断后台语言上下文   |
+
+这些函数属于主题底层能力。后续用户、论坛、商城、支付模块都会依赖它们。
+
+## 后台设置加载
+
+`inc/options/options.php` 是后台配置入口。它先加载模块和升级逻辑：
+
+```php
+zib_require(array(
+    'inc/options/options-module',
+    'inc/options/upgrade',
+));
+```
+
+后台环境再加载：
+
+```php
+if (is_admin()) {
+    zib_require(array(
+        'admin-options',
+        'metabox-options',
+        'profile-options',
+        'action',
+    ), false, 'inc/options/');
+}
+```
+
+并启用 Font Awesome 4：
+
+```php
+add_filter('csf_fa4', '__return_true');
+```
+
+所以 `CSF::createOptions()`、文章 Meta、用户资料字段、导航菜单项字段都属于后台条件加载，不要在前台假设这些注册函数都会执行。
+
+## 主功能入口
+
+`inc/functions/functions.php` 继续加载主题主要功能：
+
+```txt
+zib-tool
+zib-js-i18n
+zib-theme
+zib-head
+zib-header
+zib-content
+zib-footer
+zib-index
+zib-category
+zib-author
+zib-post
+zib-posts-list
+zib-share
+zib-search
+zib-attachment
+zib-share-wechat
+user/user
+zib-user
+zib-page
+zib-single
+zib-comments-list
+zib-svg-icon
+zib-baidu
+zib-email
+zib-frontend-set
+message/functions
+bbs/bbs
+shop/shop
+ai/ai
+```
+
+不同版本的文件名和顺序可能调整，但阅读方式不变：先看入口文件，再看它继续加载了哪些子模块。
+
+## Ajax 入口
+
+`action/function.php` 是 Ajax 工具和通用动作入口，之后还会加载：
+
+```txt
+action/main.php
+action/ajax.php
+action/user.php
+action/author.php
+action/sign_register.php
+action/comment.php
+action/documentnav.php
+action/media.php
+action/new_posts.php
+```
+
+这些文件里使用：
+
+```php
+add_action('wp_ajax_action_name', 'callback');
+add_action('wp_ajax_nopriv_action_name', 'callback');
+```
+
+查 Ajax 时建议从动作名搜索：
+
+```powershell
+rg -n "wp_ajax_user_signin|function zib_ajax_user_signin" C:\Users\Administrator\Desktop\zibll -g "*.php"
+```
+
+## 业务模块条件
+
+很多模块不是无条件加载所有能力。
+
+| 条件                    | 影响                                           |
+| ----------------------- | ---------------------------------------------- |
+| `is_admin()`            | 后台设置、后台表格、后台 Ajax、管理动作        |
+| `_pz('shop_s')`         | 商城页面、商品、小工具、购物车、售后等功能     |
+| 论坛开关                | 论坛首页、板块、帖子、话题、标签、版主、小工具 |
+| `zib_ai_is_available()` | AI ability、SEO 生成、AI Ajax                  |
+| 支付配置                | 支付渠道、回调、提现、余额、积分、VIP          |
+| 登录状态                | 用户中心、绑定、上传、收藏、订单等用户动作     |
+
+所以文档里的“函数存在”不等于“功能一定可用”。调用前要同时判断函数、类、功能开关和当前上下文。
+
+## 模板动态 Hook
+
+用户中心、消息中心、论坛、商城页面大量使用动态 Hook。
+
+用户中心：
+
+```php
+do_action('locate_template_' . $page_type);
+do_action($page_type . '_page_header');
+do_action($page_type . '_page_content');
+do_action($page_type . '_page_footer');
+```
+
+论坛：
+
+```php
+do_action('bbs_locate_template_' . $type);
+do_action('bbs_' . $page_type . '_page_header');
+do_action('bbs_' . $page_type . '_page_content');
+do_action('bbs_' . $page_type . '_page_sidebar');
+do_action('bbs_' . $page_type . '_page_footer');
+```
+
+商城：
+
+```php
+do_action('shop_locate_template_' . $type);
+do_action('shop_' . $type . '_page_content');
+```
+
+扩展或排查页面输出时，先找 `$page_type` 或 `$type` 是什么。
+
+## 推荐阅读顺序
+
+1. `functions.php`
+2. `inc/inc.php`
+3. `inc/dependent.php`
+4. `inc/functions/functions.php`
+5. 目标模块入口：`user`、`bbs`、`shop`、`message`、`zibpay`、`oauth`、`ai`
+6. 如果是 Ajax，再看 `action/*` 或模块自己的 `action/*`
+7. 如果是后台字段，再看 `inc/options/*`、`inc/codestar-framework`、`inc/csf-framework`
+8. 如果是前台模板，再看动态 Hook 和模板函数
+
+## 常见误区
+
+- 只搜索函数名，不确认加载条件。
+- 只看 `inc/functions`，忽略 `action`、`zibpay`、`oauth` 和模块目录。
+- 把 `inc/functions/rest-api` 当成完整开放接口模块；它主要补充 REST 搜索和内部能力。
+- 看见 `wp_ajax_nopriv_*` 就认为游客可写入；很多游客动作仍会在回调里做登录、验证码或权限判断。
+- 把页面模板当成纯静态文件；用户中心、论坛、商城很多内容由 Hook 拼装。

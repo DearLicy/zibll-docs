@@ -1,0 +1,56 @@
+{
+  "name": "zibll-docs",
+  "interface": {
+    "displayName": "\u5b50\u6bd4\u4e3b\u9898\u5f00\u53d1\u6587\u6863"
+  },
+  "plugins": [
+    {
+      "name": "zibll-docs",
+      "source": {
+        "source": "local",
+        "path": "./plugins/zibll-docs"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "zibll-theme-dev",
+      "source": {
+        "source": "local",
+        "path": "./plugins/zibll-theme-dev"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "zibll-wp-ai-dev",
+      "source": {
+        "source": "local",
+        "path": "./plugins/zibll-wp-ai-dev"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "zibll-migration-helper",
+      "source": {
+        "source": "local",
+        "path": "./plugins/zibll-migration-helper"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "title": "开发工具",
+  "description": "MCP、Codex 插件、Skill 和 LLM 文本接入能力",
+  "icon": "Bot",
+  "root": true,
+  "pages": [
+    "index",
+    "codex-plugin",
+    "../skills/index",
+    "../llms/index",
+    "../mcp/index",
+    "cli-installer"
+  ]
+}

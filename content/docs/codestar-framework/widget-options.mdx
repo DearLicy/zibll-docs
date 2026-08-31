@@ -1,0 +1,462 @@
+---
+title: 小工具配置
+description: 按子比主题源码说明 CSF_Widget、Zib_CFSwidget 兼容层、公共字段注入、显示条件、动画、AJAX 表单和输出结构。
+---
+
+## 文件位置
+
+小工具相关代码分三层：
+
+```txt
+inc/csf-framework/classes/widget-options.class.php
+inc/widgets/widget-class.php
+inc/widgets/widget-*.php
+inc/functions/bbs/widgets/*.php
+```
+
+职责：
+
+| 文件                       | 职责                                           |
+| -------------------------- | ---------------------------------------------- |
+| `widget-options.class.php` | 子比改写的 `CSF_Widget` 类                     |
+| `widget-class.php`         | 兼容旧接口 `Zib_CFSwidget`，以及侧边栏容器处理 |
+| `widget-*.php`             | 注册和渲染具体小工具                           |
+| `bbs/widgets/*.php`        | 论坛模块小工具                                 |
+
+`Zib_CFSwidget` 是兼容层，主题里仍大量使用 `Zib_CFSwidget::create()`，它最终会调用：
+
+```php
+CSF::createWidget($id, $args);
+```
+
+## 注册结构
+
+典型注册来自 `inc/widgets/widget-user.php`：
+
+```php
+Zib_CFSwidget::create('widget_ui_user', array(
+    'title'       => __('用户面板', 'zib_language'),
+    'zib_title'   => true,
+    'description' => __('显示当前用户信息、登录按钮和签到入口', 'zib_language'),
+    'callback'    => 'zib_widget_ui_user',
+    'size'        => 'mini',
+    'fields'      => array(
+        array(
+            'id'      => 'show_img_bg',
+            'type'    => 'switcher',
+            'title'   => __('显示顶部背景图', 'zib_language'),
+            'default' => true,
+        ),
+    ),
+));
+```
+
+几个关键参数：
+
+| 参数               | 用途                                         |
+| ------------------ | -------------------------------------------- |
+| `title`            | 后台小工具标题，类里会自动加 `Zibll ` 前缀   |
+| `description`      | 小工具说明，会自动注入到表单顶部             |
+| `reminder`         | 警示说明，会渲染成 `submessage`              |
+| `zib_title`        | 是否注入模块标题、副标题、标题链接等公共字段 |
+| `zib_layout`       | 是否注入布局间距、背景字段                   |
+| `zib_animation_in` | 是否注入模块入场动画字段                     |
+| `callback`         | 前台输出函数                                 |
+| `is_show_filter`   | 自定义显示判断函数                           |
+| `size`             | 限制适合区域，常见 `mini`、`big`             |
+| `defaults`         | 默认实例值                                   |
+| `fields`           | 当前小工具自己的内容字段                     |
+
+## 公共字段注入
+
+`CSF_Widget::params()` 会在注册时自动给字段数组前面追加公共配置。
+
+如果 `zib_title` 未设置或为 true，会注入：
+
+- `title` 模块标题。
+- `subtitle` 副标题。
+- `title_highlight` 标题高亮文字。
+- `title_highlight_color` 高亮颜色。
+- `title_link` 标题右侧链接。
+- `title_style` 标题样式。
+
+如果 `zib_animation_in` 未设置或为 true，会注入：
+
+```php
+array(
+    'title'   => __('模块入场动画', 'zib_language'),
+    'id'      => 'animation_in',
+    'type'    => 'select',
+    'default' => '',
+    'options' => array(
+        ''           => __('无动画', 'zib_language'),
+        'fade'       => __('淡入', 'zib_language'),
+        'slideup'    => __('从下往上滑出', 'zib_language'),
+        'slidedown'  => __('从上往下滑出', 'zib_language'),
+        'slideright' => __('从左往右滑出', 'zib_language'),
+        'slideleft'  => __('从右往左滑出', 'zib_language'),
+        'zoomin'     => __('由小变大', 'zib_language'),
+        'zoomout'    => __('由大变小', 'zib_language'),
+    ),
+);
+```
+
+如果 `zib_layout` 未设置或为 true，会注入：
+
+- `layout_pin_pc` PC 额外间距。
+- `layout_pin_m` 移动端额外间距。
+- `layout_bg` 日间和夜间背景。
+
+最后会自动追加：
+
+```php
+array(
+    'title'    => ' ',
+    'subtitle' => __('模块内容配置', 'zib_language'),
+    'type'     => 'subheading',
+);
+```
+
+所以具体小工具的 `fields` 只需要写“内容配置”，标题、背景、动画这些公共能力由类统一注入。
+
+## 输出函数
+
+小工具前台输出函数接收两个参数：
+
+```php
+function zib_widget_ui_user($args, $instance)
+{
+    // $args 是 WordPress sidebar 参数
+    // $instance 是小工具保存的字段值
+}
+```
+
+推荐输出结构：
+
+```php
+function zib_widget_example($args, $instance)
+{
+    if (empty($instance['text'])) {
+        return;
+    }
+
+    echo $args['before_widget'];
+
+    CSF_Widget::show_title($instance, CSF_Widget::get_widget_for_form('zib_widget_example'));
+
+    echo '<div' . CSF_Widget::wrap_attributes($instance) . '>';
+    echo '<div class="zib-widget-content">';
+    echo wp_kses_post($instance['text']);
+    echo '</div>';
+    echo '</div>';
+
+    echo $args['after_widget'];
+}
+```
+
+主题自己的小工具并不完全都使用这个最小结构，但核心思路一致：用 `$instance` 读字段，用主题函数生成标题、动画、显示条件和包裹属性。
+
+## 显示条件
+
+显示判断流程在 `CSF_Widget::is_show()`：
+
+```php
+$show_class = self::show_class($instance);
+if ($this->args['is_show_filter'] && function_exists($this->args['is_show_filter'])) {
+    $show_class = call_user_func($this->args['is_show_filter'], $show_class, $args, $instance);
+} elseif (function_exists($this->unique . '_is_show')) {
+    $show_class = call_user_func($this->unique . '_is_show', $show_class, $args, $instance);
+}
+
+return apply_filters('widget_is_show_' . $this->unique, $show_class, $args, $instance);
+```
+
+有三种扩展点：
+
+| 优先级 | 方式                                   |
+| ------ | -------------------------------------- |
+| 1      | 注册时传 `is_show_filter`              |
+| 2      | 定义 `{$unique}_is_show()`             |
+| 3      | 使用 `widget_is_show_{$unique}` filter |
+
+示例来自用户头像小工具：
+
+```php
+Zib_CFSwidget::create('widget_ui_avatar', array(
+    'title'          => __('用户头像', 'zib_language'),
+    'zib_title'      => true,
+    'callback'       => 'zib_widget_ui_avatar',
+    'is_show_filter' => 'zib_widget_ui_avatar_is_show',
+    'size'           => 'mini',
+    'fields'         => array(),
+));
+```
+
+## `show_class()`
+
+内置显示字段会生成显示 class 或直接隐藏：
+
+```php
+public static function show_class($instance)
+{
+    $show_type = isset($instance['show_type']) ? $instance['show_type'] : 'all';
+
+    if ($show_type == 'only_pc') {
+        return 'hidden-xs';
+    }
+
+    if ($show_type == 'only_sm') {
+        return 'visible-xs-block';
+    }
+
+    return true;
+}
+```
+
+它还会处理指定页面 ID 显示或隐藏：
+
+```php
+if (!empty($instance['show_id_type']) && !empty($instance['show_ids'])) {
+    if (is_singular()) {
+        $the_id   = get_the_ID();
+        $show_ids = preg_split("/,|，|\s|\n/", $instance['show_ids']);
+    }
+}
+```
+
+所以在输出小工具时，不要自己重复造一套 PC/移动端显示逻辑。
+
+## 动画 class
+
+动画由 `animation_class()` 生成：
+
+```php
+public static function animation_class($args = array(), $is_title = false)
+{
+    $animation = !empty($args['animation_in']) ? $args['animation_in'] : '';
+    if ($is_title && !empty($args['obs_animation'])) {
+        $animation = $args['obs_animation'];
+    }
+
+    $animation_class = $animation ? ' obs-animate ani-' . $animation : '';
+    if ($animation && !empty($args['animation_repeat'])) {
+        $animation_class .= ' obs-animate-repeat';
+    }
+
+    return $animation_class;
+}
+```
+
+标题和内容可以分别加动画：
+
+```php
+$title_class = CSF_Widget::animation_class($instance, true);
+$wrap_class  = CSF_Widget::animation_class($instance);
+```
+
+## 包裹属性
+
+`wrap_attributes()` 会统一生成模块 class、背景 CSS 变量和 affix 属性：
+
+```php
+echo '<div' . CSF_Widget::wrap_attributes($instance) . '>';
+```
+
+它会处理：
+
+- `zib-widget-wrap` 基础 class。
+- `only_pc`、`only_sm` 显示 class。
+- `layout_pin_pc`、`layout_pin_m` 间距变量。
+- `layout_bg.img_white` 日间背景。
+- `layout_bg.img_dark` 夜间背景。
+- `sidebar_affix` 固定侧栏属性。
+
+这也是为什么小工具字段里不需要每个模块都单独写背景 CSS。
+
+## `size` 限制
+
+`size` 用来提示小工具适合的区域：
+
+```php
+if ($this->args['size'] == 'mini' && (!strstr($wp_args['id'], 'sidebar') && !strstr($wp_args['id'], 'nav'))) {
+    return true;
+} elseif ($this->args['size'] == 'big' && (strstr($wp_args['id'], 'sidebar') || strstr($wp_args['id'], 'nav'))) {
+    return true;
+}
+```
+
+常见约定：
+
+| size   | 适合区域                 |
+| ------ | ------------------------ |
+| `mini` | 侧边栏、导航等窄区域     |
+| `big`  | 首页、全宽模块、内容区域 |
+| 空     | 不限制                   |
+
+如果模块设计依赖大图、横向布局或多列内容，应设置 `size => 'big'`。
+
+## 注册时机
+
+小工具注册函数通常挂到 `widgets_init`：
+
+```php
+function zib_widget_register_cfs_user()
+{
+    Zib_CFSwidget::create('widget_ui_user', array(
+        'title'    => __('用户面板', 'zib_language'),
+        'callback' => 'zib_widget_ui_user',
+        'fields'   => array(),
+    ));
+}
+add_action('widgets_init', 'zib_widget_register_cfs_user');
+```
+
+论坛小工具在论坛模块自己的文件中注册，先确认模块文件是否加载，再找 `widgets_init`。
+
+## 后台表单 AJAX 懒加载
+
+新版子比小工具后台不是每次都直接输出完整字段。`CSF_Widget::form()` 会先判断当前环境：
+
+```php
+public function form($instance)
+{
+    if (empty($this->args['fields'])) {
+        return;
+    }
+
+    if ($this->should_use_ajax_widget_form()) {
+        $this->render_ajax_form_placeholder($instance);
+        return;
+    }
+
+    $this->render_form_fields($instance);
+}
+```
+
+这样做是为了减少小工具页和自定义器一次性渲染大量 CSF 字段造成的卡顿。真正的字段表单会在用户展开小工具或添加小工具后再请求：
+
+```php
+add_action('wp_ajax_zib_csf_widget_form', array('CSF_Widget', 'ajax_load_widget_form'));
+add_action('customize_controls_enqueue_scripts', array('CSF_Widget', 'enqueue_ajax_form_script'), 20);
+add_action('admin_enqueue_scripts', array('CSF_Widget', 'enqueue_ajax_form_script'), 20);
+```
+
+占位结构会输出 `id_base` 和 `widget_number`：
+
+```php
+echo '<div class="csf csf-widgets csf-fields zib-csf-widget-form-ajax"';
+echo ' data-id-base="' . esc_attr($this->id_base) . '"';
+echo ' data-widget-number="' . esc_attr((string) $this->number) . '"';
+echo '>';
+```
+
+前端脚本在 `inc/csf-framework/assets/js/widget.js`。它监听 `.widget-top` 点击、`widget-added`、`widget-updated` 和自定义器侧边栏展开，然后向 `admin-ajax.php` 请求完整表单：
+
+```js
+data: {
+    action: 'zib_csf_widget_form',
+    nonce: nonce,
+    id_base: idBase,
+    widget_number: widgetNumber,
+}
+```
+
+服务端回调会做三层检查：
+
+| 检查       | 源码逻辑                                                   |
+| ---------- | ---------------------------------------------------------- |
+| Nonce      | `check_ajax_referer('zib_csf_widget_form', 'nonce')`       |
+| 权限       | `current_user_can('edit_theme_options')`                   |
+| 小工具实例 | `get_widget_for_form($id_base)` 和 `get_instance($number)` |
+
+通过后才调用：
+
+```php
+ob_start();
+$widget->render_form_fields($instance);
+$html = ob_get_clean();
+
+wp_send_json_success(array(
+    'html' => $html,
+));
+```
+
+如果需要排查小工具后台字段不加载，先看：
+
+1. 当前页面是否是 `widgets` 或 `customize`。
+2. `zib-csf-widget-form-ajax` 占位是否存在。
+3. `zib_csf_widget_form_var.nonce` 和 `ajax_url` 是否已经本地化。
+4. Ajax 响应是否返回 `success: true`。
+5. 返回 HTML 后是否执行了 `csf_reload_script()`。
+
+不要绕过这个流程直接在占位里塞字段 HTML。子比已经把字段初始化、权限校验和 WordPress 小工具编号解析串起来了，手动拼接很容易让上传、颜色、select 和 group 字段初始化失败。
+
+## 自定义器输入防抖
+
+同一个脚本还处理了 WordPress 自定义器小工具输入时频繁刷新预览的问题。核心逻辑是 monkey patch `wp.customize.Widgets.WidgetControl.prototype._setupUpdateUI`，移除核心默认的输入监听，再重新绑定一个更长的 debounce：
+
+```js
+$widgetContent.off('change input propertychange', ':input');
+
+var updateWidgetDebounced = debounce(function () {
+  self.updateWidget();
+}, debounceWait);
+
+$widgetContent.on('change input propertychange', ':input', function (e) {
+  if (!self.liveUpdateMode) {
+    return;
+  }
+
+  if (e.type === 'change' || (this.checkValidity && this.checkValidity())) {
+    updateWidgetDebounced();
+  }
+});
+```
+
+所以自定义器里小工具字段输入卡顿时，不只看 PHP 字段数量，也要看这段脚本有没有加载、是否被其它脚本覆盖，以及浏览器控制台是否有 JS 错误。
+
+## AJAX 小工具
+
+文章列表、论坛帖子列表等小工具会有 Ajax 加载函数，例如：
+
+```php
+function zib_widget_ui_main_post_ajax($instance, $no_ajax = false, $ajax_url = null)
+```
+
+这类小工具通常需要：
+
+- `$instance['count']` 或 `$instance['paged_size']` 控制每页数量。
+- 构造 `WP_Query`。
+- 输出分页 HTML。
+- 前端 Ajax 继续请求下一页。
+
+配置字段只是第一步，真正体验由 Ajax 回调、分页参数和前端容器 class 一起决定。
+
+## 常见错误
+
+### 小工具不显示
+
+按顺序检查：
+
+1. 注册函数是否挂到 `widgets_init`。
+2. `callback` 函数是否存在。
+3. `is_show_filter` 是否返回了空字符串。
+4. `show_type` 是否限制了 PC 或移动端。
+5. `show_id_type` 是否限制了指定页面。
+6. `size` 是否放到了不合适的侧边栏区域。
+
+### 后台字段重复
+
+公共字段由 `CSF_Widget::params()` 自动注入。具体小工具不要再手写 `title`、`subtitle`、`animation_in`、`layout_bg` 这些同名公共字段。
+
+### 前台样式错乱
+
+优先使用：
+
+```php
+CSF_Widget::wrap_attributes($instance)
+CSF_Widget::show_title($instance, $widget)
+CSF_Widget::animation_class($instance)
+```
+
+不要每个小工具手写一套包裹 class、背景变量和标题结构。
