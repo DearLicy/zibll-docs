@@ -1,8 +1,8 @@
 # 子比主题开发文档
 
-面向 WordPress / 子比主题开发者的中文社区文档站，基于 [Fumadocs](https://fumadocs.dev/) + MDX 构建。页面内容和搜索索引在构建期生成，主站默认发布到 [GitHub Pages](https://pages.github.com/)，也可以交给对象存储、CDN 或 Nginx 托管。
+子比主题开发文档是一套面向 WordPress 与子比主题二次开发的中文技术资料。项目持续整理主题、插件和子主题开发中分散的函数、Hook、模板、配置、数据结构与业务调用链，帮助开发者查找依据、理解源码并完成可维护的扩展开发。
 
-项目的信息架构参考了 [new-api-docs-v1](https://github.com/QuantumNous/new-api-docs-v1)：顶部分类对应独立资料域，侧栏由每个分类自己的 `meta.json` 管理，文档页提供 Markdown、GitHub 和多语言入口，社区通过 Issue、Discussion 和 Pull Request 持续维护。
+这是开发文档的项目源码仓库。`main` 分支保存文档、页面组件、构建配置、测试、MCP 和 Codex 插件源码；GitHub Pages 工作流在每次发布时生成 `out/`，并把编译后的静态文件作为 Pages artifact 部署。编译产物不提交到 `main`，公开站点与可编辑源码保持清晰分离。
 
 ## 项目定位
 
@@ -104,6 +104,8 @@ codex plugin add zibll-docs@zibll-docs
 2. Fumadocs 和 Next.js 导出 `out/`。
 3. `actions/upload-pages-artifact` 上传静态文件。
 4. `actions/deploy-pages` 发布到 Pages。
+
+GitHub 仓库展示和接受协作的是 `main` 分支中的项目源码；Pages 访问者收到的是工作流构建并部署的静态 artifact。`out/` 已被 Git 忽略，不会与源码一起提交。
 
 工作流会注入：
 

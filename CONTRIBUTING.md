@@ -1,6 +1,6 @@
 # 参与共建
 
-子比主题开发文档采用公开仓库协作。文档结论以可复核的主题、子主题或插件源码为依据，Issue 用来追踪问题，Discussion 用来讨论方案，Pull Request 用来合并可检查的修改。整体页面组织参考 [new-api-docs-v1](https://github.com/QuantumNous/new-api-docs-v1) 的 Fumadocs 项目结构。
+子比主题开发文档采用公开仓库协作。文档结论以可复核的主题、子主题或插件源码为依据，Issue 用来追踪问题，Discussion 用来讨论方案，Pull Request 用来合并可检查的修改。
 
 ## 从哪里开始
 

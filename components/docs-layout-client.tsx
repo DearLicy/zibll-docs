@@ -26,7 +26,7 @@ export function DocsLayoutClient({
       }}
     >
       {children}
-      <SiteFooter locale={locale} />
+      <SiteFooter locale={locale} className="col-start-3 row-start-4" />
     </DocsLayout>
   );
 }

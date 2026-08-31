@@ -1,6 +1,7 @@
 import { localePath, type Locale } from '@/lib/i18n';
 import { projectConfig } from '@/lib/project-config';
 import { siteSettings } from '@/lib/static-config';
+import { cn } from '@/lib/utils';
 import { ExternalLink, Github, Handshake, MessageCircle } from 'lucide-react';
 import Link from 'next/link';
 
@@ -219,12 +220,23 @@ function FooterSection({
   );
 }
 
-export function SiteFooter({ locale = 'zh' }: { locale?: Locale }) {
+export function SiteFooter({
+  locale = 'zh',
+  className,
+}: {
+  locale?: Locale;
+  className?: string;
+}) {
   const copy = buildCopy(locale);
   const sections = Object.values(copy.sections);
 
   return (
-    <footer className="border-fd-border bg-fd-card/30 mt-auto border-t backdrop-blur-sm">
+    <footer
+      className={cn(
+        'border-fd-border bg-fd-card/30 mt-auto border-t backdrop-blur-sm',
+        className,
+      )}
+    >
       <div className="mx-auto max-w-[1400px] px-6 py-12 lg:px-8">
         <div className="grid grid-cols-2 gap-x-8 gap-y-10 pb-10 md:grid-cols-4 lg:gap-x-12">
           {sections.map((section) => (

@@ -4,7 +4,7 @@ description: 说明子比主题开发文档的仓库、Issue、Discussions、Pul
 icon: Github
 ---
 
-本站的 GitHub 仓库不只是源码下载地址，也是文档纠错、源码核对、功能讨论、版本追踪和工具发布的公开社区。整体信息架构参考 [New API 文档仓库](https://github.com/QuantumNous/new-api-docs-v1)：文档负责沉淀结论，Issue 负责追踪问题，Discussion 负责交流方案，Pull Request 负责合并可复核的修改。
+本站的 GitHub 仓库不只是源码下载地址，也是文档纠错、源码核对、功能讨论、版本追踪和工具发布的公开社区。文档负责沉淀结论，Issue 负责追踪问题，Discussion 负责交流方案，Pull Request 负责合并可复核的修改。
 
 ## 社区入口
 
@@ -76,6 +76,8 @@ Pages 不保存反馈内容，Worker 也不保存长期业务数据。未配置 
 ## Pages 发布
 
 `.github/workflows/pages.yml` 使用 GitHub 官方 Pages artifact 流程：
+
+`main` 分支只保存可编辑的项目源码，`out/` 不进入 Git。发布时由工作流从当前源码重新构建静态文件，再将编译结果上传为 Pages artifact；GitHub 仓库与 Pages 站点不会混用同一份内容目录。
 
 1. `actions/configure-pages` 计算仓库项目路径和公共 origin。
 2. Fumadocs 生成 source，Next.js 导出 `out/`。

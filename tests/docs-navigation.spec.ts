@@ -42,7 +42,21 @@ test('direct docs entry renders the complete static navigation', async ({
   await expect(
     page.getByText('这篇文档对您有帮助吗？', { exact: true }),
   ).toBeVisible();
-  await expect(page.locator('#nd-docs-layout footer')).toBeVisible();
+  const docsPage = page.locator('#nd-page');
+  const docsFooter = page.locator('#nd-docs-layout > footer');
+  await expect(docsFooter).toBeVisible();
+  expect(
+    await docsFooter.evaluate((footer, pageSelector) => {
+      const docsPage = document.querySelector(pageSelector);
+      if (!docsPage) return false;
+      const pageBox = docsPage.getBoundingClientRect();
+      const footerBox = footer.getBoundingClientRect();
+      return footerBox.top >= pageBox.bottom - 1;
+    }, '#nd-page'),
+  ).toBe(true);
+  await expect(docsPage.getByRole('heading', { level: 1 })).toContainText(
+    '使用指南',
+  );
 });
 
 test('docs navigation never calls removed runtime APIs', async ({ page }) => {
