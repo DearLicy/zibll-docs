@@ -23,7 +23,7 @@ jobs:
 
       - name: Validate request and update data
         id: validate
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           ISSUE_BODY: ${{ github.event.issue.body }}
         with:
@@ -120,7 +120,7 @@ jobs:
 
       - name: Report result
         if: always() && steps.validate.outputs.valid == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           PULL_REQUEST_URL: ${{ steps.pull-request.outputs.pull-request-url }}
         with:
